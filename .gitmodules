@@ -1,0 +1,9 @@
+[submodule "third_party/glfw"]
+	path = third_party/glfw
+	url = https://github.com/glfw/glfw
+[submodule "third_party/mach-glfw"]
+	path = third_party/mach-glfw
+	url = https://github.com/hexops/mach-glfw
+[submodule "third_party/sokol-zig"]
+	path = third_party/sokol-zig
+	url = https://github.com/floooh/sokol-zig
