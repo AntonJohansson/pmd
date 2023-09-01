@@ -1,8 +1,14 @@
 const std = @import("std");
+const sokol = @import("third_party/sokol-zig/build.zig");
 
 pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    const sokol_build = sokol.buildSokol(b, target, optimize, .{.enable_wayland = true, .enable_x11 = false}, "third_party/sokol-zig/");
+    const sokol_module = b.addModule("sokol", .{
+        .source_file = .{.path = "third_party/sokol-zig/src/sokol/sokol.zig"},
+    });
 
     //
     // lib
@@ -14,7 +20,9 @@ pub fn build(b: *std.build.Builder) void {
         .target = target,
         .optimize = optimize,
     });
-    libgame.linkLibC();
+    // TODO: Remove when renderer is moved to separate library
+    libgame.addModule("sokol", sokol_module);
+    libgame.linkLibrary(sokol_build);
     _ = b.installArtifact(libgame);
 
     //
@@ -28,16 +36,17 @@ pub fn build(b: *std.build.Builder) void {
         .optimize = optimize,
     });
     client.linkLibC();
-    client.linkSystemLibrary("raylib");
+    client.addModule("sokol", sokol_module);
+    client.linkLibrary(sokol_build);
     b.installArtifact(client);
 
     // Use mach-glfw
-    //const glfw_dep = b.dependency("mach_glfw", .{
-    //    .target = client.target,
-    //    .optimize = client.optimize,
-    //});
-    //client.addModule("mach-glfw", glfw_dep.module("mach-glfw"));
-    //try @import("mach_glfw").link(b, client);
+    const glfw_dep = b.dependency("mach_glfw", .{
+        .target = client.target,
+        .optimize = client.optimize,
+    });
+    client.addModule("mach-glfw", glfw_dep.module("mach-glfw"));
+    try @import("mach_glfw").link(b, client);
 
     const run_client_cmd = b.addRunArtifact(client);
     run_client_cmd.step.dependOn(b.getInstallStep());
@@ -58,7 +67,6 @@ pub fn build(b: *std.build.Builder) void {
         .optimize = optimize,
     });
     server.linkLibC();
-    server.linkSystemLibrary("raylib");
     b.installArtifact(server);
 
     const run_server_cmd = b.addRunArtifact(server);

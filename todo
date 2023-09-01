@@ -1,0 +1,22 @@
+- [x] Simulate bad network
+- [x] Repeat connection packets until succeeed
+- [ ] Enforce max packets size (read size)
+- [ ] Fragmentation of large packets
+    - [ ] Break up large packets
+    - [ ] Reassemble packets using sequence number and uuid
+- [ ] Verify packets with crc32
+- [ ] Add clean disconnect packet
+- [ ] Make ACKable packets
+    - [ ] Attach packets to output until ACK is received for that packet
+    - This is useful to communicate non-relatime information from client -> server,
+      that needs to be correct (scoreboard etc.)
+- [ ] Batch packets
+
+- [ ] Movement
+    - [ ] Separate air max speed
+    - [ ]
+
+- [x] Set cl variables without separate function for each var (set command)
+- [ ] Synced cl variables
+
+- [ ] Draw multiple players

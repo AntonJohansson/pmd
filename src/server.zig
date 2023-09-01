@@ -26,7 +26,7 @@ const InputType = common.InputType;
 
 const logging = @import("logging.zig");
 var log: logging.Log = .{
-    .mirror_to_stdio = false,
+    .mirror_to_stdio = true,
 };
 
 const PeerData = struct {
@@ -116,38 +116,6 @@ pub fn main() !void {
             }
 
             //
-            // Disconnected timedout peers
-            //
-            {
-                const s = perf_stats.get(.Timeout).startTime();
-                defer s.endTime();
-
-                //for (peers) |*p| {
-                //    if (p.state == .Disconnected)
-                //        continue;
-                //    if (p.timeout < std.time.ns_per_s / fps) {
-                //        p.output_batch.pushPacket(packet.ConnectionTimeout{});
-                //        {
-                //            var entry = p.log.push();
-                //            entry.batch.copy(p.output_batch);
-                //            entry.repeat = common.connect_packet_repeat_count;
-                //            entry.address = p.address;
-                //        }
-                //        for (p.ids.slice()) |id| {
-                //            const index = game.findIndexById(memory.players.slice(), id);
-                //            if (index == null)
-                //                _ = memory.players.swapRemove(index.?);
-                //        }
-                //        std.log.info("{} disconnected (timeout)", .{p.address});
-                //        p.clear();
-                //        num_peers -= 1;
-                //    } else {
-                //        p.timeout -= std.time.ns_per_s / fps;
-                //    }
-                //}
-            }
-
-            //
             // Read network
             //
             var events: []net.Event = undefined;
@@ -161,12 +129,24 @@ pub fn main() !void {
             for (events) |event| {
                 switch (event) {
                     .peer_connected => |e| {
+                        log.info("Peer {} connected", .{e.peer_index});
                         peers[e.peer_index].clear();
                         net.pushMessage(e.peer_index, packet.Joined {
                             .tick = tick,
                         });
                     },
-                    .peer_disconnected => {
+                    .peer_disconnected => |e| {
+                        log.info("Peer {} disconneted", .{e.peer_index});
+                        for (peers[e.peer_index].ids.slice()) |id| {
+                            const index = common.findIndexById(memory.players.slice(), id);
+                            if (index != null)
+                                _ = memory.players.swapRemove(index.?);
+                            // TODO: reliable
+                            net.pushMessageToAllPeers(packet.PeerDisconnected {
+                                .id = id,
+                            });
+                        }
+                        peers[e.peer_index].clear();
                     },
                     .message_received => |e| {
                         switch (e.kind) {
@@ -194,6 +174,8 @@ pub fn main() !void {
                                 player.dir = v3 {.x = 1, .y = 0, .z = 0};
                                 player.yaw = 0;
                                 player.pitch = 0;
+
+                                log.info("A new player joined the game: {}", .{id.*});
 
                                 net.pushMessage(e.peer_index, packet.PlayerJoinResponse{
                                     .player = player.*,

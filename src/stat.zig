@@ -51,6 +51,11 @@ pub fn AllStatData(comptime T: type) type {
 
         comptime enum_type: type = T,
 
+        pub fn indexToEnum(self: *@This(), index: usize) T {
+            _ = self;
+            return @enumFromInt(index);
+        }
+
         pub fn get(self: *@This(), label: T) *StatData {
             return &self.stat_data[@intFromEnum(label)];
         }

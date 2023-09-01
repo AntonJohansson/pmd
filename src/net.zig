@@ -12,7 +12,7 @@ var log: logging.Log = .{
 };
 
 pub const fragment_size = 1024;
-const message_recieve_buffer_len = 128;
+const message_receive_buffer_len = 128;
 
 pub var net_stats : stat.AllStatData(enum(usize) {
     NetIn,
@@ -246,7 +246,6 @@ const Peer = struct {
     last_outgoing_acked_message_id: u16 = 0,
 
     ack_bits: u32 = 0,
-
 };
 
 pub const max_peer_count = 255;
@@ -271,7 +270,10 @@ fn findAvailablePeerIndex() PeerIndex {
     unreachable;
 }
 
-var input_buffer: bb.ByteBuffer(1024) = .{};
+// TODO(anjo): We can make a better assumption as to the
+// size of this buffer from connected_peers*sizeof(expected_traffic)*safety_factor.
+// and push it via the temporary_allocator
+var input_buffer: bb.ByteBuffer(2048) = .{};
 
 pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
     var total_bytes_read: u64 = 0;
@@ -290,8 +292,12 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
         input_buffer.top += @intCast(nbytes);
     }
 
+    //std.log.info("input buffer usage {} / {} bytes ({d}%)", .{input_buffer.size(), input_buffer.data.len, 100.0*@as(f32, @floatFromInt(input_buffer.size())) / @as(f32, @floatFromInt(input_buffer.data.len))});
+
     var peer = &peers.buffer[peer_index];
-    //peer.received_messages.clear();
+
+    var num_events: usize = 0;
+    var events = temp_allocator.alloc(Event, 128) catch unreachable;
 
     // TODO(anjo): This might be candidate for threading if there
     // are enough entries.
@@ -303,8 +309,32 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
             const batch_header = byte_view.pop(headers.BatchHeader);
             std.debug.assert(batch_header.num_packets > 0);
 
-            //if (batch_header.num_packets != 1 or !byte_view.hasData())
-            //    continue;
+            //
+            // Here we make the assumption that
+            //
+            //  sizeof(input_buffer) > max_packet_size
+            //
+            // and most of the time, a single packet fits within
+            // a single ReceivedData entry.
+            //
+            // The uncommon case should only occur when a packet is cut of
+            // by the end of the input buffer, meaning we should be able
+            // to read from the socket again this frame and complete the
+            // packet.
+            //
+            // Either way we want to use the temporary allocator to
+            // get a buffer that'll fit the packet exactcly and assemble
+            // it there next frame or this frame. Note, we can assume
+            // that the remaining data of a fragmeneted packet can be
+            // uniquely identified via it's size (i.e. we assume we won't
+            // have partial packets for the same peer with the same data
+            // remaining).
+            //
+            if (batch_header.size > byte_view.remainingSpace()) {
+                log.info("We received a partial packet", .{});
+                log.info("dropping", .{});
+                break;
+            }
 
             // TODO(anjo): Verify packet here
 
@@ -318,11 +348,6 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
                 const header = byte_view.pop(headers.Header);
                 const size = packet_meta.getMessageSize(header.kind);
 
-                if (!byte_view.hasSpaceFor(@intCast(size))) {
-                    log.info("We received a partial packet, what do!", .{});
-                    // TODO(anjo): what do
-                }
-
                 if (!header.reliable or peer.received_messages.get(header.id) == null) {
                     peer.received_messages.set(header.id, ReceivedMessageInfo {
                         .kind = header.kind,
@@ -335,9 +360,6 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
     }
 
     var has_sent_challenge = false;
-
-    var num_events: usize = 0;
-    var events = temp_allocator.alloc(Event, 128) catch unreachable;
 
     //
     // We deal with connections here, no need to force
@@ -374,6 +396,9 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
                             };
                             num_events += 1;
                             log.info("connection successful", .{});
+
+                            pushMessage(peer_index, packet.PlayerJoinRequest{});
+                            log.info("Sening join request", .{});
                         }
                     },
                     .ConnectionDenied => {
@@ -442,6 +467,28 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
     var total_bytes_read: u64 = 0;
     var received_data: std.BoundedArray(ReceivedData, 128) = .{};
     input_buffer.clear();
+    var num_events: usize = 0;
+    var events = temp_allocator.alloc(Event, 128) catch unreachable;
+
+    // Timeout disconnected peers
+    const tickrate = 60; // TODO: move somewhere
+    for (&peers.buffer, 0..) |*peer, i| {
+        if (peer.state == .Disconnected)
+            continue;
+        if (peer.timeout < std.time.ns_per_s / tickrate) {
+            pushMessage(@intCast(i), packet.ConnectionTimeout{});
+            events[num_events] = Event {
+                .peer_disconnected = .{
+                    .peer_index = @intCast(i),
+                },
+            };
+            num_events += 1;
+            peer.state = .Disconnected;
+        } else {
+            peer.timeout -= std.time.ns_per_s / tickrate;
+        }
+    }
+
     while (true) {
         const nbytes = os.recvfrom(fd, input_buffer.remainingData(), 0, @ptrCast(&their_sa), &sl) catch 0;
         if (nbytes == 0)
@@ -473,6 +520,8 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
         };
 
         log.info("received {} bytes from ({}) {}", .{nbytes, peer_index, address});
+        // Reset peer_timeout since we received data from the peer.
+        peers.buffer[peer_index].timeout = peer_timeout;
 
         received_data.append(ReceivedData {
             .peer_index = peer_index,
@@ -536,9 +585,6 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
             }
         }
     }
-
-    var num_events: usize = 0;
-    var events = temp_allocator.alloc(Event, 128) catch unreachable;
 
     for (peers_with_data.slice()) |index| {
         const peer = &peers.buffer[index];
@@ -668,7 +714,7 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
     if (right_wrap_distance(peer.last_outgoing_acked_message_id, peer.current_message_id, peer.messages_in_flight.data.len) > 0) {
         log.info("checking if we can add messages", .{});
         var id = peer.last_outgoing_acked_message_id;
-        while (id != peer.current_message_id and id != (peer.last_outgoing_acked_message_id + message_recieve_buffer_len-1) % peer.messages_in_flight.data.len) : (id += 1) {
+        while (id != peer.current_message_id and id != (peer.last_outgoing_acked_message_id + message_receive_buffer_len-1) % peer.messages_in_flight.data.len) : (id += 1) {
             log.info("  checking id {}", .{id});
 
             const index: u16 = id % @as(u16, @intCast(peer.messages_in_flight.data.len));
@@ -773,6 +819,7 @@ pub fn ack(peer: *Peer, packet_id: u16) void {
 }
 
 fn right_wrap_distance(a: u16, b: u16, len: u16) u16 {
+    // TODO: handle overflow
     return (b + len - a) % len;
 }
 

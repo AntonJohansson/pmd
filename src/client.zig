@@ -16,7 +16,7 @@ const Memory = common.Memory;
 const Player = common.Player;
 const PlayerId = common.PlayerId;
 const Input = common.Input;
-const InputType = common.InputType;
+const InputName = common.InputName;
 
 const camera = @import("camera.zig");
 
@@ -45,31 +45,77 @@ var log: logging.Log = .{
     .mirror_to_stdio = true,
 };
 
-const raylib = @cImport({
-    @cInclude("raylib.h");
-});
+const glfw = @import("mach-glfw");
+const Key = glfw.Key;
+const MouseButton = glfw.MouseButton;
 
-const rlgl = @cImport({
-    @cInclude("rlgl.h");
-});
+// TODO: rename "TriggerType"?
+const TriggerType = enum {
+    rising_edge,
+    falling_edge,
+    rising_or_falling_edge,
+    state,
+    toggle,
+};
+
+const MouseScrollDir = enum {
+    scroll_up,
+    scroll_down,
+};
+
+const MouseScroll = struct {
+    dir: MouseScrollDir,
+};
+
+const InputType = union(enum) {
+    unmapped: bool,
+    key: Key,
+    mouse_button: MouseButton,
+    mouse_scroll: MouseScroll,
+};
+
+const InputState = struct {
+    trigger: TriggerType = .state,
+    input_type: InputType = .{.unmapped = true},
+    last_action: glfw.Action = .release,
+};
 
 const InputMap = struct {
-    const len = @typeInfo(InputType).Enum.fields.len;
-    map: [len]c_int = [_]c_int{raylib.KEY_NULL} ** len,
+    const len = @typeInfo(InputName).Enum.fields.len;
+    map: [len]InputState = [_]InputState{.{}} ** len,
 
     const Self = @This();
-    fn set(self: *Self, input_type: InputType, key: c_int) void {
-        self.map[@intFromEnum(input_type)] = key;
+
+    fn map_key(self: *Self, input_name: InputName, trigger: TriggerType, key: Key) void {
+        self.map[@intFromEnum(input_name)] = InputState {
+            .trigger = trigger,
+            .input_type = .{.key = key},
+        };
+    }
+
+    fn map_mouse_button(self: *Self, input_name: InputName, input_type: TriggerType, mouse_button: MouseButton) void {
+        self.map[@intFromEnum(input_name)] = InputState {
+            .trigger = input_type,
+            .input_type = .{.mouse_button = mouse_button},
+        };
+    }
+
+    fn map_mouse_scroll(self: *Self, input_name: InputName, dir: MouseScrollDir) void {
+        self.map[@intFromEnum(input_name)] = InputState {
+            .trigger = .state,
+            .input_type = .{.mouse_scroll = .{.dir = dir}},
+        };
     }
 };
 
 const LocalPlayer = struct {
     input_map: InputMap,
     input: Input = undefined,
+
+    // TODO: We only need to allocate this when on network
     input_buffer: bb.CircularBuffer(Input, 256) = .{},
+
     id: ?PlayerId = null,
-    debug_auth_player: ?Player = null,
-    debug_auth_player_correct: ?Player = null,
 };
 
 fn findLocalPlayerById(local_players: []LocalPlayer, id: PlayerId) ?*LocalPlayer {
@@ -89,24 +135,73 @@ var perf_stats : statistics.AllStatData(enum(usize) {
     ModuleReloadCheck,
 }) = .{};
 
-var time_stats: statistics.AllStatData(enum(usize) {
-    Ping,
-    Frametime,
-}) = .{};
+var memory: Memory = .{};
+
+var timer: std.time.Timer = undefined;
+var key_repeat_timer: std.time.Timer = undefined;
+var last_key: Key = .unknown;
+var last_char: u8 = 0;
+var repeat = false;
+
+var capture_text = false;
+fn charCallback(window: glfw.Window, codepoint: u21) void {
+    _ = window;
+    if (!capture_text)
+        return;
+
+    // codepoint -> utf8 string
+    //size_t count = 0;
+    //if (codepoint < 0x80)
+    //    s[count++] = (char) codepoint;
+    //else if (codepoint < 0x800)
+    //{
+    //    s[count++] = (codepoint >> 6) | 0xc0;
+    //    s[count++] = (codepoint & 0x3f) | 0x80;
+    //}
+    //else if (codepoint < 0x10000)
+    //{
+    //    s[count++] = (codepoint >> 12) | 0xe0;
+    //    s[count++] = ((codepoint >> 6) & 0x3f) | 0x80;
+    //    s[count++] = (codepoint & 0x3f) | 0x80;
+    //}
+    //else if (codepoint < 0x110000)
+    //{
+    //    s[count++] = (codepoint >> 18) | 0xf0;
+    //    s[count++] = ((codepoint >> 12) & 0x3f) | 0x80;
+    //    s[count++] = ((codepoint >> 6) & 0x3f) | 0x80;
+    //    s[count++] = (codepoint & 0x3f) | 0x80;
+    //}
+
+    // We don't care about multibyte codepoints, our font rendering
+    // doesn't support it atm, so...
+    if (codepoint >= 0x80)
+        return;
+
+    last_char = @truncate(codepoint);
+    repeat = false;
+    key_repeat_timer.reset();
+    if (!(last_char >= 32 and last_char <= 126) or last_char == '`')
+        return;
+
+    if (memory.console_input.len < memory.console_input.buffer.len-1) {
+        memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
+        memory.console_input.buffer[memory.console_input.len] = 0;
+        memory.console_input_index += 1;
+    }
+}
+
+var scroll_delta: f32 = 0.0;
+fn scrollCallback(window: glfw.Window, dx: f64, dy: f64) void {
+    _ = window;
+    _ = dx;
+    scroll_delta = @floatCast(dy);
+}
 
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa = general_purpose_allocator.allocator();
 
     net.temp_allocator = gpa;
-
-    var module = try code_module.CodeModule(struct {
-        update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input) void,
-        draw: *fn (vars: *const Vars, memory: *Memory, b: *draw.Buffer) void,
-    }).init(gpa, "zig-out/lib", "libgame");
-
-    try module.open(gpa,);
-    defer module.close();
 
     //
     // Connect to server
@@ -118,7 +213,6 @@ pub fn main() !void {
     //
     // Simulation state
     //
-
     const crand = std.crypto.random;
 
     const fps = 60;
@@ -135,59 +229,77 @@ pub fn main() !void {
     net.pushMessage(server_index, packet.ConnectionRequest{
         .client_salt = crand.int(u64)
     });
-    //
-    // Raylib init
-    //
-    raylib.InitWindow(800, 600, "game");
-    raylib.SetWindowState(raylib.FLAG_WINDOW_RESIZABLE);
-    defer raylib.CloseWindow();
 
-    raylib.DisableCursor();
-    defer raylib.EnableCursor();
+    //
+    // GLFW init
+    //
+    if (!glfw.init(.{})) {
+        std.log.err("Failed to initialize GLFW: {?s}", .{glfw.getErrorString()});
+        std.process.exit(1);
+    }
+    defer glfw.terminate();
 
+    const hints = glfw.Window.Hints {
+        .context_version_major = 3,
+        .context_version_minor = 3,
+        .opengl_forward_compat = true,
+        .opengl_profile = .opengl_core_profile,
+    };
+
+    const window = glfw.Window.create(800, 600, "game", null, null, hints) orelse {
+        std.log.err("Failed to open window: {?s}", .{glfw.getErrorString()});
+        std.process.exit(1);
+    };
+    defer window.destroy();
+    glfw.makeContextCurrent(window);
+    glfw.swapInterval(1);
+    window.setInputMode(.cursor, .disabled);
+    window.setCharCallback(charCallback);
+    window.setScrollCallback(scrollCallback);
+
+    // initialize renderer
     draw.init();
     defer draw.deinit();
 
     //
-    // Render state
+    // Modules
     //
+    var module = try code_module.CodeModule(struct {
+        update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input) void,
+        draw: *fn (vars: *const Vars, memory: *Memory, b: *draw.Buffer, player_id: common.PlayerId, input: *const Input) void,
+    }).init(gpa, "zig-out/lib", "libgame");
 
-    const default_shader = raylib.LoadShader("res/default.vert", "res/default.frag");
-    defer raylib.UnloadShader(default_shader);
-
-    const grass_shader = raylib.LoadShader("res/grass.vert", "res/grass.frag");
-    defer raylib.UnloadShader(grass_shader);
-    grass_shader.locs[raylib.SHADER_LOC_MATRIX_MODEL] = raylib.GetShaderLocationAttrib(grass_shader, "matModel");
-
-    //const mesh = raylib.GenMeshPoly(3, 0.1);
-    var material = raylib.LoadMaterialDefault();
-    material.shader = grass_shader;
+    try module.open(gpa,);
+    defer module.close();
 
     //
     // Input state
     //
 
     var input_map0 = InputMap{};
-    input_map0.set(.MoveLeft,    raylib.KEY_A);
-    input_map0.set(.MoveRight,   raylib.KEY_D);
-    input_map0.set(.MoveForward, raylib.KEY_W);
-    input_map0.set(.MoveBack,    raylib.KEY_S);
-    input_map0.set(.MoveUp,      raylib.KEY_LEFT_SHIFT);
-    input_map0.set(.MoveDown,    raylib.KEY_LEFT_CONTROL);
-    input_map0.set(.Jump,        raylib.KEY_SPACE);
-    input_map0.set(.ResetCamera, raylib.KEY_R);
+    input_map0.map_key(.MoveForward,   .state,       .w);
+    input_map0.map_key(.MoveLeft,      .state,       .a);
+    input_map0.map_key(.MoveBack,      .state,       .s);
+    input_map0.map_key(.MoveRight,     .state,       .d);
+    //input_map0.map_key(.Jump,          .rising_edge, .space);
+    input_map0.map_mouse_scroll(.Jump, .scroll_down);
+    input_map0.map_key(.Crouch,        .state,       .left_control);
+    input_map0.map_key(.Sprint,        .state,       .left_shift);
+    input_map0.map_key(.ResetCamera,   .rising_edge, .r);
+    input_map0.map_key(.Console,       .toggle,      .grave_accent);
+    input_map0.map_key(.Enter,         .rising_edge, .enter);
+    input_map0.map_key(.EnableCursor,  .toggle,      .escape);
+    input_map0.map_key(.Editor,        .toggle,      .x);
+    input_map0.map_key(.Save,          .rising_edge, .o);
+    input_map0.map_key(.Load,          .rising_edge, .p);
+    input_map0.map_mouse_button(.MoveUp,      .state,       .five);
+    input_map0.map_mouse_button(.MoveDown,    .state,       .four);
+    input_map0.map_mouse_button(.Interact,    .state,       .left);
+    input_map0.map_mouse_button(.AltInteract, .rising_edge, .right);
 
     var input_map1 = InputMap{};
-    input_map1.set(.MoveLeft,  raylib.KEY_J);
-    input_map1.set(.MoveRight, raylib.KEY_L);
-    input_map1.set(.MoveUp,    raylib.KEY_I);
-    input_map1.set(.MoveDown,  raylib.KEY_K);
 
-    var memory: Memory = .{
-        .vel_graph = .{
-            .data = try gpa.alloc(f32, 2*fps),
-        },
-    };
+    memory.vel_graph.data = try gpa.alloc(f32, 2*fps);
 
     var draw_buffer: draw.Buffer = .{};
 
@@ -196,11 +308,24 @@ pub fn main() !void {
         .{.input_map = input_map1},
     };
 
-    var timer = try std.time.Timer.start();
-    var key_repeat_timer = try std.time.Timer.start();
-    var last_key: c_int = raylib.KEY_NULL;
-    var last_char: c_int = raylib.KEY_NULL;
-    var repeat = false;
+    // add a player so we can play locally
+    // TODO: don't perform attempts to read/write net
+    // if we're not connected.
+    {
+        const player = try memory.players.addOne();
+        const id = common.newPlayerId();
+        local_players[0].id = id;
+        player.id = id;
+        player.pos = v3 {.x = 0, .y = 0, .z = 0};
+        player.vel = v3 {.x = 0, .y = 0, .z = 0};
+        player.dir = v3 {.x = 1, .y = 0, .z = 0};
+        player.yaw = 0;
+        player.pitch = 0;
+    }
+
+    timer = try std.time.Timer.start();
+    key_repeat_timer = try std.time.Timer.start();
+
     var frame_start_time: u64 = 0;
     var accumulator: u64 = 0;
 
@@ -263,6 +388,8 @@ pub fn main() !void {
 
     @memset(&memory.console_input.buffer, 0);
 
+    var old_mouse_pos: v2 = .{.x = 0.0, .y = 0.0};
+
     var running = true;
     while (running) {
         const frame_end_time = timer.read();
@@ -270,16 +397,17 @@ pub fn main() !void {
         frame_start_time = frame_end_time;
         accumulator += frame_time;
 
-
-
         while (accumulator >= desired_frame_time) {
             if (accumulator >= desired_frame_time) {
                 accumulator -= desired_frame_time;
             }
 
-            const frame_stat = time_stats.get(.Frametime).startTime();
+            scroll_delta = 0.0;
+            glfw.pollEvents();
 
-            if (raylib.WindowShouldClose())
+            const frame_stat = memory.time_stats.get(.Frametime).startTime();
+
+            if (window.shouldClose())
                 running = false;
 
             {
@@ -290,8 +418,10 @@ pub fn main() !void {
                 }
             }
 
-            const width = raylib.GetScreenWidth();
-            const height = raylib.GetScreenHeight();
+            const size = window.getSize();
+            const width = size.width;
+            const height = size.height;
+            config.vars.aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
 
             //
             // Read network
@@ -312,6 +442,10 @@ pub fn main() !void {
             for (events) |event| {
                 switch (event) {
                     .peer_connected => {
+                        // Clear local players and players in game when joining a server
+                        for (&local_players) |*l|
+                            l.id = null;
+                        memory.players.len = 0;
                     },
                     .peer_disconnected => {
                     },
@@ -319,7 +453,8 @@ pub fn main() !void {
                         switch (e.kind) {
                             .Command => {
                                 const message: *align(1) packet.Command = @ptrCast(e.data);
-                                std.log.info("Running command: {s}", .{message.data[0..message.len]});
+
+                                log.info("Running command: {s}", .{message.data[0..message.len]});
                                 command.dodododododododo(null, message.data[0..message.len]);
                             },
                             .ConnectionTimeout => {
@@ -350,21 +485,27 @@ pub fn main() !void {
                                         break;
                                     }
                                 }
+
+                                log.info("joined, we have id {}", .{player.id});
                             },
                             .PeerJoined => {
                                 const message: *align(1) packet.PeerJoined = @ptrCast(e.data);
                                 const player = try memory.players.addOne();
                                 player.* = message.player;
-                                log.info("peer connected", .{});
+                                log.info("Player connected {}", .{player.id});
+                            },
+                            .PeerDisconnected => {
+                                const message: *align(1) packet.PeerDisconnected = @ptrCast(e.data);
+                                const index = common.findIndexById(memory.players.slice(), message.id);
+                                if (index != null)
+                                    _ = memory.players.swapRemove(index.?);
+                                log.info("Player {} disconnected", .{message.id});
                             },
                             .PlayerUpdateAuth => {
                                 const message: *align(1) packet.PlayerUpdateAuth = @ptrCast(e.data);
-
                                 const local_player = findLocalPlayerById(&local_players, message.player.id);
                                 if (local_player != null) {
                                     const player = common.findPlayerById(&memory.players.buffer, message.player.id);
-
-                                    local_player.?.debug_auth_player = message.player;
 
                                     //log.info("  checking auth", .{});
                                     var auth_player = message.player;
@@ -372,14 +513,10 @@ pub fn main() !void {
                                     var auth_memory = memory;
                                     while (offset <= 0) : (offset += 1) {
                                         const old_input = local_player.?.input_buffer.peekRelative(offset);
-                                        //log.info("    applying input for tick {}:", .{@intCast(i64, tick)+offset});
-                                        //log.info("      {any}", .{old_input.active});
                                         module.function_table.update(&config.vars, &auth_memory, &auth_player, &old_input);
                                     }
 
                                     if (!v3eql(auth_player.pos, player.?.pos)) {
-                                        local_player.?.debug_auth_player_correct = auth_player;
-
                                         log.info("  auth for tick {}:\n  {}\n  {}\n  {}", .{
                                             message.tick,
                                             message.player.pos,
@@ -394,11 +531,11 @@ pub fn main() !void {
                             },
                             .ServerPlayerUpdate => {
                                 const message: *align(1) packet.ServerPlayerUpdate = @ptrCast(e.data);
-                                for (message.players[0..message.num_players], 0..) |player,i| {
+                                for (message.players[0..message.num_players]) |player| {
                                     if (findLocalPlayerById(&local_players, player.id) != null)
                                         continue;
-                                    memory.players.len = @intCast(message.num_players);
-                                    memory.players.buffer[i] = player;
+                                    const current_player = common.findPlayerById(&memory.players.buffer, player.id) orelse try memory.players.addOne();
+                                    current_player.* = player;
                                 }
                             },
                             else => {
@@ -414,67 +551,6 @@ pub fn main() !void {
             // Handle client input
             //
             {
-                const s = perf_stats.get(.Update).startTime();
-                defer s.endTime();
-
-                if (raylib.IsKeyPressed(raylib.KEY_GRAVE))
-                    memory.show_console = !memory.show_console;
-
-                if (memory.show_console) {
-                    if (raylib.IsKeyDown(last_key) and (!repeat and key_repeat_timer.read() >= 500*std.time.us_per_s or
-                                                         repeat and key_repeat_timer.read() >= 50*std.time.us_per_s)) {
-                        key_repeat_timer.reset();
-                        repeat = true;
-                    }
-                    if (memory.console_input_index > 0 and (raylib.IsKeyPressed(raylib.KEY_LEFT) or last_key == raylib.KEY_LEFT and repeat)) {
-                        memory.console_input_index -= 1;
-                    }
-                    if (memory.console_input_index < memory.console_input.len and (raylib.IsKeyPressed(raylib.KEY_RIGHT) or last_key == raylib.KEY_RIGHT and repeat)) {
-                        memory.console_input_index += 1;
-                    }
-                    if (memory.console_input_index > 0 and (raylib.IsKeyPressed(raylib.KEY_BACKSPACE) or last_key == raylib.KEY_BACKSPACE and repeat)) {
-                        _ = memory.console_input.orderedRemove(memory.console_input_index-1);
-                        memory.console_input.buffer[memory.console_input.len] = 0;
-                        memory.console_input_index -= 1;
-                    }
-                    if (memory.console_input.len < memory.console_input.buffer.len-1 and (last_char >= 32 and last_char <= 126 and repeat)) {
-                        memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
-                        memory.console_input.buffer[memory.console_input.len] = 0;
-                        memory.console_input_index += 1;
-                    }
-                    while (true) {
-                        const char = raylib.GetCharPressed();
-                        const key = raylib.GetKeyPressed();
-                        if (key == raylib.KEY_NULL)
-                            break;
-                        last_key = key;
-                        last_char = char;
-                        repeat = false;
-                        key_repeat_timer.reset();
-                        if (!(last_char >= 32 and last_char <= 126) or last_char == raylib.KEY_GRAVE)
-                            continue;
-
-                        if (memory.console_input.len < memory.console_input.buffer.len-1) {
-                            memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
-                            memory.console_input.buffer[memory.console_input.len] = 0;
-                            memory.console_input_index += 1;
-                        }
-                    }
-
-                    if (raylib.IsKeyPressed(raylib.KEY_ENTER)) {
-                        command.dodododododododo(server_index, memory.console_input.slice());
-                        std.log.info("Running command: {s}", .{memory.console_input.slice()});
-
-                        memory.console_input_index = 0;
-                        memory.console_input.len = 0;
-                        memory.console_input.buffer[0] = 0;
-                    }
-                } else {
-                    if (raylib.IsKeyPressed(raylib.KEY_ENTER)) {
-                        net.pushMessage(server_index, packet.PlayerJoinRequest{});
-                        net.pushReliableMessage(server_index, packet.Pong{.num = 0});
-                    }
-                }
 
                 //
                 // TODO(anjo): Here we need some type of mapping between input devices e.g. mouse+keyboard/controller
@@ -486,30 +562,114 @@ pub fn main() !void {
                 {
                     const lp = &local_players[0];
                     if (lp.id != null) {
-                        lp.input.clear();
-                        if (!memory.show_console) {
-                            for (lp.input_map.map, 0..) |key,i|
-                                if (raylib.IsKeyDown(key))
-                                    lp.input.set(@enumFromInt(i));
-                            // TODO(anjo): We have to dealy with mouse buttons separately here which is annoying
-                            if (raylib.IsMouseButtonDown(raylib.MOUSE_BUTTON_LEFT)) {
-                                lp.input.set(.Interact);
+                        //lp.input.clear();
+                        for (&lp.input_map.map, 0..) |*state,i| {
+
+                            const action: glfw.Action = switch (state.input_type) {
+                                InputType.key => |key| window.getKey(key),
+                                InputType.mouse_button => |mb| window.getMouseButton(mb),
+                                InputType.mouse_scroll => |ms| switch (ms.dir) {
+                                    .scroll_down => if (scroll_delta < 0.0) .press else .release,
+                                    .scroll_up   => if (scroll_delta > 0.0) .press else .release,
+                                },
+                                else => continue,
+                            };
+
+                            const input_name: InputName = @enumFromInt(i);
+                            switch (state.trigger) {
+                                .state => {
+                                    const active = action == .press;
+                                    lp.input.setto(input_name, active);
+                                },
+                                .rising_edge => {
+                                    const active = state.last_action == .release and action == .press;
+                                    lp.input.setto(input_name, active);
+                                },
+                                .falling_edge => {
+                                    const active = state.last_action == .press and action == .release;
+                                    lp.input.setto(input_name, active);
+                                },
+                                .rising_or_falling_edge => {
+                                    const active = state.last_action != action;
+                                    lp.input.setto(input_name, active);
+                                },
+                                .toggle => {
+                                    const active = state.last_action == .release and action == .press;
+                                    lp.input.setto(input_name, active != lp.input.isset(input_name));
+                                },
                             }
-                            // TODO(anjo): We have to dealy with mouse buttons separately here which is annoying
-                            lp.input.scroll = raylib.GetMouseWheelMove();
+                            state.last_action = action;
                         }
-                        const delta = raylib.GetMouseDelta();
+                        // TODO(anjo): We have to dealy with mouse buttons separately here which is annoying
+                        if (window.getMouseButton(.left) == .press) {
+                            lp.input.set(.Interact);
+                        }
+                        // TODO(anjo): We have to dealy with mouse buttons separately here which is annoying
+                        lp.input.scroll = scroll_delta;
+
+                        var delta: v2 = .{};
+                        {
+                            const pos = window.getCursorPos();
+                            delta.x = @as(f32, @floatCast(pos.xpos)) - old_mouse_pos.x;
+                            delta.y = @as(f32, @floatCast(pos.ypos)) - old_mouse_pos.y;
+                            old_mouse_pos.x = @floatCast(pos.xpos);
+                            old_mouse_pos.y = @floatCast(pos.ypos);
+                        }
+
                         lp.input.cursor_delta = .{.x = delta.x/@as(f32, @floatFromInt(width)), .y = delta.y/@as(f32, @floatFromInt(height))};
-                        lp.input_buffer.push(lp.input);
 
-                        net.pushMessage(server_index, packet.PlayerUpdate{
-                            .tick = tick,
-                            .id = lp.id.?,
-                            .input = lp.input,
-                        });
+                        if (!lp.input.isset(.Console)) {
+                            // push input state
 
-                        const player = common.findPlayerById(&memory.players.buffer, lp.id.?);
-                        module.function_table.update(&config.vars, &memory, player.?, &lp.input);
+                            lp.input_buffer.push(lp.input);
+
+                            net.pushMessage(server_index, packet.PlayerUpdate{
+                                .tick = tick,
+                                .id = lp.id.?,
+                                .input = lp.input,
+                            });
+
+                            const player = common.findPlayerById(&memory.players.buffer, lp.id.?);
+
+                            // run predictive move
+                            if (player != null)
+                                module.function_table.update(&config.vars, &memory, player.?, &lp.input);
+                        }
+                    }
+                }
+
+                memory.show_cursor = local_players[0].input.isset(.EnableCursor);
+                capture_text = local_players[0].input.isset(.Console);
+                if (local_players[0].input.isset(.Console)) {
+                    //if (window.getKey(last_key) == .down and (!repeat and key_repeat_timer.read() >= 500*std.time.us_per_s or
+                    //        repeat and key_repeat_timer.read() >= 50*std.time.us_per_s)) {
+                    //    key_repeat_timer.reset();
+                    //    repeat = true;
+                    //}
+                    if (memory.console_input_index > 0 and (window.getKey(.left) == .press or last_key == .left and repeat)) {
+                        memory.console_input_index -= 1;
+                    }
+                    if (memory.console_input_index < memory.console_input.len and (window.getKey(.right) == .press or last_key == .right and repeat)) {
+                        memory.console_input_index += 1;
+                    }
+                    if (memory.console_input_index > 0 and (window.getKey(.backspace) == .press or last_key == .backspace and repeat)) {
+                        _ = memory.console_input.orderedRemove(memory.console_input_index-1);
+                        memory.console_input.buffer[memory.console_input.len] = 0;
+                        memory.console_input_index -= 1;
+                    }
+                    if (memory.console_input.len < memory.console_input.buffer.len-1 and (last_char >= 32 and last_char <= 126 and repeat)) {
+                        memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
+                        memory.console_input.buffer[memory.console_input.len] = 0;
+                        memory.console_input_index += 1;
+                    }
+
+                    if (local_players[0].input.isset(.Enter)) {
+                        command.dodododododododo(server_index, memory.console_input.slice());
+                        std.log.info("Running command: {s}", .{memory.console_input.slice()});
+
+                        memory.console_input_index = 0;
+                        memory.console_input.len = 0;
+                        memory.console_input.buffer[0] = 0;
                     }
                 }
             }
@@ -530,8 +690,14 @@ pub fn main() !void {
                 const s = perf_stats.get(.Render).startTime();
                 defer s.endTime();
 
-                module.function_table.draw(&config.vars, &memory, &draw_buffer);
-                draw.process(&draw_buffer);
+                for (local_players) |lp| {
+                    if (lp.id == null)
+                        continue;
+                    module.function_table.draw(&config.vars, &memory, &draw_buffer, lp.id.?, &lp.input);
+                }
+                draw.process(&draw_buffer, width, height);
+
+                window.swapBuffers();
                         //rlgl.rlDisableBackfaceCulling();
                         //raylib.DrawMeshInstanced(mesh, material, transforms.ptr, N);
                         //rlgl.rlEnableBackfaceCulling();

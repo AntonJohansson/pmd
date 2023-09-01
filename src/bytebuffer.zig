@@ -71,6 +71,10 @@ pub const ByteView = struct {
     pub fn hasSpaceFor(self: *Self, space: u16) bool {
         return self.bottom + space <= self.data.len;
     }
+
+    pub fn remainingSpace(self: *Self) u16 {
+        return @as(u16, @intCast(self.data.len)) - self.bottom;
+    }
 };
 
 pub fn CircularArray(comptime T: type, comptime size: usize) type {

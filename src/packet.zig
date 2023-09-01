@@ -65,6 +65,10 @@ pub const PeerJoined = extern struct {
     player: Player,
 };
 
+pub const PeerDisconnected = extern struct {
+    id: PlayerId,
+};
+
 pub const PlayerUpdate = extern struct {
     tick: u64,
     id: PlayerId,
