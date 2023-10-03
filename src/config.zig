@@ -26,7 +26,6 @@ pub const Vars = struct {
     forwardspeed: f32 = 320,
     backspeed: f32 = 320,
     sidespeed: f32 = 320,
-    //sidespeed: f32 = 350,
     sprintmod: f32 = 2,
 
 //cvar_t	cl_upspeed = {"cl_upspeed","200"};
@@ -47,8 +46,8 @@ pub const Vars = struct {
     mouse_enabled: bool = false,
 
     // camera stuffs
-    fov: f32 = 45.0,
-    aspect: f32 = 4.0/3.0,
+    fov: f32 = 80.0,
+    aspect: f32 = 16.0/9.0,
 };
 
 pub var vars: Vars = .{};

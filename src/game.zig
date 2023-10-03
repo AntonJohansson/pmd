@@ -68,6 +68,8 @@ const widget_size_plane_xy = v3 {.x=widget_plane_length,.y=widget_plane_length,.
 const widget_size_plane_yz = v3 {.x=widget_plane_thickness,.y=widget_plane_length,.z=widget_plane_length};
 const widget_size_plane_xz = v3 {.x=widget_plane_length,.y=widget_plane_thickness,.z=widget_plane_length};
 
+const global_plane_size = v2 {.x = 100.0, .y = 100.0};
+
 fn updateWidget(widget: *common.WidgetModel, input: *const Input, start: v3, dir: v3) void {
     var model = widget.model.*;
 
@@ -210,7 +212,7 @@ fn drawWidget(b: *draw_api.Buffer, widget: *common.WidgetModel) void {
 
 
 fn playerMove(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input) void {
-    const dt = 1.0/60.0;
+    const dt = 1.0/165.0;
 
     if (!memory.show_cursor) {
         if (input.cursor_delta.x != 0 or input.cursor_delta.y != 0) {
@@ -251,13 +253,12 @@ fn playerMove(vars: *const Vars, memory: *Memory, player: *Player, input: *const
 
             const mod: f32 = if (player.sprint) vars.sprintmod else 1.0;
             wishvel = v3add(v3add(v3scale(-mod*vars.forwardspeed*dx, forward), v3scale(vars.sidespeed*dy, right)), v3scale(vars.upspeed*dz, up));
-
         }
     }
 
     // Apply gravity
     if (!player.onground) {
-        player.vel.z += vars.gravity*dt;
+        player.vel.z += dt*vars.gravity;
     }
 
     if (player.onground and input.isset(.Jump)) {
@@ -265,9 +266,12 @@ fn playerMove(vars: *const Vars, memory: *Memory, player: *Player, input: *const
     }
 
     // Compute wishdir/wishspeed and bound wishvel
-    const wishdir = v3normalize(wishvel);
     var wishspeed = v3len(wishvel);
+    var wishdir = v3 {};
+    if (wishspeed != 0.0)
+        wishdir = v3scale(1.0/wishspeed, wishvel);
     if (wishspeed > vars.maxspeed) {
+
         wishvel = v3scale(vars.maxspeed/wishspeed, wishvel);
         wishspeed = vars.maxspeed;
     }
@@ -318,19 +322,44 @@ fn playerMove(vars: *const Vars, memory: *Memory, player: *Player, input: *const
     player.onground = false;
 
     // collision with planes
-    const dz = @min(delta.z, -1.0);
-    for (memory.entities.constSlice()) |e| {
-        if (intersectPlaneModelRay(e.plane.model, .{.x=50,.y=50}, player.pos, .{.x=0,.y=0,.z=dz})) |intersect| {
-            _ = intersect;
-            //if (intersect.distance <= 0.5) {
-                if (player.vel.z < 0) {
-                    player.vel.z = 0;
+    const dir_len = v3len(delta);
+    if (dir_len != 0.0) {
+        const dir = v3scale(@max(0.5, dir_len)/dir_len, delta);
+        for (memory.entities.constSlice()) |e| {
+            if (intersectPlaneModelRay(e.plane.model, global_plane_size, player.pos, dir)) |intersect| {
+
+                if (intersect.pos.z <= player.pos.z and intersect.distance <= 0.5) {
+                    player.vel.z = 0.0;
+                    player.onground = true;
                 }
-                if (delta.z < 0) {
-                    delta.z = 0;
-                }
-                player.onground = true;
-            //}
+
+                const len = v3len(delta);
+                const delta_dir = v3scale(1.0/len, delta);
+                const dist = @max(intersect.distance-0.5, 0.0);
+                delta = v3scale(dist, delta_dir);
+
+                var behind_plane = v3scale(len-dist, delta_dir);
+                const len_to_plane = v3dot(behind_plane, intersect.normal);
+                behind_plane = v3sub(behind_plane, v3scale(len_to_plane, intersect.normal));
+
+                std.log.info("{} {}", .{len-dist, behind_plane.z});
+
+                //player.onground = true;
+
+                delta = v3add(delta, behind_plane);
+
+
+                //_ = intersect;
+                ////if (intersect.distance <= 0.5) {
+                //    if (player.vel.z < 0) {
+                //        player.vel.z = 0;
+                //    }
+                //    if (delta.z < 0) {
+                //        delta.z = 0;
+                //    }
+                //    player.onground = true;
+                ////}
+            }
         }
     }
 
@@ -371,7 +400,7 @@ fn dumpTypeToDisk(writer: anytype, value: anytype) !void {
 
 fn dumpEntitiesToDisk(entities: []common.Entity) !void {
     const filename = "entities.data";
-    const file = std.fs.cwd().createFile(filename, .{})  catch |err|  {
+    const file = std.fs.cwd().createFile(filename, .{}) catch |err|  {
         std.log.err("Failed to open file: {s} ({})", .{filename, err});
         return;
     };
@@ -473,7 +502,7 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
             var closest: ?IntersectResult = null;
             var closest_entity_id: ?u32 = null;
             for (memory.entities.constSlice(), 0..) |e,i| {
-                if (intersectPlaneModelLine(e.plane.model, .{.x=50,.y=50}, memory.camera.pos,memory.camera.dir)) |intersect| {
+                if (intersectPlaneModelLine(e.plane.model, global_plane_size, memory.camera.pos,memory.camera.dir)) |intersect| {
                     if (closest == null or intersect.distance < closest.?.distance) {
                         closest = intersect;
                         closest_entity_id = @intCast(i);
@@ -684,9 +713,9 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
 
     for (memory.entities.constSlice()) |e| {
         var plane = e.plane;
-        plane.model = math.m4modelSetScale(e.plane.model, .{.x=50,.y=50,.z=1});
+        plane.model = math.m4modelSetScale(e.plane.model, .{.x=global_plane_size.x,.y=global_plane_size.y,.z=1});
         pushPlane(b, plane, hsvToRgb(10, 0.6, 0.7));
-        plane.model = math.m4modelSetScale(e.plane.model, .{.x=50-10,.y=50-10,.z=2});
+        plane.model = math.m4modelSetScale(e.plane.model, .{.x=global_plane_size.x-10,.y=global_plane_size.y-10,.z=2});
         pushPlane(b, plane, hsvToRgb(10, 0.6, 0.5));
     }
 

@@ -74,7 +74,7 @@ pub fn main() !void {
 
     var new_connections: std.BoundedArray(NewConnectionData, 4) = .{};
 
-    const fps = 60;
+    const fps = 165;
     const desired_frame_time = std.time.ns_per_s / fps;
 
     var tick: u64 = 0;

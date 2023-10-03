@@ -215,7 +215,7 @@ pub fn main() !void {
     //
     const crand = std.crypto.random;
 
-    const fps = 60;
+    const fps = 165;
     const desired_frame_time = std.time.ns_per_s / fps;
 
     var tick: u64 = 0;
@@ -246,7 +246,7 @@ pub fn main() !void {
         .opengl_profile = .opengl_core_profile,
     };
 
-    const window = glfw.Window.create(800, 600, "game", null, null, hints) orelse {
+    const window = glfw.Window.create(1920, 1080, "floating", null, null, hints) orelse {
         std.log.err("Failed to open window: {?s}", .{glfw.getErrorString()});
         std.process.exit(1);
     };

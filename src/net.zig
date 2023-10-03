@@ -820,7 +820,7 @@ pub fn ack(peer: *Peer, packet_id: u16) void {
 
 fn right_wrap_distance(a: u16, b: u16, len: u16) u16 {
     // TODO: handle overflow
-    return (b + len - a) % len;
+    return (@addWithOverflow(b, len)[0] - a) % len;
 }
 
 //
