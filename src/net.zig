@@ -143,7 +143,7 @@ pub fn pushMessage(index: PeerIndex, message: anytype) void {
    };
    @as(*align(1) @TypeOf(message), @ptrCast(memory.ptr + @sizeOf(headers.Header))).* = message;
 
-   log.info("adding message {} / {} to peer {} quqeue", .{message_id, message_id % peer.messages_in_flight.data.len, index});
+   log.info("adding message {} / {} to peer {} queue", .{message_id, message_id % peer.messages_in_flight.data.len, index});
 
    peer.messages_in_flight.set(message_id, ReliableMessageInfo {
        .id = message_id,
@@ -626,8 +626,8 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
                                 num_events += 1;
                                 log.info("{} connected", .{peer.address.?});
                             } else {
-                                peer.state = .Disconnected;
                                 pushMessage(index, packet.ConnectionDenied{});
+                                peer.state = .Disconnected;
                                 log.info("{} disconnected (failed challenge)", .{peer.address.?});
                                 peers.len -= 1;
                             }

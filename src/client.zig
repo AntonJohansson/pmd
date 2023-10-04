@@ -227,29 +227,6 @@ pub fn main() !void {
     net.pushMessage(server_index, packet.ConnectionRequest{
         .client_salt = crand.int(u64)
     });
-    net.pushMessage(server_index, packet.ConnectionRequest{
-        .client_salt = crand.int(u64)
-    });
-    net.pushMessage(server_index, packet.ConnectionRequest{
-        .client_salt = crand.int(u64)
-    });
-    net.pushMessage(server_index, packet.ConnectionRequest{
-        .client_salt = crand.int(u64)
-    });
-    net.process(&host, server_index);
-    net.pushMessage(server_index, packet.ConnectionRequest{
-        .client_salt = crand.int(u64)
-    });
-    net.pushMessage(server_index, packet.ConnectionRequest{
-        .client_salt = crand.int(u64)
-    });
-    net.pushMessage(server_index, packet.ConnectionRequest{
-        .client_salt = crand.int(u64)
-    });
-    net.pushMessage(server_index, packet.ConnectionRequest{
-        .client_salt = crand.int(u64)
-    });
-    net.process(&host, server_index);
 
     //
     // GLFW init
