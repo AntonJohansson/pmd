@@ -317,57 +317,93 @@ fn playerMove(vars: *const Vars, memory: *Memory, player: *Player, input: *const
     }
 
     // delta from movement
-    var delta = v3scale(dt, player.vel);
+    var potential_delta = v3scale(dt, player.vel);
 
-    player.onground = false;
 
     // collision with planes
-    const dir_len = v3len(delta);
-    if (dir_len != 0.0) {
-        const dir = v3scale(@max(0.5, dir_len)/dir_len, delta);
+    //const dir_len = v3len(delta);
+    //if (dir_len != 0.0) {
+    //    const dir = v3scale(@max(0.5, dir_len)/dir_len, delta);
+    //    for (memory.entities.constSlice()) |e| {
+    //        if (intersectPlaneModelRay(e.plane.model, global_plane_size, player.pos, dir)) |intersect| {
+
+    //            if (intersect.pos.z <= player.pos.z and intersect.distance <= 0.5) {
+    //                player.vel.z = 0.0;
+    //                player.onground = true;
+    //            }
+
+    //            const len = v3len(delta);
+    //            const delta_dir = v3scale(1.0/len, delta);
+    //            const dist = @max(intersect.distance-0.5, 0.0);
+    //            delta = v3scale(dist, delta_dir);
+
+    //            //var behind_plane = v3scale(len-dist, delta_dir);
+    //            //const len_to_plane = v3dot(behind_plane, intersect.normal);
+    //            //behind_plane = v3sub(behind_plane, v3scale(len_to_plane, intersect.normal));
+
+    //            //player.onground = true;
+
+    //            //delta = v3add(delta, behind_plane);
+
+    //            const speed = v3len(player.vel);
+    //            if (speed != 0.0) {
+    //                const vel_proj = v3scale(v3dot(player.vel, intersect.normal), intersect.normal);
+    //                const new_vel_dir = v3normalize(v3sub(player.vel, vel_proj));
+    //                player.vel = v3scale(speed, new_vel_dir);
+    //            }
+
+    //            //_ = intersect;
+    //            ////if (intersect.distance <= 0.5) {
+    //            //    if (player.vel.z < 0) {
+    //            //        player.vel.z = 0;
+    //            //    }
+    //            //    if (delta.z < 0) {
+    //            //        delta.z = 0;
+    //            //    }
+    //            //    player.onground = true;
+    //            ////}
+    //        }
+    //    }
+    //}
+    if (v3len2(potential_delta) != 0.0) {
         for (memory.entities.constSlice()) |e| {
-            if (intersectPlaneModelRay(e.plane.model, global_plane_size, player.pos, dir)) |intersect| {
+            if (intersectPlaneModelRay(e.plane.model, global_plane_size, player.pos, potential_delta)) |intersect| {
 
-                if (intersect.pos.z <= player.pos.z and intersect.distance <= 0.5) {
-                    player.vel.z = 0.0;
-                    player.onground = true;
+                // If we cross the plane we completely cancel out the normal component of the movement
+                //{
+                //const d = v3dot(delta, intersect.normal);
+                //delta = v3add(delta, v3scale(-d, intersect.normal));
+                //}
+
+                {
+                    const ortho_dist_to_plane = v3dot(v3sub(player.pos, intersect.pos), intersect.normal);
+                    player.pos = v3add(player.pos, v3scale(0.25 - ortho_dist_to_plane, intersect.normal));
+
+                    const dot = v3dot(player.vel, intersect.normal);
+                    player.vel = v3add(player.vel, v3scale(-dot, intersect.normal));
                 }
 
-                const len = v3len(delta);
-                const delta_dir = v3scale(1.0/len, delta);
-                const dist = @max(intersect.distance-0.5, 0.0);
-                delta = v3scale(dist, delta_dir);
 
-                //var behind_plane = v3scale(len-dist, delta_dir);
-                //const len_to_plane = v3dot(behind_plane, intersect.normal);
-                //behind_plane = v3sub(behind_plane, v3scale(len_to_plane, intersect.normal));
-
-                //player.onground = true;
-
-                //delta = v3add(delta, behind_plane);
-
-                const speed = v3len(player.vel);
-                if (speed != 0.0) {
-                    const vel_proj = v3scale(v3dot(player.vel, intersect.normal), intersect.normal);
-                    const new_vel_dir = v3normalize(v3sub(player.vel, vel_proj));
-                    player.vel = v3scale(speed, new_vel_dir);
-                }
-
-                //_ = intersect;
-                ////if (intersect.distance <= 0.5) {
-                //    if (player.vel.z < 0) {
-                //        player.vel.z = 0;
-                //    }
-                //    if (delta.z < 0) {
-                //        delta.z = 0;
-                //    }
-                //    player.onground = true;
-                ////}
+                //const speed = v3len(player.vel);
+                //if (speed != 0.0) {
+                //    const vel_proj = v3scale(v3dot(player.vel, intersect.normal), intersect.normal);
+                //    const new_vel_dir = v3normalize(v3sub(player.vel, vel_proj));
+                //    player.vel = v3scale(speed, new_vel_dir);
+                //}
             }
         }
     }
 
+    player.onground = false;
+    for (memory.entities.constSlice()) |e| {
+        if (intersectPlaneModelRay(e.plane.model, global_plane_size, player.pos, .{.x=0,.y=0,.z=-0.5})) |intersect| {
+            _ = intersect;
+            player.onground = true;
+        }
+    }
+
     // integrate velocity
+    const delta = v3scale(dt, player.vel);
     player.pos = v3add(player.pos, delta);
 
     // collision z dir

@@ -400,10 +400,6 @@ pub fn main() !void {
                 accumulator -= desired_frame_time;
             }
 
-    net.pushMessage(server_index, packet.ConnectionRequest{
-        .client_salt = crand.int(u64)
-    });
-
             scroll_delta = 0.0;
             glfw.pollEvents();
 

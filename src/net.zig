@@ -793,8 +793,10 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
 
             const data = entry.batch.buffer.data[0..entry.batch.buffer.top];
             const bytes_sent = std.os.sendto(host.fd, data, 0, addr, len) catch 0;
+            if (bytes_sent != data.len) {
+                std.log.info("Tried to send {}, actually sent {}", .{data.len, bytes_sent});
+            }
             std.debug.assert(bytes_sent == data.len);
-
 
             // TODO(anjo): verbose
             //log.info("sending packet {} with {} messsages in {} bytes", .{header.id, header.num_packets, output_buffer.top});
