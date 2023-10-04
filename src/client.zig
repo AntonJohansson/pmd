@@ -207,7 +207,7 @@ pub fn main() !void {
     // Connect to server
     //
     var host: net.Host = .{};
-    const server_index = net.connect(gpa, &host, "localhost", 9053) orelse return;
+    const server_index = net.connect(gpa, &host, "85.228.139.37", 9053) orelse return;
     defer std.os.close(host.fd);
 
     //
@@ -224,11 +224,32 @@ pub fn main() !void {
     //
     // Network state
     //
-    var batch = net.BatchBuilder{};
-    batch.clear();
     net.pushMessage(server_index, packet.ConnectionRequest{
         .client_salt = crand.int(u64)
     });
+    net.pushMessage(server_index, packet.ConnectionRequest{
+        .client_salt = crand.int(u64)
+    });
+    net.pushMessage(server_index, packet.ConnectionRequest{
+        .client_salt = crand.int(u64)
+    });
+    net.pushMessage(server_index, packet.ConnectionRequest{
+        .client_salt = crand.int(u64)
+    });
+    net.process(&host, server_index);
+    net.pushMessage(server_index, packet.ConnectionRequest{
+        .client_salt = crand.int(u64)
+    });
+    net.pushMessage(server_index, packet.ConnectionRequest{
+        .client_salt = crand.int(u64)
+    });
+    net.pushMessage(server_index, packet.ConnectionRequest{
+        .client_salt = crand.int(u64)
+    });
+    net.pushMessage(server_index, packet.ConnectionRequest{
+        .client_salt = crand.int(u64)
+    });
+    net.process(&host, server_index);
 
     //
     // GLFW init
@@ -401,6 +422,10 @@ pub fn main() !void {
             if (accumulator >= desired_frame_time) {
                 accumulator -= desired_frame_time;
             }
+
+    net.pushMessage(server_index, packet.ConnectionRequest{
+        .client_salt = crand.int(u64)
+    });
 
             scroll_delta = 0.0;
             glfw.pollEvents();

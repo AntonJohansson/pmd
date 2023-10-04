@@ -76,7 +76,7 @@ pub const Host = struct {
 };
 
 pub fn bind(allocator: std.mem.Allocator, port: u16) ?Host {
-    const addr_list = std.net.getAddressList(allocator, "localhost", port) catch return null;
+    const addr_list = std.net.getAddressList(allocator, "0.0.0.0", port) catch return null;
     defer addr_list.deinit();
 
     const flags = os.SOCK.DGRAM | os.SOCK.CLOEXEC | os.SOCK.NONBLOCK;

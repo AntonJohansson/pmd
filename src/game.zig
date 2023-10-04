@@ -338,16 +338,20 @@ fn playerMove(vars: *const Vars, memory: *Memory, player: *Player, input: *const
                 const dist = @max(intersect.distance-0.5, 0.0);
                 delta = v3scale(dist, delta_dir);
 
-                var behind_plane = v3scale(len-dist, delta_dir);
-                const len_to_plane = v3dot(behind_plane, intersect.normal);
-                behind_plane = v3sub(behind_plane, v3scale(len_to_plane, intersect.normal));
-
-                std.log.info("{} {}", .{len-dist, behind_plane.z});
+                //var behind_plane = v3scale(len-dist, delta_dir);
+                //const len_to_plane = v3dot(behind_plane, intersect.normal);
+                //behind_plane = v3sub(behind_plane, v3scale(len_to_plane, intersect.normal));
 
                 //player.onground = true;
 
-                delta = v3add(delta, behind_plane);
+                //delta = v3add(delta, behind_plane);
 
+                const speed = v3len(player.vel);
+                if (speed != 0.0) {
+                    const vel_proj = v3scale(v3dot(player.vel, intersect.normal), intersect.normal);
+                    const new_vel_dir = v3normalize(v3sub(player.vel, vel_proj));
+                    player.vel = v3scale(speed, new_vel_dir);
+                }
 
                 //_ = intersect;
                 ////if (intersect.distance <= 0.5) {
