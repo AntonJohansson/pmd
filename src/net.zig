@@ -8,7 +8,7 @@ const stat = @import("stat.zig");
 const logging = @import("logging.zig");
 
 var log: logging.Log = .{
-    .mirror_to_stdio = false,
+    .mirror_to_stdio = true,
 };
 
 pub const fragment_size = 1024;
@@ -143,7 +143,8 @@ pub fn pushMessage(index: PeerIndex, message: anytype) void {
    };
    @as(*align(1) @TypeOf(message), @ptrCast(memory.ptr + @sizeOf(headers.Header))).* = message;
 
-   log.info("adding message {} / {} to peer {} queue", .{message_id, message_id % peer.messages_in_flight.data.len, index});
+   // TODO(anjo): verbose
+   //log.info("adding message {} / {} to peer {} queue", .{message_id, message_id % peer.messages_in_flight.data.len, index});
 
    peer.messages_in_flight.set(message_id, ReliableMessageInfo {
        .id = message_id,
@@ -291,8 +292,6 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
         }) catch unreachable;
         input_buffer.top += @intCast(nbytes);
     }
-
-    //std.log.info("input buffer usage {} / {} bytes ({d}%)", .{input_buffer.size(), input_buffer.data.len, 100.0*@as(f32, @floatFromInt(input_buffer.size())) / @as(f32, @floatFromInt(input_buffer.data.len))});
 
     var peer = &peers.buffer[peer_index];
 
@@ -542,7 +541,8 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
     for (received_data.slice()) |data| {
         var peer = &peers.buffer[data.peer_index];
 
-        log.info("data for {} of size {}", .{data.peer_index, data.data.len});
+        // TODO(anjo): verbose
+        //log.info("data for {} of size {}", .{data.peer_index, data.data.len});
 
         var byte_view = bb.ByteView{
             .data = data.data,
@@ -551,7 +551,8 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
             const batch_header = byte_view.pop(headers.BatchHeader);
             std.debug.assert(batch_header.num_packets > 0);
 
-            log.info("packet with {} messages", .{batch_header.num_packets});
+            // TODO(anjo): verbose
+            //log.info("packet with {} messages", .{batch_header.num_packets});
 
             // TODO(anjo): Verify packet here
 
@@ -658,7 +659,8 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
                     };
                     num_events += 1;
                     //peer.received_messages.unset(i);
-                    log.info("we got data", .{});
+                    // TODO(anjo): verbose
+                    //log.info("we got data", .{});
                 }
             }
         }
@@ -707,24 +709,29 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
     });
     var header: *align(1) headers.BatchHeader = @ptrCast(&output_buffer.data[0]);
 
-    log.info("processing messages for peer {}", .{peer_index.?});
+    // TODO(anjo): verbose
+    //log.info("processing messages for peer {}", .{peer_index.?});
 
     var have_reliable_packets = false;
     var packet_data: PacketData = .{};
     if (right_wrap_distance(peer.last_outgoing_acked_message_id, peer.current_message_id, peer.messages_in_flight.data.len) > 0) {
-        log.info("checking if we can add messages", .{});
+        // TODO(anjo): verbose
+        //log.info("checking if we can add messages", .{});
         var id = peer.last_outgoing_acked_message_id;
         while (id != peer.current_message_id and id != (peer.last_outgoing_acked_message_id + message_receive_buffer_len-1) % peer.messages_in_flight.data.len) : (id += 1) {
-            log.info("  checking id {}", .{id});
+            // TODO(anjo): verbose
+            //log.info("  checking id {}", .{id});
 
             const index: u16 = id % @as(u16, @intCast(peer.messages_in_flight.data.len));
             if (peer.messages_in_flight.isset(index)) {
                 const rmi = peer.messages_in_flight.data[index];
 
-                log.info("  found message in flight", .{});
+                // TODO(anjo): verbose
+                //log.info("  found message in flight", .{});
                 if (rmi.data.len > output_buffer.remainingSize())
                     break;
-                log.info("  message {} fits in buffer", .{@as(*align(1) const headers.Header, @ptrCast(rmi.data.ptr)).kind});
+                // TODO(anjo): verbose
+                //log.info("  message {} fits in buffer", .{@as(*align(1) const headers.Header, @ptrCast(rmi.data.ptr)).kind});
                 if (rmi.reliable and !rmi.acked) {
                     packet_data.ids.append(id) catch break;
                     have_reliable_packets = true;
@@ -739,7 +746,8 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
 
         }
     } else {
-        log.info("wrap {} {}", .{peer.last_outgoing_acked_message_id, peer.current_message_id});
+        // TODO(anjo): verbose
+        //log.info("wrap {} {}", .{peer.last_outgoing_acked_message_id, peer.current_message_id});
     }
 
     header.salt = peer.salt;
@@ -787,7 +795,9 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
             const bytes_sent = std.os.sendto(host.fd, data, 0, addr, len) catch 0;
             std.debug.assert(bytes_sent == data.len);
 
-            log.info("sending packet {} with {} messsages in {} bytes", .{header.id, header.num_packets, output_buffer.top});
+
+            // TODO(anjo): verbose
+            //log.info("sending packet {} with {} messsages in {} bytes", .{header.id, header.num_packets, output_buffer.top});
 
             total_bytes_sent += bytes_sent;
             net_stats.get(.NetOut).samples.push(total_bytes_sent);
