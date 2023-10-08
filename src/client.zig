@@ -265,9 +265,9 @@ pub fn main() !void {
     var module = try code_module.CodeModule(struct {
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input) void,
         draw: *fn (vars: *const Vars, memory: *Memory, b: *draw.Buffer, player_id: common.PlayerId, input: *const Input) void,
-    }).init(gpa, "zig-out/lib", "libgame");
+    }).init(gpa, "zig-out/lib", "game");
 
-    try module.open(gpa,);
+    try module.open(gpa);
     defer module.close();
 
     //

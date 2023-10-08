@@ -23,14 +23,20 @@ pub fn CodeModule(comptime function_table_type: type) type {
 
         const Self = @This();
         pub fn init(allocator: std.mem.Allocator, dir: []const u8, name: []const u8) !Self {
+            const prefix = switch (builtin.os.tag) {
+                .linux, .freebsd, .openbsd    => "lib",
+                .windows                      => "",
+                .macos, .tvos, .watchos, .ios => "",
+                else => return,
+            };
             const ext = switch (builtin.os.tag) {
                 .linux, .freebsd, .openbsd    => ".so",
                 .windows                      => ".dll",
                 .macos, .tvos, .watchos, .ios => ".dylib",
                 else => return,
             };
-            const libname         = try std.mem.concat(allocator, u8, &[_][]const u8{name, ext});
-            const libname_running = try std.mem.concat(allocator, u8, &[_][]const u8{name, ".running", ext});
+            const libname         = try std.mem.concat(allocator, u8, &[_][]const u8{prefix, name, ext});
+            const libname_running = try std.mem.concat(allocator, u8, &[_][]const u8{prefix, name, ".running", ext});
 
             const libpath_running = try std.fs.path.join(allocator, &[_][]const u8{dir, libname_running});
             return Self {

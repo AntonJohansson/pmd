@@ -609,8 +609,8 @@ fn intersectPlaneAxisLine(plane_pos: v3, i: v3, j: v3, k: v3, plane_size: v2, li
     const p = v3add(line_start, v3scale(t, line_dir));
 
     const vec_to_origin = v3sub(p, plane_pos);
-    if (std.math.fabs(v3dot(vec_to_origin, i)) <= plane_size.x/2.0 and
-        std.math.fabs(v3dot(vec_to_origin, j)) <= plane_size.y/2.0) {
+    if (@abs(v3dot(vec_to_origin, i)) <= plane_size.x/2.0 and
+        @abs(v3dot(vec_to_origin, j)) <= plane_size.y/2.0) {
         return .{.pos=p, .normal=k, .distance=t};
     } else {
         return null;
@@ -632,8 +632,8 @@ fn intersectPlaneAxisRay(plane_pos: v3, i: v3, j: v3, k: v3, plane_size: v2, ray
     const p = v3add(ray_start, v3scale(t, ray_delta));
 
     const vec_to_origin = v3sub(p, plane_pos);
-    if (std.math.fabs(v3dot(vec_to_origin, i)) <= plane_size.x/2.0 and
-        std.math.fabs(v3dot(vec_to_origin, j)) <= plane_size.y/2.0) {
+    if (@abs(v3dot(vec_to_origin, i)) <= plane_size.x/2.0 and
+        @abs(v3dot(vec_to_origin, j)) <= plane_size.y/2.0) {
         return .{.pos=p, .normal=k, .distance=t};
     } else {
         return null;
@@ -665,9 +665,9 @@ fn intersectCubeLine(cube_model: m4, cube_size: v3, line_start: v3, line_dir: v3
     const dot_i = v3dot(line_dir, i);
     const dot_j = v3dot(line_dir, j);
     const dot_k = v3dot(line_dir, k);
-    const sign_i = dot_i/std.math.fabs(dot_i);
-    const sign_j = dot_j/std.math.fabs(dot_j);
-    const sign_k = dot_k/std.math.fabs(dot_k);
+    const sign_i = dot_i/@abs(dot_i);
+    const sign_j = dot_j/@abs(dot_j);
+    const sign_k = dot_k/@abs(dot_k);
     const ni = v3scale(-sign_i, i);
     const nj = v3scale(-sign_j, j);
     const nk = v3scale(-sign_k, k);

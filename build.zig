@@ -5,7 +5,7 @@ pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const sokol_build = sokol.buildSokol(b, target, optimize, .{.enable_wayland = true, .enable_x11 = false}, "third_party/sokol-zig/");
+    const sokol_build = sokol.buildSokol(b, target, optimize, .{.backend=.gl}, "third_party/sokol-zig/");
     const sokol_module = b.addModule("sokol", .{
         .source_file = .{.path = "third_party/sokol-zig/src/sokol/sokol.zig"},
     });
@@ -46,7 +46,7 @@ pub fn build(b: *std.build.Builder) void {
         .optimize = client.optimize,
     });
     client.addModule("mach-glfw", glfw_dep.module("mach-glfw"));
-    try @import("mach_glfw").link(glfw_dep.builder, client);
+    @import("mach_glfw").link(glfw_dep.builder, client);
 
     const run_client_cmd = b.addRunArtifact(client);
     run_client_cmd.step.dependOn(b.getInstallStep());
