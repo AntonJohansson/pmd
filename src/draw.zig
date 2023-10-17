@@ -572,13 +572,6 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
             },
             .Rectangle => {
                 const r = b.pop(primitive.Rectangle);
-                //raylib.DrawRectangle(
-                //    @intFromFloat(r.pos.x),
-                //    @intFromFloat(r.pos.y),
-                //    @intFromFloat(r.size.x),
-                //    @intFromFloat(r.size.y),
-                //    castToRaylibColor(header.color)
-                //);
                 const offset = v2 {.x = r.size.x/2, .y = r.size.y/2};
                 const model = m4model2d(v2add(r.pos, offset), r.size);
                 const uniforms = Uniforms {

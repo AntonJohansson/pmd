@@ -16,7 +16,4 @@
     - [ ] Separate air max speed
     - [ ]
 
-- [x] Set cl variables without separate function for each var (set command)
-- [ ] Synced cl variables
-
 - [ ] Draw multiple players

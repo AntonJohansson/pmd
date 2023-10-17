@@ -7,4 +7,9 @@
             .hash = "1220dfedc5cd7a2cff38f6c0cba7bba8461c88a7c4df50dacb91136e2e9ebdebb840",
         },
     },
+    .paths = .{
+        "src",
+        "build.zig",
+        "build.zig.zon",
+    },
 }

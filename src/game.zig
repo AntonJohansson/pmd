@@ -888,7 +888,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
         if (memory.show_cursor) {
             // cursor
             const cursor_size = 0.01;
-            pushRectangle(b, .{
+            push(b, primitive.Rectangle {
                 .pos = .{
                     .x = memory.cursor_pos.x - cursor_size/2.0,
                     .y = memory.cursor_pos.y - cursor_size/2.0,
@@ -900,11 +900,11 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
             }, hsvToRgb(350, 0.75, 0.75));
 
         } else {
-            // crosshair
+            // Crosshair
             const cursor_thickness = 0.005;
             const cursor_length = 0.01;
             const cursor_gap = 0.02;
-            pushRectangle(b, .{
+            push(b, primitive.Rectangle {
                 .pos = .{
                     .x = 0.5 - cursor_gap/2.0 - cursor_length,
                     .y = 0.5 - cursor_thickness/2.0,
@@ -914,7 +914,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                     .y = cursor_thickness,
                 },
             }, hsvToRgb(350, 0.75, 0.75));
-            pushRectangle(b, .{
+            push(b, primitive.Rectangle {
                 .pos = .{
                     .x = 0.5 + cursor_gap/2.0,
                     .y = 0.5 - cursor_thickness/2.0,
@@ -924,7 +924,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                     .y = cursor_thickness,
                 },
             }, hsvToRgb(350, 0.75, 0.75));
-            pushRectangle(b, .{
+            push(b, primitive.Rectangle {
                 .pos = .{
                     .x = 0.5 - cursor_thickness/2.0,
                     .y = 0.5 + cursor_gap/2.0,
@@ -934,7 +934,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                     .y = cursor_length,
                 },
             }, hsvToRgb(350, 0.75, 0.75));
-            pushRectangle(b, .{
+            push(b, primitive.Rectangle {
                 .pos = .{
                     .x = 0.5 - cursor_thickness/2.0,
                     .y = 0.5 - cursor_gap/2.0 - cursor_length,
