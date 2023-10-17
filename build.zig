@@ -46,7 +46,7 @@ pub fn build(b: *std.build.Builder) void {
         .optimize = client.optimize,
     });
     client.addModule("mach-glfw", glfw_dep.module("mach-glfw"));
-    try @import("mach_glfw").link(glfw_dep.builder, client);
+    @import("mach_glfw").link(glfw_dep.builder, client);
 
     const run_client_cmd = b.addRunArtifact(client);
     run_client_cmd.step.dependOn(b.getInstallStep());

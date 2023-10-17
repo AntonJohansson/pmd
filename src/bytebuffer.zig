@@ -4,8 +4,8 @@ const packet = @import("packet.zig");
 pub fn ByteBuffer(comptime N: u32) type {
     return struct {
         data: [N]u8 = undefined,
-        top: u16 = 0,
-        bottom: u16 = 0,
+        top: u32 = 0,
+        bottom: u32 = 0,
 
         const Self = @This();
 

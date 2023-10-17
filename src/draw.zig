@@ -176,7 +176,10 @@ pub const PrimitiveType = extra.PrimitiveType;
 var pip_2d  = sg.Pipeline{};
 var pip_3d  = sg.Pipeline{};
 var pip_3d_no_depth  = sg.Pipeline{};
+var pip_mesh  = sg.Pipeline{};
+var pip_mesh_line  = sg.Pipeline{};
 var pip_triangle_strip  = sg.Pipeline{};
+
 var circle_bind = sg.Bindings{};
 var rectangle_bind = sg.Bindings{};
 var cube_bind = sg.Bindings{};
@@ -359,7 +362,7 @@ pub fn init() void {
             .clear_value = .{.r = 0, .g = 0, .b = 0, .a = 1},
         };
     }
-    // 3d shader no depth
+    // 3d mesh shader
     {
         var shd_desc = sg.ShaderDesc{};
         shd_desc.vs.source =
@@ -379,6 +382,94 @@ pub fn init() void {
                 \\ }
                 ;
         shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms);
+        shd_desc.vs.uniform_blocks[0].uniforms[0] = .{
+            .name = "mvp",
+            .type = .MAT4,
+        };
+        shd_desc.vs.uniform_blocks[0].uniforms[1] = .{
+            .name = "color",
+            .type = .FLOAT4,
+        };
+        const shd = sg.makeShader(shd_desc);
+        var pip_desc = sg.PipelineDesc {
+            .shader = shd,
+            .cull_mode = .BACK,
+            .depth = .{
+                .compare = .LESS_EQUAL,
+                .write_enabled = true,
+            },
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT3;
+        pip_mesh = sg.makePipeline(pip_desc);
+        pass_action_3d.colors[0] = .{
+            .load_action = .CLEAR,
+            .clear_value = .{.r = 0, .g = 0, .b = 0, .a = 1},
+        };
+    }
+    // pip mesh line
+    {
+        var shd_desc = sg.ShaderDesc{};
+        shd_desc.vs.source =
+                \\ #version 330
+                \\ layout(location=0) in vec3 position;
+                \\ uniform mat4 mvp;
+                \\ void main() {
+                \\   gl_Position = mvp * vec4(position, 1);
+                \\ }
+                ;
+        shd_desc.fs.source =
+                \\ #version 330
+                \\ uniform vec4 color;
+                \\ out vec4 frag_color;
+                \\ void main() {
+                \\   frag_color = color;
+                \\ }
+                ;
+        shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms);
+        shd_desc.vs.uniform_blocks[0].uniforms[0] = .{
+            .name = "mvp",
+            .type = .MAT4,
+        };
+        shd_desc.vs.uniform_blocks[0].uniforms[1] = .{
+            .name = "color",
+            .type = .FLOAT4,
+        };
+        const shd = sg.makeShader(shd_desc);
+        var pip_desc = sg.PipelineDesc {
+            .shader = shd,
+            .primitive_type = .LINE_STRIP,
+            .depth = .{
+                .compare = .LESS_EQUAL,
+                .write_enabled = true,
+            },
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT3;
+        pip_mesh_line = sg.makePipeline(pip_desc);
+        pass_action_3d.colors[0] = .{
+            .load_action = .CLEAR,
+            .clear_value = .{.r = 0, .g = 0, .b = 0, .a = 1},
+        };
+    }
+    // 3d shader no depth
+    {
+        var shd_desc = sg.ShaderDesc{};
+        shd_desc.vs.source =
+                \\ #version 330
+                \\ layout(location=0) in vec3 position;
+                \\ uniform mat4 mvp;
+                \\ void main() {
+                \\   gl_Position = mvp * vec4(position, 1);
+                \\ }
+                ;
+        shd_desc.fs.source =
+                \\ #version 330
+                \\ uniform vec4 color;
+                \\ out vec4 frag_color;
+                \\ void main() {
+                \\   frag_color = color;
+                \\ }
+                ;
+                shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms);
         shd_desc.vs.uniform_blocks[0].uniforms[0] = .{
             .name = "mvp",
             .type = .MAT4,
@@ -570,6 +661,47 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
                 //    castToRaylibColor(header.color)
                 //);
             },
+            .Mesh => {
+                const m = b.pop(primitive.Mesh);
+
+                var bind = sg.Bindings{};
+                bind.vertex_buffers[0] = sg.makeBuffer(.{
+                    .data = sg.asRange(m.verts),
+                });
+
+                const model = m4model(.{.x=0,.y=0,.z=100},.{.x=1,.y=1,.z=1});
+                var uniforms = Uniforms {
+                    .mvp = m4transpose(m4mul(vp, model)),
+                    .color = v4 {
+                        .x = 255.0,
+                        .y = 255.0,
+                        .z = 255.0,
+                        .w = 255.0
+                    },
+                };
+
+                // TODO(anjo): We're always going to miss the last edge, we have to list
+                // the first vertex at the end to get around this...
+                //
+                // we can probably use a geometry shader
+                //  https://learnopengl.com/Advanced-OpenGL/Geometry-Shader
+                sg.applyPipeline(pip_mesh_line);
+                sg.applyBindings(bind);
+                sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                sg.draw(0, @intCast(m.verts.len), 1);
+
+                uniforms.color.x = @as(f32, @floatFromInt(header.color.r))/255.0;
+                uniforms.color.y = @as(f32, @floatFromInt(header.color.g))/255.0;
+                uniforms.color.z = @as(f32, @floatFromInt(header.color.b))/255.0;
+                uniforms.color.w = @as(f32, @floatFromInt(header.color.a))/255.0;
+
+                sg.applyPipeline(pip_mesh);
+                sg.applyBindings(bind);
+                sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                sg.draw(0, @intCast(m.verts.len), 1);
+
+                sg.destroyBuffer(bind.vertex_buffers[0]);
+            },
             .Rectangle => {
                 const r = b.pop(primitive.Rectangle);
                 const offset = v2 {.x = r.size.x/2, .y = r.size.y/2};
@@ -711,7 +843,12 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
         }
     }
 
+
     sg.commit();
+
+    //for (bindings_to_remove.slice()) |bbb| {
+    //    sg.destroyBuffer(bbb.vertex_buffers[0]);
+    //}
 
     b.clear();
 }

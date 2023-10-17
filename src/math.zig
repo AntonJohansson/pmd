@@ -90,6 +90,14 @@ pub const v4 = extern struct {
     w: f32 = 0.0,
 };
 
+pub fn v3i(comptime T: type, x: T, y: T, z: T) v3 {
+    return v3 {
+        .x = @floatFromInt(x),
+        .y = @floatFromInt(y),
+        .z = @floatFromInt(z),
+    };
+}
+
 pub fn v3eql(a: v3, b: v3) bool {
     return std.math.approxEqAbs(f32, a.x, b.x, 4.0*std.math.floatEps(f32)) and
            std.math.approxEqAbs(f32, a.y, b.y, 4.0*std.math.floatEps(f32)) and
@@ -134,6 +142,10 @@ pub fn v3len2(v: v3) f32 {
 
 pub fn v3len(v: v3) f32 {
     return std.math.sqrt(v3len2(v));
+}
+
+pub fn v3dist(a: v3, b: v3) f32 {
+    return v3len(v3sub(a,b));
 }
 
 pub fn v3angle(a: v3, b: v3) f32 {

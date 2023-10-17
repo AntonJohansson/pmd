@@ -169,4 +169,6 @@ pub const Memory = struct {
         Frametime,
     }) = .{},
 
+    frame_allocator: std.mem.Allocator = undefined,
+    persistent_allocator: std.mem.Allocator = undefined,
 };

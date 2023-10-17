@@ -33,7 +33,11 @@ const StatData = struct {
 
         for (self.samples.data) |s| {
             const d = @as(i64, @intCast(s)) - @as(i64, @intCast(avg));
-            variance += @intCast(@mulWithOverflow(d,d)[0]);
+            const mul = @mulWithOverflow(d,d);
+            // Skip on overflow
+            if (mul[1] == 1)
+                continue;
+            variance = @addWithOverflow(variance, @as(@TypeOf(variance), @intCast(mul[0])))[0];
         }
         variance /= self.samples.data.len-1;
 

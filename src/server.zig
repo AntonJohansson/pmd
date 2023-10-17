@@ -56,20 +56,34 @@ const NewConnectionData = struct {
 };
 
 pub fn main() !void {
-    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = general_purpose_allocator.allocator();
+    var memory: Memory = .{};
 
-    net.temp_allocator = gpa;
+    // Setup the allocators we'll be using
+    // 1. GeneralPurposeAllocator for persitent data that will exist accross frames
+    //    and has to be freed manually.
+    // 2. ArenaAllocator for temporary data that during a frame
+    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+    var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_allocator.deinit();
+    memory.frame_allocator = arena_allocator.allocator();
+    memory.persistent_allocator = general_purpose_allocator.allocator();
+
+    net.temp_allocator = memory.persistent_allocator;
 
     var module = try code_module.CodeModule(struct {
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input) void,
         draw: *fn (memory: *Memory) void,
-    }).init(gpa, "zig-out/lib", "libgame");
+    }).init(memory.persistent_allocator, "zig-out/lib", "game");
 
-    try module.open(gpa);
+    // TODO(anjo): Pass module name through compile time constants and don't rely on trying to
+    // guess the name
+    module.open(memory.persistent_allocator) catch {
+        log.err("Failed to open module: {s}", .{module.name});
+        return;
+    };
     defer module.close();
 
-    const host = net.bind(gpa, 9053) orelse return;
+    const host = net.bind(memory.persistent_allocator, 9053) orelse return;
     defer std.os.closeSocket(host.fd);
 
     var new_connections: std.BoundedArray(NewConnectionData, 4) = .{};
@@ -92,8 +106,6 @@ pub fn main() !void {
     var frame_start_time: u64 = 0;
     var accumulator: u64 = 0;
 
-    var memory: Memory = .{};
-
     while (running) {
         const frame_end_time = timer.read();
         const frame_time = frame_end_time - frame_start_time;
@@ -110,7 +122,7 @@ pub fn main() !void {
             const frame_stat = time_stats.get(.Frametime).startTime();
 
             {
-                if (try module.reloadIfChanged(gpa)) {
+                if (try module.reloadIfChanged(memory.persistent_allocator)) {
                     //_ = module.function_table.fofo();
                 }
             }
@@ -177,13 +189,24 @@ pub fn main() !void {
 
                                 log.info("A new player joined the game: {}", .{id.*});
 
+                                // Joined response for player trying to connect
                                 net.pushMessage(e.peer_index, packet.PlayerJoinResponse{
                                     .player = player.*,
                                 });
 
+                                // Send peer joined packet to all other clients
                                 net.pushMessageToAllOtherPeers(e.peer_index, packet.PeerJoined{
                                     .player = player.*,
                                 });
+
+                                // Send peer joined to packed to new connection, informing of all other clients
+                                for (memory.players.slice()) |p| {
+                                    if (p.id == id.*)
+                                        continue;
+                                    net.pushMessage(e.peer_index, packet.PeerJoined{
+                                        .player = p,
+                                    });
+                                }
                             },
                             .PlayerUpdate => {
                                 const message: *align(1) packet.PlayerUpdate = @ptrCast(e.data);
@@ -248,6 +271,14 @@ pub fn main() !void {
                     std.time.sleep(@intCast(time_left));
                 }
             }
+
+
+            //
+            // End of frame
+            //
+
+            _ = arena_allocator.reset(.retain_capacity);
+
         }
 
         if (actual_timer.read() >= 2*std.time.ns_per_s) {

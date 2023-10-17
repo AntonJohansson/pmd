@@ -28,6 +28,10 @@ pub const Circle = struct {
     model: m4,
 };
 
+pub const Mesh = struct {
+    verts: []const v3,
+};
+
 pub const Rectangle = struct {
     pos: v2,
     size: v2,

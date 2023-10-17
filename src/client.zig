@@ -198,16 +198,23 @@ fn scrollCallback(window: glfw.Window, dx: f64, dy: f64) void {
 }
 
 pub fn main() !void {
+    // Setup the allocators we'll be using
+    // 1. GeneralPurposeAllocator for persitent data that will exist accross frames
+    //    and has to be freed manually.
+    // 2. ArenaAllocator for temporary data that during a frame
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = general_purpose_allocator.allocator();
+    var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_allocator.deinit();
+    memory.frame_allocator = arena_allocator.allocator();
+    memory.persistent_allocator = general_purpose_allocator.allocator();
 
-    net.temp_allocator = gpa;
+    net.temp_allocator = memory.persistent_allocator;
 
     //
     // Connect to server
     //
     var host: net.Host = .{};
-    const server_index = net.connect(gpa, &host, "localhost", 9053) orelse return;
+    const server_index = net.connect(memory.persistent_allocator, &host, "localhost", 9053) orelse return;
     defer std.os.close(host.fd);
 
     //
@@ -219,7 +226,6 @@ pub fn main() !void {
     const desired_frame_time = std.time.ns_per_s / fps;
 
     var tick: u64 = 0;
-    //const dt: f32 = 1.0/@intToFloat(f32, fps);
 
     //
     // Network state
@@ -244,7 +250,7 @@ pub fn main() !void {
         .opengl_profile = .opengl_core_profile,
     };
 
-    const window = glfw.Window.create(1920, 1080, "floating", null, null, hints) orelse {
+    const window = glfw.Window.create(400, 300, "floating", null, null, hints) orelse {
         std.log.err("Failed to open window: {?s}", .{glfw.getErrorString()});
         std.process.exit(1);
     };
@@ -265,9 +271,9 @@ pub fn main() !void {
     var module = try code_module.CodeModule(struct {
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input) void,
         draw: *fn (vars: *const Vars, memory: *Memory, b: *draw.Buffer, player_id: common.PlayerId, input: *const Input) void,
-    }).init(gpa, "zig-out/lib", "game");
+    }).init(memory.persistent_allocator, "zig-out/lib", "game");
 
-    try module.open(gpa);
+    try module.open(memory.persistent_allocator);
     defer module.close();
 
     //
@@ -297,7 +303,7 @@ pub fn main() !void {
 
     var input_map1 = InputMap{};
 
-    memory.vel_graph.data = try gpa.alloc(f32, 2*fps);
+    memory.vel_graph.data = try memory.persistent_allocator.alloc(f32, 2*fps);
 
     var draw_buffer: draw.Buffer = .{};
 
@@ -411,7 +417,7 @@ pub fn main() !void {
             {
                 const s = perf_stats.get(.ModuleReloadCheck).startTime();
                 defer s.endTime();
-                if (try module.reloadIfChanged(gpa)) {
+                if (try module.reloadIfChanged(memory.persistent_allocator)) {
                     //_ = module.function_table.fofo();
                 }
             }
@@ -738,6 +744,10 @@ pub fn main() !void {
                 //}
             }
 
+            //
+            // End of frame
+            //
+
             tick += 1;
 
             frame_stat.endTime();
@@ -750,6 +760,13 @@ pub fn main() !void {
                     std.time.sleep(@intCast(time_left));
                 }
             }
+
+
+
+            _ = arena_allocator.reset(.retain_capacity);
+
+
+
         }
     }
 }

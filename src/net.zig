@@ -76,7 +76,7 @@ pub const Host = struct {
 };
 
 pub fn bind(allocator: std.mem.Allocator, port: u16) ?Host {
-    const addr_list = std.net.getAddressList(allocator, "0.0.0.0", port) catch return null;
+    const addr_list = std.net.getAddressList(allocator, "localhost", port) catch return null;
     defer addr_list.deinit();
 
     const flags = os.SOCK.DGRAM | os.SOCK.CLOEXEC | os.SOCK.NONBLOCK;
@@ -131,7 +131,7 @@ pub fn pushMessage(index: PeerIndex, message: anytype) void {
    std.debug.assert(peer.state != .Disconnected);
 
    const message_id = peer.current_message_id;
-   peer.current_message_id += 1;
+   peer.current_message_id = @addWithOverflow(peer.current_message_id, 1)[0];
 
    const size = @sizeOf(headers.Header) + @sizeOf(@TypeOf(message));
    var memory = temp_allocator.alloc(u8, size) catch unreachable;
@@ -831,8 +831,7 @@ pub fn ack(peer: *Peer, packet_id: u16) void {
 }
 
 fn right_wrap_distance(a: u16, b: u16, len: u16) u16 {
-    // TODO: handle overflow
-    return (@addWithOverflow(b, len)[0] - a) % len;
+    return @subWithOverflow(@addWithOverflow(b, len)[0], a)[0] % len;
 }
 
 //
