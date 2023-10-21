@@ -39,17 +39,6 @@ const PeerData = struct {
 
 var peers: [net.max_peer_count]PeerData = undefined;
 
-var perf_stats : stat.AllStatData(enum(usize) {
-    Timeout,
-    ReadNetData,
-    ProcessNetData,
-    SendNetData,
-}) = .{};
-
-var time_stats : stat.AllStatData(enum(usize) {
-    Frametime,
-}) = .{};
-
 const NewConnectionData = struct {
     input_buffer: bb.ByteBuffer(1024) = .{},
     address: std.net.Address,
@@ -99,7 +88,7 @@ pub fn main() !void {
     var prng = std.rand.DefaultPrng.init(crand.int(u64));
     const rand = prng.random();
 
-    var print_perf = false;
+    //var print_perf = false;
 
     var timer = try std.time.Timer.start();
     var actual_timer = try std.time.Timer.start();
@@ -119,7 +108,7 @@ pub fn main() !void {
                 accumulator = 0;
             }
 
-            const frame_stat = time_stats.get(.Frametime).startTime();
+            //const frame_stat = time_stats.get(.Frametime).startTime();
 
             {
                 if (try module.reloadIfChanged(memory.persistent_allocator)) {
@@ -250,8 +239,8 @@ pub fn main() !void {
             // Send network data
             //
             {
-                const s = perf_stats.get(.SendNetData).startTime();
-                defer s.endTime();
+                //const s = perf_stats.get(.SendNetData).startTime();
+                //defer s.endTime();
 
                 _ = rand;
                 _ = new_connections;
@@ -261,15 +250,15 @@ pub fn main() !void {
 
             tick += 1;
 
-            frame_stat.endTime();
+            //frame_stat.endTime();
             // Here we shoehorn in some sleeping to not consume all the cpu resources
             {
-                const real_dt = frame_stat.samples.peek();
-                const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(real_dt));
-                if (time_left > std.time.us_per_s) {
-                    // if we have at least 1us left, sleep
-                    std.time.sleep(@intCast(time_left));
-                }
+                //const real_dt = frame_stat.samples.peek();
+                //const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(real_dt));
+                //if (time_left > std.time.us_per_s) {
+                //    // if we have at least 1us left, sleep
+                //    std.time.sleep(@intCast(time_left));
+                //}
             }
 
 
@@ -284,23 +273,23 @@ pub fn main() !void {
         if (actual_timer.read() >= 2*std.time.ns_per_s) {
             actual_timer.reset();
 
-            if (print_perf) {
-                for (&perf_stats.stat_data, 0..) |*s,i| {
-                    const result = s.mean_std();
-                    std.log.info("{s:20} {:10} {:10}", .{@tagName(@as(perf_stats.enum_type, @enumFromInt(i))), result.avg, result.std});
-                }
-                std.log.info("----------", .{});
-                for (&time_stats.stat_data, 0..) |*s,i| {
-                    const result = s.mean_std();
-                    std.log.info("{s:20} {:10} {:10}", .{@tagName(@as(time_stats.enum_type, @enumFromInt(i))), result.avg, result.std});
-                }
-                std.log.info("----------", .{});
-                for (&net.net_stats.stat_data, 0..) |*s,i| {
-                    const result = s.mean_std();
-                    std.log.info("{s:20} {:10} {:10}", .{@tagName(@as(net.net_stats.enum_type, @enumFromInt(i))), result.avg, result.std});
-                }
-                std.log.info("----------", .{});
-            }
+            //if (print_perf) {
+            //    for (&perf_stats.stat_data, 0..) |*s,i| {
+            //        const result = s.mean_std();
+            //        std.log.info("{s:20} {:10} {:10}", .{@tagName(@as(perf_stats.enum_type, @enumFromInt(i))), result.avg, result.std});
+            //    }
+            //    std.log.info("----------", .{});
+            //    for (&time_stats.stat_data, 0..) |*s,i| {
+            //        const result = s.mean_std();
+            //        std.log.info("{s:20} {:10} {:10}", .{@tagName(@as(time_stats.enum_type, @enumFromInt(i))), result.avg, result.std});
+            //    }
+            //    std.log.info("----------", .{});
+            //    for (&net.net_stats.stat_data, 0..) |*s,i| {
+            //        const result = s.mean_std();
+            //        std.log.info("{s:20} {:10} {:10}", .{@tagName(@as(net.net_stats.enum_type, @enumFromInt(i))), result.avg, result.std});
+            //    }
+            //    std.log.info("----------", .{});
+            //}
         }
     }
 }

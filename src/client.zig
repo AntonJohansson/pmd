@@ -4,7 +4,7 @@ const packet = @import("packet.zig");
 const packet_meta = @import("packet_meta.zig");
 const headers = @import("headers.zig");
 const net = @import("net.zig");
-const statistics = @import("stat.zig");
+const stat = @import("stat.zig");
 const command = @import("command.zig");
 const code_module = @import("code_module.zig");
 
@@ -125,15 +125,6 @@ fn findLocalPlayerById(local_players: []LocalPlayer, id: PlayerId) ?*LocalPlayer
     }
     return null;
 }
-
-var perf_stats : statistics.AllStatData(enum(usize) {
-    ReadNetData,
-    ProcessNetData,
-    SendNetData,
-    Update,
-    Render,
-    ModuleReloadCheck,
-}) = .{};
 
 var memory: Memory = .{};
 
@@ -401,6 +392,7 @@ pub fn main() !void {
         frame_start_time = frame_end_time;
         accumulator += frame_time;
 
+
         while (accumulator >= desired_frame_time) {
             if (accumulator >= desired_frame_time) {
                 accumulator -= desired_frame_time;
@@ -409,14 +401,15 @@ pub fn main() !void {
             scroll_delta = 0.0;
             glfw.pollEvents();
 
-            const frame_stat = memory.time_stats.get(.Frametime).startTime();
+            //const frame_stat = memory.time_stats.get(.Frametime).startTime();
+            memory.time += desired_frame_time;
 
             if (window.shouldClose())
                 running = false;
 
             {
-                const s = perf_stats.get(.ModuleReloadCheck).startTime();
-                defer s.endTime();
+                //const s = perf_stats.get(.ModuleReloadCheck).startTime();
+                //defer s.endTime();
                 if (try module.reloadIfChanged(memory.persistent_allocator)) {
                     //_ = module.function_table.fofo();
                 }
@@ -432,8 +425,8 @@ pub fn main() !void {
             //
             var events: []net.Event = undefined;
             {
-                const s = perf_stats.get(.ReadNetData).startTime();
-                defer s.endTime();
+                //const s = perf_stats.get(.ReadNetData).startTime();
+                //defer s.endTime();
 
                 events = net.receiveMessagesClient(&host, server_index);
 
@@ -564,9 +557,14 @@ pub fn main() !void {
                 //
 
                 {
+                    memory.stat_data.start("client update");
+                    defer memory.stat_data.end();
+
                     const lp = &local_players[0];
                     if (lp.id != null) {
                         //lp.input.clear();
+
+                        memory.stat_data.start("gather input");
                         for (&lp.input_map.map, 0..) |*state,i| {
 
                             const action: glfw.Action = switch (state.input_type) {
@@ -604,6 +602,8 @@ pub fn main() !void {
                             }
                             state.last_action = action;
                         }
+                        memory.stat_data.end();
+
                         // TODO(anjo): We have to dealy with mouse buttons separately here which is annoying
                         if (window.getMouseButton(.left) == .press) {
                             lp.input.set(.Interact);
@@ -636,8 +636,12 @@ pub fn main() !void {
                             const player = common.findPlayerById(&memory.players.buffer, lp.id.?);
 
                             // run predictive move
-                            if (player != null)
+                            if (player != null) {
+                                memory.stat_data.start("game update");
+                                defer memory.stat_data.end();
                                 module.function_table.update(&config.vars, &memory, player.?, &lp.input);
+                            }
+
                         }
                     }
                 }
@@ -682,8 +686,8 @@ pub fn main() !void {
             // Send network data
             //
             {
-                const s = perf_stats.get(.SendNetData).startTime();
-                defer s.endTime();
+                //const s = perf_stats.get(.SendNetData).startTime();
+                //defer s.endTime();
                 net.process(&host, server_index);
             }
 
@@ -691,15 +695,21 @@ pub fn main() !void {
             // Render
             //
             {
-                const s = perf_stats.get(.Render).startTime();
-                defer s.endTime();
+                //const s = perf_stats.get(.Render).startTime();
+                //defer s.endTime();
 
+                memory.stat_data.start("draw collect");
                 for (local_players) |lp| {
                     if (lp.id == null)
                         continue;
                     module.function_table.draw(&config.vars, &memory, &draw_buffer, lp.id.?, &lp.input);
                 }
+                memory.stat_data.end();
+
+                memory.stat_data.start("draw process");
                 draw.process(&draw_buffer, width, height);
+                memory.stat_data.end();
+
 
                 window.swapBuffers();
                         //rlgl.rlDisableBackfaceCulling();
@@ -709,39 +719,6 @@ pub fn main() !void {
                 //var x_offset: f32 = 5.0;
                 //var y_offset: f32 = 0;
                 //var buf: [64]u8 = undefined;
-                //if (config.vars.draw_fps) {
-                //    for (time_stats.stat_data) |*stat,i| {
-                //        const result = stat.mean_std();
-                //        const str = std.fmt.bufPrint(buf[0..buf.len-1], "{s:20} {:10} {:10}", .{
-                //            @tagName(@intToEnum(time_stats.enum_type, i)), result.avg, result.std
-                //        }) catch unreachable;
-                //        buf[str.len] = 0;
-                //        raylib.DrawTextEx(font, @ptrCast([*c]const u8, str), raylib.Vector2{.x = x_offset, .y = y_offset}, fontsize, @intToFloat(f32, spacing), raylib.RAYWHITE);
-                //        y_offset += 1.5 * fontsize;
-                //    }
-                //}
-                //if (config.vars.draw_perf) {
-                //    for (perf_stats.stat_data) |*stat,i| {
-                //        const result = stat.mean_std();
-                //        const str = std.fmt.bufPrint(buf[0..buf.len-1], "{s:20} {:10} {:10}", .{
-                //            @tagName(@intToEnum(perf_stats.enum_type, i)), result.avg, result.std
-                //        }) catch unreachable;
-                //        buf[str.len] = 0;
-                //        raylib.DrawTextEx(font, @ptrCast([*c]const u8, str), raylib.Vector2{.x = x_offset, .y = y_offset}, fontsize, @intToFloat(f32, spacing), raylib.RAYWHITE);
-                //        y_offset += 1.5 * fontsize;
-                //    }
-                //}
-                //if (config.vars.draw_net) {
-                //    for (net.net_stats.stat_data) |*stat,i| {
-                //        const result = stat.mean_std();
-                //        const str = std.fmt.bufPrint(buf[0..buf.len-1], "{s:20} {:10} {:10}", .{
-                //            @tagName(@intToEnum(net.net_stats.enum_type, i)), result.avg, result.std
-                //        }) catch unreachable;
-                //        buf[str.len] = 0;
-                //        raylib.DrawTextEx(font, @ptrCast([*c]const u8, str), raylib.Vector2{.x = x_offset, .y = y_offset}, fontsize, @intToFloat(f32, spacing), raylib.RAYWHITE);
-                //        y_offset += 1.5 * fontsize;
-                //    }
-                //}
             }
 
             //
@@ -750,15 +727,15 @@ pub fn main() !void {
 
             tick += 1;
 
-            frame_stat.endTime();
+            //frame_stat.endTime();
             // Here we shoehorn in some sleeping to not consume all the cpu resources
             {
-                const real_dt = frame_stat.samples.peek();
-                const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(real_dt));
-                if (time_left > std.time.us_per_s) {
-                    // if we have at least 1us left, sleep
-                    std.time.sleep(@intCast(time_left));
-                }
+                //const real_dt = frame_stat.samples.peek();
+                //const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(real_dt));
+                //if (time_left > std.time.us_per_s) {
+                //    // if we have at least 1us left, sleep
+                //    std.time.sleep(@intCast(time_left));
+                //}
             }
 
 

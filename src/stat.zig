@@ -1,14 +1,67 @@
 const std = @import("std");
 const bb = @import("bytebuffer.zig");
 
+fn rdtsc() u32 {
+    return asm volatile ("rdtsc ": [out] "={eax}" (-> u32));
+}
+
+pub const StatData = struct {
+    entries: std.BoundedArray(StatEntry, 128) = .{},
+    ids_being_tracked: std.BoundedArray(u16, 128) = .{},
+
+    const Self = @This();
+
+    pub fn start(self: *Self, name: []const u8) void {
+        const id = self.findId(name) orelse blk: {
+            _ = self.entries.addOneAssumeCapacity();
+            const new_id = self.entries.len-1;
+            if (self.ids_being_tracked.len > 0) {
+                const parent_id = self.ids_being_tracked.get(self.ids_being_tracked.len-1);
+                var parent = &self.entries.slice()[parent_id];
+                parent.children.appendAssumeCapacity(new_id);
+            }
+            break :blk new_id;
+        };
+
+        var stat = &self.entries.slice()[id];
+        stat.name = name;
+
+        if (self.ids_being_tracked.len == 0) {
+            stat.is_root = true;
+        }
+
+        _ = stat.startTime();
+        self.ids_being_tracked.appendAssumeCapacity(id);
+    }
+
+    pub fn end(self: *Self) void {
+        std.debug.assert(self.ids_being_tracked.len != 0);
+        const id = self.ids_being_tracked.pop();
+        var stat = &self.entries.slice()[id];
+        _ = stat.endTime();
+    }
+
+    fn findId(self: *Self, name: []const u8) ?u16 {
+        for (self.entries.constSlice(), 0..self.entries.len) |stat,i| {
+            if (std.mem.eql(u8, stat.name, name))
+                return @intCast(i);
+        }
+        return null;
+    }
+};
+
 const StatResult = struct {
     avg: u64,
     std: u64,
 };
 
-const StatData = struct {
+pub const StatEntry = struct {
+    name: []const u8 = undefined,
     samples: bb.CircularBuffer(u64, 256) = .{},
     start_time: std.time.Instant = undefined,
+    is_root: bool = false,
+
+    children: std.BoundedArray(u16, 16) = .{},
 
     const Self = @This();
 
@@ -49,20 +102,3 @@ const StatData = struct {
         };
     }
 };
-
-pub fn AllStatData(comptime T: type) type {
-    return struct {
-        stat_data: [@typeInfo(T).Enum.fields.len]StatData = undefined,
-
-        comptime enum_type: type = T,
-
-        pub fn indexToEnum(self: *@This(), index: usize) T {
-            _ = self;
-            return @enumFromInt(index);
-        }
-
-        pub fn get(self: *@This(), label: T) *StatData {
-            return &self.stat_data[@intFromEnum(label)];
-        }
-    };
-}

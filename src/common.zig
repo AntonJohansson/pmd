@@ -8,7 +8,7 @@ const m4 = math.m4;
 const primitive = @import("primitive.zig");
 const Camera3d = primitive.Camera3d;
 
-const statistics = @import("stat.zig");
+const stat = @import("stat.zig");
 
 pub const connect_packet_repeat_count = 10;
 
@@ -165,10 +165,13 @@ pub const Memory = struct {
     selected_entity: ?u32 = null,
     widget: WidgetModel = .{},
 
-    time_stats: statistics.AllStatData(enum(usize) {
-        Frametime,
-    }) = .{},
-
     frame_allocator: std.mem.Allocator = undefined,
     persistent_allocator: std.mem.Allocator = undefined,
+
+    stat_data: stat.StatData = .{},
+
+    ray_model: ?m4 = null,
+
+    // in in ns
+    time: u64 = 0,
 };

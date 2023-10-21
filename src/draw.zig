@@ -31,7 +31,7 @@ const sg = sokol.gfx;
 const slog = sokol.log;
 const sdtx = sokol.debugtext;
 
-pub const Buffer = bb.ByteBuffer(16*8192);
+pub const Buffer = bb.ByteBuffer(32*8192);
 
 pub const Pipeline = enum {
     no_depth,
@@ -669,7 +669,7 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
                     .data = sg.asRange(m.verts),
                 });
 
-                const model = m4model(.{.x=0,.y=0,.z=100},.{.x=1,.y=1,.z=1});
+                const model = m4model(.{.x=0,.y=0,.z=0},.{.x=1,.y=1,.z=1});
                 var uniforms = Uniforms {
                     .mvp = m4transpose(m4mul(vp, model)),
                     .color = v4 {

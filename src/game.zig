@@ -17,6 +17,10 @@ const Vars = config.Vars;
 
 const primitive = @import("primitive.zig");
 const Color = primitive.Color;
+const stat = @import("stat.zig");
+
+const bb = @import("bytebuffer.zig");
+const CircularArray = bb.CircularArray;
 
 const math = @import("math.zig");
 const v4 = math.v4;
@@ -69,6 +73,9 @@ const widget_size_plane_yz = v3 {.x=widget_plane_thickness,.y=widget_plane_lengt
 const widget_size_plane_xz = v3 {.x=widget_plane_length,.y=widget_plane_thickness,.z=widget_plane_length};
 
 const global_plane_size = v2 {.x = 100.0, .y = 100.0};
+
+const textheight = 1.0/30.0;
+const fontsize = textheight;
 
 fn updateWidget(widget: *common.WidgetModel, input: *const Input, start: v3, dir: v3) void {
     var model = widget.model.*;
@@ -787,22 +794,75 @@ const triangles = [256][16]i8{
     .{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
 };
 
+fn pointInTriangle(a: v3, b: v3, c: v3, p: v3) ?v3 {
+    // https://math.stackexchange.com/questions/544946/determine-if-projection-of-3d-point-onto-plane-is-within-a-triangle
+    // https://math.stackexchange.com/questions/4322/check-whether-a-point-is-within-a-3d-triangle/2209636
+
+    const u = v3sub(b,a);
+    const v = v3sub(c,a);
+    const n = v3cross(u,v);
+    const w = v3sub(p,a);
+
+    const n2 = v3len2(n);
+    const gamma = v3dot(v3cross(u,w), n)/n2;
+    const beta  = v3dot(v3cross(w,v), n)/n2;
+    const alpha = 1 - gamma - beta;
+
+    if (alpha > 0 and beta > 0 and gamma > 0 and alpha < 1) {
+        return v3add(v3add(v3scale(alpha, a),
+                           v3scale(beta, b)),
+                     v3scale(gamma, c));
+    } else {
+        return null;
+    }
+}
+
+const mapsize = 1000.0;
+const gridsize = 32;
+const element_size: f32 = mapsize/@as(f32, gridsize-1);
+var samples: [gridsize][gridsize][gridsize]f32 = undefined;
+var num_triangles: usize = 0;
+var tr: []v3 = undefined;
+
+fn collideMarch(memory: *Memory) ?v3 {
+    var closest_distance = std.math.floatMax(f32);
+    var result: ?v3 = null;
+    for (0..num_triangles) |i| {
+        const a = tr[3*i+0];
+        const b = tr[3*i+1];
+        const c = tr[3*i+2];
+
+        const start = math.m4modelTranslation(memory.ray_model.?);
+        if (pointInTriangle(a,b,c, start)) |pp| {
+            const diff = v3sub(pp, start);
+            const dist = v3len(diff);
+            if (dist < closest_distance and std.math.approxEqAbs(f32, v3dot(diff, memory.camera.dir), dist, 0.001)) {
+                closest_distance = dist;
+                result = pp;
+            }
+        }
+    }
+    return result;
+}
+
 fn march(memory: *Memory, b: *draw_api.Buffer) void {
-    const size = 500.0;
-
-    const gridsize = 10;
-
-    var samples: [gridsize][gridsize][gridsize]f32 = undefined;
     var min_value: f32 = std.math.floatMax(f32);
     var max_value: f32 = std.math.floatMin(f32);
     for (0..gridsize) |k| {
         for (0..gridsize) |j| {
             for (0..gridsize) |i| {
-                const dist_to_center = @as(f32, @floatFromInt(gridsize-1))/2.0;
-                const center = v3{.x=dist_to_center, .y=dist_to_center, .z=dist_to_center};
+
+                //const dist_to_center = @as(f32, @floatFromInt(gridsize-1))/2.0;
+                //const center = v3{.x=dist_to_center, .y=dist_to_center, .z=dist_to_center};
                 const pos = v3{.x = @floatFromInt(i), .y = @floatFromInt(j), .z = @floatFromInt(k)};
-                const dist = math.v3dist(pos, center);
-                const value = dist - dist_to_center;
+
+                //const dist = math.v3dist(pos, center);
+
+                //const value = dist - dist_to_center;
+                //samples[k][j][i] = value;
+
+                const dt = (gridsize-1)/8*sin(2.0*std.math.pi * @as(f32, @floatFromInt(memory.time))/10e9);
+                const value = pos.z - (dt*sin(pos.x)*sin(pos.y) + (gridsize-1)/7);
                 samples[k][j][i] = value;
 
                 if (value < min_value)
@@ -813,33 +873,38 @@ fn march(memory: *Memory, b: *draw_api.Buffer) void {
         }
     }
 
-    const element_size: f32 = size/@as(f32, gridsize-1);
 
-    for (0..gridsize) |k| {
-        for (0..gridsize) |j| {
-            for (0..gridsize) |i| {
-                const col = samples[k][j][i];
-                pushCube(b, .{
-                    .pos = .{
-                        .x = 0.0   + @as(f32, @floatFromInt(i))*element_size,
-                        .y = 0.0   + @as(f32, @floatFromInt(j))*element_size,
-                        .z = 100.0 + @as(f32, @floatFromInt(k))*element_size,
-                    },
-                    .size = .{
-                        .x = 5.0,
-                        .y = 5.0,
-                        .z = 5.0,
-                    },
-                },
-                hsvToRgb(
-                    0.0,
-                    0.0,
-                    (col - min_value) / (max_value-min_value),
-                ),
-                );
-            }
-        }
-    }
+    // TODO(anjo): Add instancing...
+    //for (0..gridsize) |k| {
+    //    for (0..gridsize) |j| {
+    //        for (0..gridsize) |i| {
+    //            const col = samples[k][j][i];
+    //            pushCube(b, .{
+    //                .pos = .{
+    //                    .x = 0.0   + @as(f32, @floatFromInt(i))*element_size,
+    //                    .y = 0.0   + @as(f32, @floatFromInt(j))*element_size,
+    //                    .z = 0.0   + @as(f32, @floatFromInt(k))*element_size,
+    //                },
+    //                .size = .{
+    //                    .x = 5.0,
+    //                    .y = 5.0,
+    //                    .z = 5.0,
+    //                },
+    //            },
+    //            hsvToRgb(
+    //                0.0,
+    //                0.0,
+    //                (col - min_value) / (max_value-min_value),
+    //            ),
+    //            );
+    //        }
+    //    }
+    //}
+
+    num_triangles = 0;
+    tr = memory.frame_allocator.alloc(v3, (gridsize-1)*(gridsize-1)*(gridsize-1)*5*3) catch {
+        return;
+    };
 
     for (0..gridsize-1) |k| {
         for (0..gridsize-1) |j| {
@@ -894,30 +959,26 @@ fn march(memory: *Memory, b: *draw_api.Buffer) void {
                     if (edges[cubeindex] & 2048 != 0) verts[11] = v3interp(iso,points[3],points[7],values[3],values[7]);
 
                     var index: usize = 0;
-                    var num_triangles: usize = 0;
-                    const tr = memory.frame_allocator.alloc(v3, 5*3) catch {
-                        return;
-                    };
                     while (triangles[cubeindex][index] != -1) : (index += 3) {
                         tr[3*num_triangles+0] = verts[@intCast(triangles[cubeindex][index+0])];
                         tr[3*num_triangles+1] = verts[@intCast(triangles[cubeindex][index+1])];
                         tr[3*num_triangles+2] = verts[@intCast(triangles[cubeindex][index+2])];
                         num_triangles += 1;
                     }
-
-                    if (num_triangles > 0) {
-                        push(b, primitive.Mesh{
-                            .verts = tr[0..3*num_triangles],
-                        },
-                        hsvToRgb(
-                            0.0,
-                            0.8,
-                            0.5,
-                        ));
-                    }
                 }
             }
         }
+    }
+
+    if (num_triangles > 0) {
+        push(b, primitive.Mesh{
+            .verts = tr[0..3*num_triangles],
+        },
+        hsvToRgb(
+            0.0,
+            0.8,
+            0.5,
+        ));
     }
     //tr[0] = v3scale(100.0, .{.x=-0.5,.y=-0.5,.z=1.0});
     //tr[1] = v3scale(100.0, .{.x= 0.0,.y= 0.5,.z=1.0});
@@ -958,7 +1019,7 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
         memory.camera.pos = v3add(player.pos, offset);
         memory.camera.dir = player.dir;
         memory.camera.view = m4view(memory.camera.pos, memory.camera.dir);
-        memory.camera.proj = m4projection(0.01, 1000.0, vars.aspect, vars.fov);
+        memory.camera.proj = m4projection(0.01, 10000.0, vars.aspect, vars.fov);
     } else {
         if (input.isset(.Interact)) {
             memory.target.x -= input.cursor_delta.x / memory.zoom;
@@ -976,6 +1037,10 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
         memory.target.x = 0.5;
         memory.target.y = 0.5;
         memory.zoom = 1.0;
+    }
+
+    if (input.isset(.AltInteract)) {
+        memory.ray_model = math.m4modelWithRotations(memory.camera.pos, .{.x=1000,.y=10,.z=10}, .{.x=0,.y=player.pitch,.z=player.yaw});
     }
 
     if (input.isset(.Editor)) {
@@ -1177,8 +1242,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                     80.0 + 10.0*(2.0*rand.float(f32)-1.0),
                     0.8 +  0.2*(2.0*rand.float(f32)-1.0),
                     0.5 +  0.2*(2.0*rand.float(f32)-1.0)
-                ),
-                );
+                ));
             }
         }
     }
@@ -1237,7 +1301,34 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
         );
     }
 
+    memory.stat_data.start("march");
     march(memory, b);
+    memory.stat_data.end();
+
+    if (memory.ray_model) |model| {
+        push(b, primitive.Cube2 {
+            .model = model,
+        }, hsvToRgb(
+            20.0 + 10.0*(2.0*rand.float(f32)-1.0),
+            0.8 +  0.2*(2.0*rand.float(f32)-1.0),
+            0.5 +  0.2*(2.0*rand.float(f32)-1.0)
+        ));
+
+        if (collideMarch(memory)) |p| {
+            pushCube(b, .{
+                .pos = p,
+                .size = .{
+                    .x = 20.0,
+                    .y = 20.0,
+                    .z = 20.0,
+                },
+            }, hsvToRgb(
+                0.9,
+                0.5,
+                0.8,
+            ));
+        }
+    }
 
     end3d(b);
 
@@ -1253,9 +1344,6 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
     //            .{.x = 10, .y = 10},
     //            15, 0.75, 0.5);
     //    }
-
-          const textheight = 1.0/30.0;
-          const fontsize = textheight;
 
         if (input.isset(.Console)) {
         //    if (!mouse_enabled) {
@@ -1314,29 +1402,32 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
             @memset(&text.str, 0);
 
             {
+
+                drawProfileData(memory, b);
                 //var x_offset: f32 = 5.0;
                 //if (vars.draw_fps) {
-                    for (&memory.time_stats.stat_data) |*stat| {
-                        const result = stat.mean_std();
-                        @memset(&text.str, 0);
-                        const avg_fps = if (result.avg != 0.0) 1000000000 / result.avg else 0;
-                        const str = std.fmt.bufPrint(&text.str, "fps: {:4}", .{
-                            avg_fps,
-                        }) catch unreachable;
 
-                        text.len = str.len;
-                        pushText(b, text, hsvToRgb(200, 0.75, 0.75));
-                        text.pos.y -= fontsize;
-                    }
+                    //for (&memory.time_stats.stat_data) |*stat| {
+                    //    const result = stat.mean_std();
+                    //    @memset(&text.str, 0);
+                    //    const avg_fps = if (result.avg != 0.0) 1000000000 / result.avg else 0;
+                    //    const str = std.fmt.bufPrint(&text.str, "fps: {:4}", .{
+                    //        avg_fps,
+                    //    }) catch unreachable;
+
+                    //    text.len = str.len;
+                    //    pushText(b, text, hsvToRgb(200, 0.75, 0.75));
+                    //    text.pos.y -= fontsize;
+                    //}
                 //}
             }
 
-            @memset(&text.str, 0);
-            {
-                const str = std.fmt.bufPrint(&text.str, "speed: {d:5.0}\nonground: {}", .{v3len(memory.players.get(0).vel), memory.players.get(0).onground}) catch unreachable;
-                text.len = str.len;
-                pushText(b, text, hsvToRgb(200, 0.75, 0.75));
-            }
+            //@memset(&text.str, 0);
+            //{
+            //    const str = std.fmt.bufPrint(&text.str, "speed: {d:5.0}\nonground: {}", .{v3len(memory.players.get(0).vel), memory.players.get(0).onground}) catch unreachable;
+            //    text.len = str.len;
+            //    pushText(b, text, hsvToRgb(200, 0.75, 0.75));
+            //}
 
         }
 
@@ -1474,4 +1565,54 @@ fn drawGraph(b: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f
         },
         .thickness = 1.0,
     }, Color{.r = 128, .g = 128, .b = 128, .a = 255});
+}
+
+fn drawProfileData(memory: *Memory, b: *draw_api.Buffer) void {
+    var worklist: std.BoundedArray(struct {
+        entry: *stat.StatEntry = undefined,
+        depth: u32 = 0,
+    } , 64) = .{};
+
+    // Add root nodes to worklist
+    for (memory.stat_data.entries.slice()) |*s| {
+        if (!s.is_root)
+            continue;
+        worklist.appendAssumeCapacity(.{.entry=s});
+    }
+
+    var y: f32 = 1.0 - fontsize;
+
+    var text = primitive.Text{
+        .pos = .{
+            .x = 0,
+            .y = y,
+        },
+        .str = undefined,
+        .len = 0,
+        .size = fontsize,
+    };
+
+    while (worklist.len > 0) {
+        const work = worklist.pop();
+
+        const result = work.entry.mean_std();
+        @memset(&text.str, 0);
+        const str = std.fmt.bufPrint(&text.str, "{s}: {:4} us", .{
+            work.entry.name,
+            result.avg/1000,
+        }) catch unreachable;
+
+        text.len = str.len;
+        text.pos.x = fontsize*@as(f32, @floatFromInt(work.depth));
+        pushText(b, text, hsvToRgb(200, 0.75, 0.75));
+        text.pos.y -= fontsize;
+
+        for (work.entry.children.slice()) |i| {
+            const entry = &memory.stat_data.entries.slice()[i];
+            worklist.appendAssumeCapacity(.{
+                .entry = entry,
+                .depth = work.depth+1,
+            });
+        }
+    }
 }

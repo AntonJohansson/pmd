@@ -14,11 +14,6 @@ var log: logging.Log = .{
 pub const fragment_size = 1024;
 const message_receive_buffer_len = 128;
 
-pub var net_stats : stat.AllStatData(enum(usize) {
-    NetIn,
-    NetOut,
-}) = .{};
-
 const ClientHost = struct {
     fd: std.os.socket_t,
 };
@@ -802,7 +797,7 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
             //log.info("sending packet {} with {} messsages in {} bytes", .{header.id, header.num_packets, output_buffer.top});
 
             total_bytes_sent += bytes_sent;
-            net_stats.get(.NetOut).samples.push(total_bytes_sent);
+            //net_stats.get(.NetOut).samples.push(total_bytes_sent);
         }
     }
 
