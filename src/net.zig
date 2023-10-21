@@ -71,7 +71,7 @@ pub const Host = struct {
 };
 
 pub fn bind(allocator: std.mem.Allocator, port: u16) ?Host {
-    const addr_list = std.net.getAddressList(allocator, "localhost", port) catch return null;
+    const addr_list = std.net.getAddressList(allocator, "0.0.0.0", port) catch return null;
     defer addr_list.deinit();
 
     const flags = os.SOCK.DGRAM | os.SOCK.CLOEXEC | os.SOCK.NONBLOCK;
@@ -713,7 +713,7 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
         // TODO(anjo): verbose
         //log.info("checking if we can add messages", .{});
         var id = peer.last_outgoing_acked_message_id;
-        while (id != peer.current_message_id and id != (peer.last_outgoing_acked_message_id + message_receive_buffer_len-1) % peer.messages_in_flight.data.len) : (id += 1) {
+        while (id != peer.current_message_id and id != (@addWithOverflow(peer.last_outgoing_acked_message_id, message_receive_buffer_len-1)[0]) % peer.messages_in_flight.data.len) : (id += 1) {
             // TODO(anjo): verbose
             //log.info("  checking id {}", .{id});
 

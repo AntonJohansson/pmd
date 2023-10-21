@@ -205,7 +205,7 @@ pub fn main() !void {
     // Connect to server
     //
     var host: net.Host = .{};
-    const server_index = net.connect(memory.persistent_allocator, &host, "localhost", 9053) orelse return;
+    const server_index = net.connect(memory.persistent_allocator, &host, "85.228.204.146", 9053) orelse return;
     defer std.os.close(host.fd);
 
     //
