@@ -713,7 +713,7 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
         // TODO(anjo): verbose
         //log.info("checking if we can add messages", .{});
         var id = peer.last_outgoing_acked_message_id;
-        while (id != peer.current_message_id and id != (@addWithOverflow(peer.last_outgoing_acked_message_id, message_receive_buffer_len-1)[0]) % peer.messages_in_flight.data.len) : (id += 1) {
+        while (id != peer.current_message_id and id != (@addWithOverflow(peer.last_outgoing_acked_message_id, message_receive_buffer_len-1)[0]) % peer.messages_in_flight.data.len) : (id = @addWithOverflow(id, 1)[0]) {
             // TODO(anjo): verbose
             //log.info("  checking id {}", .{id});
 
