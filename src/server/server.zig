@@ -92,23 +92,12 @@ pub fn main() !void {
     var timer = try std.time.Timer.start();
     var actual_timer = try std.time.Timer.start();
     var frame_start_time: u64 = 0;
-    var accumulator: u64 = 0;
+    var frame_end_time: u64 = 0;
 
     while (running) {
-        const frame_end_time = timer.read();
-        const frame_time = frame_end_time - frame_start_time;
-        frame_start_time = frame_end_time;
-        accumulator += frame_time;
+        frame_start_time = timer.read();
 
-        while (accumulator >= desired_frame_time) {
-            if (accumulator >= desired_frame_time) {
-                accumulator -= desired_frame_time;
-            } else {
-                accumulator = 0;
-            }
-
-            //const frame_stat = time_stats.get(.Frametime).startTime();
-
+        {
             {
                 if (try module.reloadIfChanged(memory.persistent_allocator)) {
                     //_ = module.function_table.fofo();
@@ -247,23 +236,27 @@ pub fn main() !void {
                 net.processServer(&host);
             }
 
-            tick += 1;
-
-            //frame_stat.endTime();
-            // Here we shoehorn in some sleeping to not consume all the cpu resources
-            {
-                //const real_dt = frame_stat.samples.peek();
-                //const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(real_dt));
-                //if (time_left > std.time.us_per_s) {
-                //    // if we have at least 1us left, sleep
-                //    std.time.sleep(@intCast(time_left));
-                //}
-            }
-
-
             //
             // End of frame
             //
+
+            tick += 1;
+
+            frame_end_time = timer.read();
+            const frame_time = frame_end_time - frame_start_time;
+
+            // Here we shoehorn in some sleeping to not consume all the cpu resources
+            {
+                const start_sleep = timer.read();
+                var time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(frame_time));
+                if (time_left > std.time.us_per_s) {
+                    // if we have at least 1us left, sleep
+                    std.time.sleep(@intCast(time_left));
+                }
+
+                // spin for the remaining time
+                while (timer.read() - start_sleep < time_left) {}
+            }
 
             _ = arena_allocator.reset(.retain_capacity);
 

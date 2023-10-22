@@ -43,6 +43,10 @@ var log: logging.Log = .{
     .mirror_to_stdio = true,
 };
 
+const sokol = @import("sokol");
+const sa = sokol.audio;
+const slog = sokol.log;
+
 const glfw = @import("mach-glfw");
 const Key = glfw.Key;
 const MouseButton = glfw.MouseButton;
@@ -286,6 +290,19 @@ pub fn main() !void {
     defer draw.deinit();
 
     //
+    // Audio
+    //
+    sa.setup(.{
+        .logger = .{ .func = slog.func },
+    });
+    defer sa.shutdown();
+    const khz = 48000;
+    const samples_per_frame = @divTrunc(khz,fps)+1;
+    const num_samples = samples_per_frame;
+    var sample_index: usize = 0;
+    var samples: [num_samples]f32 = undefined;
+
+    //
     // Modules
     //
     var module = try code_module.CodeModule(struct {
@@ -351,7 +368,8 @@ pub fn main() !void {
     key_repeat_timer = try std.time.Timer.start();
 
     var frame_start_time: u64 = 0;
-    var accumulator: u64 = 0;
+    var frame_end_time: u64 = 0;
+    //var accumulator: u64 = 0;
 
     //config.vars.bloom_downscale = raylib.LoadRenderTexture(
     //    @divTrunc(width, @intCast(c_int, config.vars.bloom_scale)),
@@ -370,16 +388,15 @@ pub fn main() !void {
 
     var running = true;
     while (running) {
-        const frame_end_time = timer.read();
-        const frame_time = frame_end_time - frame_start_time;
-        frame_start_time = frame_end_time;
-        accumulator += frame_time;
+        frame_start_time = timer.read();
+        //accumulator += frame_time;
 
 
-        while (accumulator >= desired_frame_time) {
-            if (accumulator >= desired_frame_time) {
-                accumulator -= desired_frame_time;
-            }
+        //while (accumulator >= desired_frame_time) {
+        //    if (accumulator >= desired_frame_time) {
+        //        accumulator -= desired_frame_time;
+        //    }
+        {
 
             scroll_delta = 0.0;
             glfw.pollEvents();
@@ -715,28 +732,50 @@ pub fn main() !void {
             }
 
             //
+            // Audio
+            //
+            {
+                const num_frames = sa.expect();
+                std.log.info("num frames: {}", .{num_frames});
+                for (0..@intCast(num_frames)) |_| {
+                    if (sample_index % num_samples == 0) {
+                        _ = sa.push(&samples[0], num_samples);
+                    }
+                    const f = 10000;
+                    const samples_per_cycle = @as(f32, @floatFromInt(khz)) / @as(f32, @floatFromInt(f-1));
+                    samples[sample_index % num_samples] = 0.1*@sin(2*std.math.pi*@as(f32, @floatFromInt(sample_index))/samples_per_cycle);
+                    sample_index += 1;
+                }
+            }
+
+            //
             // End of frame
             //
 
             tick += 1;
 
-            //frame_stat.endTime();
+            frame_end_time = timer.read();
+            const frame_time = frame_end_time - frame_start_time;
+
             // Here we shoehorn in some sleeping to not consume all the cpu resources
             {
-                //const real_dt = frame_stat.samples.peek();
-                //const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(real_dt));
-                //if (time_left > std.time.us_per_s) {
-                //    // if we have at least 1us left, sleep
-                //    std.time.sleep(@intCast(time_left));
-                //}
+                const start_sleep = timer.read();
+                var time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(frame_time));
+                if (time_left > std.time.us_per_s) {
+                    // if we have at least 1us left, sleep
+                    std.time.sleep(@intCast(time_left));
+                }
+
+                // spin for the remaining time
+                while (timer.read() - start_sleep < time_left) {}
             }
 
-
-
             _ = arena_allocator.reset(.retain_capacity);
-
-
-
         }
+
+
+
+
+
     }
 }
