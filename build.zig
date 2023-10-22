@@ -11,17 +11,37 @@ pub fn build(b: *std.build.Builder) void {
     });
 
     //
+    // common
+    //
+
+    const common = b.createModule(.{
+        .source_file = .{.path = "src/common/common.zig"},
+        .dependencies = &.{.{.name="sokol",.module=sokol_module}},
+    });
+
+    //
+    // net
+    //
+
+    const net = b.createModule(.{
+        .source_file = .{.path = "src/net/net.zig"},
+        .dependencies = &.{.{.name="common",.module=common}},
+    });
+
+    //
     // lib
     //
 
     const libgame = b.addSharedLibrary(.{
         .name = "game",
-        .root_source_file = .{ .path = "src/game.zig" },
+        .root_source_file = .{ .path = "src/game/game.zig" },
         .target = target,
         .optimize = optimize,
     });
     // TODO: Remove when renderer is moved to separate library
     libgame.addModule("sokol", sokol_module);
+    libgame.addModule("common", common);
+    libgame.addModule("net", net);
     libgame.linkLibrary(sokol_build);
     _ = b.installArtifact(libgame);
 
@@ -31,12 +51,14 @@ pub fn build(b: *std.build.Builder) void {
 
     const client = b.addExecutable(.{
         .name = "client",
-        .root_source_file = .{ .path = "src/client.zig" },
+        .root_source_file = .{ .path = "src/client/client.zig" },
         .target = target,
         .optimize = optimize,
     });
     client.linkLibC();
     client.addModule("sokol", sokol_module);
+    client.addModule("common", common);
+    client.addModule("net", net);
     client.linkLibrary(sokol_build);
     b.installArtifact(client);
 
@@ -62,10 +84,12 @@ pub fn build(b: *std.build.Builder) void {
 
     const server = b.addExecutable(.{
         .name = "server",
-        .root_source_file = .{ .path = "src/server.zig" },
+        .root_source_file = .{ .path = "src/server/server.zig" },
         .target = target,
         .optimize = optimize,
     });
+    server.addModule("common", common);
+    server.addModule("net", net);
     server.linkLibC();
     b.installArtifact(server);
 
