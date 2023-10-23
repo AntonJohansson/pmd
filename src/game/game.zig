@@ -218,9 +218,7 @@ fn drawWidget(b: *draw_api.Buffer, widget: *common.WidgetModel) void {
     }, .{.r=0,.g=0,.b=255,.a=255});
 }
 
-fn playerMove(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input) void {
-    const dt = 1.0/165.0;
-
+fn playerMove(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
     if (!memory.show_cursor) {
         if (input.cursor_delta.x != 0 or input.cursor_delta.y != 0) {
             player.yaw   -= input.cursor_delta.x;
@@ -1007,11 +1005,13 @@ fn v3interp(iso: f32, p0: v3, p1: v3, v0: f32, v1: f32) v3 {
    };
 }
 
-export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input) void {
+export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
     // Player movement
     player.crouch = input.isset(.Crouch);
     player.sprint = input.isset(.Sprint);
-    playerMove(vars, memory, player, input);
+    playerMove(vars, memory, player, input, dt);
+
+    weaponUpdate(vars, memory, player, input, dt);
 
     // copy player pos to camera pos
     if (!vars.mode2d) {
@@ -1086,6 +1086,57 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
         memory.cursor_pos.y = std.math.clamp(memory.cursor_pos.y, 0, 1);
     }
 }
+
+fn weaponUpdate(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
+    // Update weapon cooldowns
+    std.debug.assert(player.weapon_cooldowns.len == player.weapons.len);
+    for (0..player.weapons.len) |i| {
+        const c = &player.weapon_cooldowns[i];
+        if (c.* > 0) {
+            c.* -= @min(dt, c.*);
+        }
+    }
+
+    if (input.isset(.SwitchWeapon)) {
+        player.weapon_current = (player.weapon_current + 1) % @as(u8, @intCast(player.weapons.len));
+        memory.new_sounds.appendAssumeCapacity(.weapon_switch);
+    }
+
+    const weapon = player.weapons[player.weapon_current];
+
+    // sniper zoom
+    if (weapon == .weapon_sniper and input.isset(.AltInteract)) {
+    }
+
+    // fire
+    const can_fire = player.weapon_cooldowns[player.weapon_current] <= 0;
+    if (can_fire and input.isset(.Interact)) {
+        switch (weapon) {
+            .weapon_sniper => {
+                player.weapon_cooldowns[player.weapon_current] = 1.0;
+                memory.new_sounds.appendAssumeCapacity(.sniper);
+            },
+            .weapon_nade => {
+                player.weapon_cooldowns[player.weapon_current] = 3.0;
+                memory.new_sounds.appendAssumeCapacity(.pip);
+            },
+        }
+    }
+
+    _ = vars;
+}
+
+//fn fireHitscan(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
+//
+//    for (memory.players.constSlice()) |p| {
+//
+//        const model = math.m4modelWithRotations(p.pos, .{.x=1,.y=1,.z=1}, ) m4 {
+//        intersectCubeLine(cube_model: m4, cube_size: v3, line_start: v3, line_dir: v3)
+//
+//
+//    }
+//
+//}
 
 fn f(h: f32, s: f32, v: f32, n: f32) f32 {
     const k = @mod(n + h/60.0, 6.0);
@@ -1286,20 +1337,26 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
         if (player.id == player_id)
             continue;
         const height: f32 = if (player.crouch) 15 else 22;
-        pushCube(b, .{
-            .pos = .{
-                .x = player.pos.x - player_cube_size/2.0,
-                .y = player.pos.y - player_cube_size/2.0,
-                .z = player.pos.z + tile_base_height + tile_max_height,
-            },
-            .size = .{
-                .x = player_cube_size,
-                .y = player_cube_size,
-                .z = height,
-            },
-        },
-        hsvToRgb(180, 0.75, 0.75),
-        );
+
+        const pos = v3 {
+            .x = player.pos.x - player_cube_size/2.0,
+            .y = player.pos.y - player_cube_size/2.0,
+            .z = player.pos.z + tile_base_height + tile_max_height,
+        };
+        const scale = v3 {
+            .x = player_cube_size,
+            .y = player_cube_size,
+            .z = height,
+        };
+        const rot = v3 {
+            .x=0,
+            .y=player.pitch,
+            .z=player.yaw,
+        };
+        const model = math.m4modelWithRotations(pos, scale, rot);
+        push(b, primitive.Cube2 {
+            .model = model,
+        }, hsvToRgb(180, 0.75, 0.75));
     }
 
     memory.stat_data.start("march");

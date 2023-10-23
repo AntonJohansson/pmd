@@ -59,7 +59,7 @@ pub fn main() !void {
     net.temp_allocator = memory.persistent_allocator;
 
     var module = try code_module.CodeModule(struct {
-        update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input) void,
+        update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
         draw: *fn (memory: *Memory) void,
     }).init(memory.persistent_allocator, "zig-out/lib", "game");
 
@@ -78,6 +78,7 @@ pub fn main() !void {
 
     const fps = 165;
     const desired_frame_time = std.time.ns_per_s / fps;
+    const dt: f32 = 1.0 / @as(f32, @floatFromInt(fps));
 
     var tick: u64 = 0;
     //const dt: f32 = 1.0/@intToFloat(f32, fps);
@@ -198,7 +199,7 @@ pub fn main() !void {
                                 if (found_id) {
                                     if (common.findPlayerById(memory.players.slice(), message.id)) |player| {
                                         const input: Input = message.input;
-                                        module.function_table.update(vars, &memory, player, &input);
+                                        module.function_table.update(vars, &memory, player, &input, dt);
                                         net.pushMessage(e.peer_index, packet.PlayerUpdateAuth{
                                             .tick = message.tick,
                                             .player = player.*,

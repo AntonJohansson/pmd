@@ -51,6 +51,11 @@ const glfw = @import("mach-glfw");
 const Key = glfw.Key;
 const MouseButton = glfw.MouseButton;
 
+const c = @cImport({
+    @cDefine("STB_VORBIS_HEADER_ONLY", "");
+    @cInclude("./stb_vorbis.c");
+});
+
 //
 // Input
 //
@@ -132,6 +137,21 @@ const InputMap = struct {
     }
 };
 
+//
+// Audio
+//
+
+const SoundType = common.SoundType;
+
+const SoundInfo = struct {
+    path: []const u8,
+    samples: []f32 = undefined,
+};
+
+const PlayingSound = struct {
+    samples: []f32 = undefined,
+    index: usize = 0,
+};
 
 //
 // LocalPlayer represents a player on the local game. This is to support
@@ -248,6 +268,7 @@ pub fn main() !void {
 
     const fps = 165;
     const desired_frame_time = std.time.ns_per_s / fps;
+    const dt: f32 = 1.0 / @as(f32, @floatFromInt(fps));
 
     var tick: u64 = 0;
 
@@ -292,21 +313,60 @@ pub fn main() !void {
     //
     // Audio
     //
+
     sa.setup(.{
         .logger = .{ .func = slog.func },
+        .num_channels = 2,
     });
     defer sa.shutdown();
-    const khz = 48000;
-    const samples_per_frame = @divTrunc(khz,fps)+1;
-    const num_samples = samples_per_frame;
-    var sample_index: usize = 0;
-    var samples: [num_samples]f32 = undefined;
+
+    const num_sound_types = @typeInfo(SoundType).Enum.fields.len;
+    var sound_file_map: [num_sound_types]SoundInfo = undefined;
+    const resource_dir = "res/";
+    const audio_dir = resource_dir ++ "audio/";
+    sound_file_map[@intFromEnum(SoundType.death)]         = .{.path=audio_dir ++ "kill.ogg"};
+    sound_file_map[@intFromEnum(SoundType.slide)]         = .{.path=audio_dir ++ "slide.ogg"};
+    sound_file_map[@intFromEnum(SoundType.sniper)]        = .{.path=audio_dir ++ "sniper.ogg"};
+    sound_file_map[@intFromEnum(SoundType.weapon_switch)] = .{.path=audio_dir ++ "switch.ogg"};
+    sound_file_map[@intFromEnum(SoundType.step)]          = .{.path=audio_dir ++ "step.ogg"};
+    sound_file_map[@intFromEnum(SoundType.pip)]           = .{.path=audio_dir ++ "pip.ogg"};
+    sound_file_map[@intFromEnum(SoundType.explosion)]     = .{.path=audio_dir ++ "explosion.ogg"};
+    sound_file_map[@intFromEnum(SoundType.doink)]         = .{.path=audio_dir ++ "doink.ogg"};
+
+    // Load all sounds into buffers
+    for (&sound_file_map) |*info| {
+        const file = std.fs.cwd().openFile(info.path, .{}) catch |err| {
+            std.log.err("Failed to open file: {s} ({})", .{info.path, err});
+            return;
+        };
+
+        const buf = file.readToEndAlloc(memory.persistent_allocator, 1024*1024*1024) catch {
+            std.log.err("Failed to read file: {s}", .{info.path});
+            return;
+        };
+        defer memory.persistent_allocator.free(buf);
+
+        var err: c_int = undefined;
+        const vorbis = c.stb_vorbis_open_memory(buf.ptr, @intCast(buf.len), &err, null) orelse {
+            std.log.err("Failed to decode file: {s}", .{info.path});
+            return;
+        };
+        std.debug.assert(err == 0);
+
+        const vorbis_info = c.stb_vorbis_get_info(vorbis);
+        const num_samples: usize = @as(c_uint, @intCast(vorbis_info.channels))*c.stb_vorbis_stream_length_in_samples(vorbis);
+        info.samples = memory.persistent_allocator.alloc(f32, num_samples) catch unreachable;
+        const samples_per_channel = c.stb_vorbis_get_samples_float_interleaved(vorbis, vorbis_info.channels, &info.samples[0], @intCast(num_samples));
+        std.debug.assert(samples_per_channel*2 == num_samples);
+    }
+
+    var playing_sounds: std.BoundedArray(PlayingSound, 64) = .{};
 
     //
     // Modules
     //
     var module = try code_module.CodeModule(struct {
-        update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input) void,
+        update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
         draw: *fn (vars: *const Vars, memory: *Memory, b: *draw.Buffer, player_id: common.PlayerId, input: *const Input) void,
     }).init(memory.persistent_allocator, "zig-out/lib", "game");
 
@@ -318,25 +378,25 @@ pub fn main() !void {
     //
 
     var input_map0 = InputMap{};
-    input_map0.map_key(.MoveForward,   .state,       .w);
-    input_map0.map_key(.MoveLeft,      .state,       .a);
-    input_map0.map_key(.MoveBack,      .state,       .s);
-    input_map0.map_key(.MoveRight,     .state,       .d);
-    //input_map0.map_key(.Jump,          .rising_edge, .space);
-    input_map0.map_mouse_scroll(.Jump, .scroll_down);
-    input_map0.map_key(.Crouch,        .state,       .left_control);
-    input_map0.map_key(.Sprint,        .state,       .left_shift);
-    input_map0.map_key(.ResetCamera,   .rising_edge, .r);
-    input_map0.map_key(.Console,       .toggle,      .grave_accent);
-    input_map0.map_key(.Enter,         .rising_edge, .enter);
-    input_map0.map_key(.EnableCursor,  .toggle,      .escape);
-    input_map0.map_key(.Editor,        .toggle,      .x);
-    input_map0.map_key(.Save,          .rising_edge, .o);
-    input_map0.map_key(.Load,          .rising_edge, .p);
-    input_map0.map_mouse_button(.MoveUp,      .state,       .five);
-    input_map0.map_mouse_button(.MoveDown,    .state,       .four);
-    input_map0.map_mouse_button(.Interact,    .state,       .left);
-    input_map0.map_mouse_button(.AltInteract, .rising_edge, .right);
+    input_map0.map_key(.MoveForward,               .state,       .w);
+    input_map0.map_key(.MoveLeft,                  .state,       .a);
+    input_map0.map_key(.MoveBack,                  .state,       .s);
+    input_map0.map_key(.MoveRight,                 .state,       .d);
+    input_map0.map_mouse_scroll(.Jump,             .scroll_down);
+    input_map0.map_key(.Crouch,                    .state,       .left_control);
+    input_map0.map_key(.Sprint,                    .state,       .left_shift);
+    input_map0.map_key(.ResetCamera,               .rising_edge, .r);
+    input_map0.map_key(.Console,                   .toggle,      .grave_accent);
+    input_map0.map_key(.Enter,                     .rising_edge, .enter);
+    input_map0.map_key(.EnableCursor,              .toggle,      .escape);
+    input_map0.map_key(.Editor,                    .toggle,      .x);
+    input_map0.map_key(.Save,                      .rising_edge, .o);
+    input_map0.map_key(.Load,                      .rising_edge, .p);
+    input_map0.map_mouse_button(.MoveUp,           .state,       .five);
+    input_map0.map_mouse_button(.MoveDown,         .state,       .four);
+    input_map0.map_mouse_button(.Interact,         .rising_edge, .left);
+    input_map0.map_mouse_button(.AltInteract,      .state,       .right);
+    input_map0.map_key(.SwitchWeapon,              .rising_edge, .q);
 
     var input_map1 = InputMap{};
 
@@ -353,15 +413,19 @@ pub fn main() !void {
     // TODO: don't perform attempts to read/write net
     // if we're not connected.
     {
-        const player = try memory.players.addOne();
         const id = common.newPlayerId();
         local_players[0].id = id;
-        player.id = id;
-        player.pos = v3 {.x = 0, .y = 0, .z = 0};
-        player.vel = v3 {.x = 0, .y = 0, .z = 0};
-        player.dir = v3 {.x = 1, .y = 0, .z = 0};
-        player.yaw = 0;
-        player.pitch = 0;
+
+        const player = Player {
+            .id = id,
+            .pos = v3 {.x = 0, .y = 0, .z = 0},
+            .vel = v3 {.x = 0, .y = 0, .z = 0},
+            .dir = v3 {.x = 1, .y = 0, .z = 0},
+            .yaw = 0,
+            .pitch = 0,
+            .hue = 80.0,
+        };
+        memory.players.appendAssumeCapacity(player);
     }
 
     timer = try std.time.Timer.start();
@@ -514,13 +578,12 @@ pub fn main() !void {
                                 if (local_player != null) {
                                     const player = common.findPlayerById(&memory.players.buffer, message.player.id);
 
-                                    //log.info("  checking auth", .{});
                                     var auth_player = message.player;
                                     var offset = @as(i64, @intCast(message.tick)) - @as(i64, @intCast(tick)) + 2;
                                     var auth_memory = memory;
                                     while (offset <= 0) : (offset += 1) {
                                         const old_input = local_player.?.input_buffer.peekRelative(offset);
-                                        module.function_table.update(&config.vars, &auth_memory, &auth_player, &old_input);
+                                        module.function_table.update(&config.vars, &auth_memory, &auth_player, &old_input, dt);
                                     }
 
                                     if (!v3eql(auth_player.pos, player.?.pos)) {
@@ -649,7 +712,7 @@ pub fn main() !void {
                             if (player != null) {
                                 memory.stat_data.start("game update");
                                 defer memory.stat_data.end();
-                                module.function_table.update(&config.vars, &memory, player.?, &lp.input);
+                                module.function_table.update(&config.vars, &memory, player.?, &lp.input, dt);
                             }
 
                         }
@@ -720,32 +783,51 @@ pub fn main() !void {
                 draw.process(&draw_buffer, width, height);
                 memory.stat_data.end();
 
-
                 window.swapBuffers();
-                        //rlgl.rlDisableBackfaceCulling();
-                        //raylib.DrawMeshInstanced(mesh, material, transforms.ptr, N);
-                        //rlgl.rlEnableBackfaceCulling();
-
-                //var x_offset: f32 = 5.0;
-                //var y_offset: f32 = 0;
-                //var buf: [64]u8 = undefined;
             }
 
             //
             // Audio
             //
             {
-                const num_frames = sa.expect();
-                std.log.info("num frames: {}", .{num_frames});
-                for (0..@intCast(num_frames)) |_| {
-                    if (sample_index % num_samples == 0) {
-                        _ = sa.push(&samples[0], num_samples);
-                    }
-                    const f = 10000;
-                    const samples_per_cycle = @as(f32, @floatFromInt(khz)) / @as(f32, @floatFromInt(f-1));
-                    samples[sample_index % num_samples] = 0.1*@sin(2*std.math.pi*@as(f32, @floatFromInt(sample_index))/samples_per_cycle);
-                    sample_index += 1;
+                for (memory.new_sounds.constSlice()) |s| {
+                    playing_sounds.appendAssumeCapacity(.{
+                        .samples = sound_file_map[@intFromEnum(s)].samples,
+                    });
                 }
+                memory.new_sounds.resize(0) catch unreachable;
+
+                const num_needed_samples = 2*@as(usize, @intCast(sa.expect()));
+
+                var samples = try memory.frame_allocator.alloc(f32, num_needed_samples);
+                @memset(samples, 0);
+
+                var num_samples: usize = 0;
+                for (playing_sounds.slice()) |*s| {
+                    const num_available_samples = @min(s.samples.len-s.index, num_needed_samples);
+
+                    for (0..num_available_samples) |i| {
+                        samples[i] += s.samples[s.index + i];
+                    }
+                    s.index += num_available_samples;
+
+                    if (num_available_samples > num_samples) {
+                        num_samples = num_available_samples;
+                    }
+                }
+
+                var index: usize = 0;
+                while (index < playing_sounds.len) {
+                    const s = playing_sounds.constSlice()[index];
+                    if (s.index == s.samples.len) {
+                        _ = playing_sounds.swapRemove(index);
+                    } else {
+                        index += 1;
+                    }
+                }
+
+                if (num_samples > 0)
+                    _ = sa.push(&samples[0], @intCast(num_samples));
             }
 
             //
@@ -777,5 +859,9 @@ pub fn main() !void {
 
 
 
+    }
+
+    for (sound_file_map) |info| {
+        memory.persistent_allocator.free(info.samples);
     }
 }

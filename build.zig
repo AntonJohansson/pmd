@@ -55,6 +55,16 @@ pub fn build(b: *std.build.Builder) void {
         .target = target,
         .optimize = optimize,
     });
+    client.addCSourceFile(.{
+        .file = .{
+            .path = "src/client/stb_vorbis.c"
+        },
+        .flags = &.{
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+        }});
+    client.addIncludePath(std.build.LazyPath.relative("src/client"));
     client.linkLibC();
     client.addModule("sokol", sokol_module);
     client.addModule("common", common);

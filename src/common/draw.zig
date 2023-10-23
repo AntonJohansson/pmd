@@ -843,7 +843,6 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
         }
     }
 
-
     sg.commit();
 
     //for (bindings_to_remove.slice()) |bbb| {

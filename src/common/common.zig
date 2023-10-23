@@ -19,6 +19,7 @@ const Camera3d = primitive.Camera3d;
 pub const connect_packet_repeat_count = 10;
 
 pub const InputName = enum(u8) {
+    // Movement
     MoveLeft,
     MoveRight,
     MoveForward,
@@ -28,6 +29,8 @@ pub const InputName = enum(u8) {
     Jump,
     Crouch,
     Sprint,
+
+    // Random
     ResetCamera,
     Interact,
     AltInteract,
@@ -37,6 +40,9 @@ pub const InputName = enum(u8) {
     EnableCursor,
     Save,
     Load,
+
+    // Combat
+    SwitchWeapon,
 };
 
 pub const Input = extern struct {
@@ -78,13 +84,63 @@ pub fn newPlayerId() PlayerId {
     return id;
 }
 
+const num_weapons = @typeInfo(Weapon).Enum.fields.len;
+pub const Weapon = enum(u8) {
+    weapon_sniper,
+    weapon_nade,
+};
+
+pub const Ray = struct {
+    dir: v3,
+    pos: v3,
+};
+
+pub const Hitscan = struct {
+    id_from: PlayerId,
+    ray: Ray,
+    time_left: f32,
+};
+
+pub const Nade = struct {
+    id_from: PlayerId,
+    time_left: f32,
+};
+
+pub const Explosion = struct {
+    id_from: PlayerId,
+    pos: v3,
+    radius: f32,
+    time_left: f32,
+};
+
+pub const Damage = struct {
+    id: PlayerId,
+    damage: f32,
+};
+
 pub const Player = extern struct {
     id: PlayerId,
+
+    // Position, velocity, and orientation
     pos: v3,
     vel: v3,
     dir: v3 = .{.x = 1, .y = 0, .z = 0},
     yaw: f32,
     pitch: f32,
+
+    // Color
+    hue: f32 ,
+
+    health: f32 = 100.0,
+
+    weapon_cooldowns: [num_weapons]f32 = .{0}**num_weapons,
+    weapons: [num_weapons]Weapon = [num_weapons]Weapon{
+        .weapon_sniper,
+        .weapon_nade
+    },
+    weapon_current: u8 = 0,
+
+    // State
     editor: bool = false,
     onground: bool = false,
     crouch: bool = false,
@@ -146,10 +202,22 @@ pub const Entity = struct {
     },
 };
 
+pub const SoundType = enum(u8) {
+    death,
+    slide,
+    sniper,
+    weapon_switch,
+    step,
+    pip,
+    explosion,
+    doink,
+};
+
 pub const Memory = struct {
     // game state
     players: std.BoundedArray(Player, max_players) = .{},
     entities: std.BoundedArray(Entity, 64) = .{},
+    new_sounds: std.BoundedArray(SoundType, 64) = .{},
 
     camera: Camera3d = .{},
     // camera2d
