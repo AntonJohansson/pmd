@@ -11,10 +11,9 @@ const stat = common.stat;
 const logging = common.logging;
 
 var log: logging.Log = .{
-    .mirror_to_stdio = true,
+    .mirror_to_stdio = false,
 };
 
-pub const fragment_size = 1024;
 const message_receive_buffer_len = 128;
 
 const ClientHost = struct {
@@ -48,9 +47,13 @@ const ReliableMessageInfo = struct {
 
 var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 const gpa = general_purpose_allocator.allocator();
+pub var frame_allocator: std.mem.Allocator = undefined;
+
+pub var input_buffer_stat: stat.StatEntry = .{};
+pub var output_buffer_stat: stat.StatEntry = .{};
 
 pub const BatchBuilder = struct {
-    buffer: bb.ByteBuffer(1024) = undefined,
+    buffer: bb.ByteBufferSlice = undefined,
     header: * align(1) headers.BatchHeader = undefined,
 
     pub fn clear(self: *@This()) void {
@@ -122,8 +125,6 @@ pub fn disconnect(index: PeerIndex) void {
    peer.state = .Disconnected;
 }
 
-pub var temp_allocator: std.mem.Allocator = undefined;
-
 pub fn pushMessage(index: PeerIndex, message: anytype) void {
    var peer = &peers.buffer[index];
    std.debug.assert(peer.state != .Disconnected);
@@ -132,7 +133,7 @@ pub fn pushMessage(index: PeerIndex, message: anytype) void {
    peer.current_message_id = @addWithOverflow(peer.current_message_id, 1)[0];
 
    const size = @sizeOf(headers.Header) + @sizeOf(@TypeOf(message));
-   var memory = temp_allocator.alloc(u8, size) catch unreachable;
+   var memory = frame_allocator.alloc(u8, size) catch unreachable;
 
    @as(*align(1) headers.Header, @ptrCast(memory.ptr)).* = headers.Header{
        .kind = comptime packet_meta.mapMessageToKind(@TypeOf(message)),
@@ -160,7 +161,6 @@ pub fn pushReliableMessage(index: PeerIndex, message: anytype) void {
 
    const size = @sizeOf(headers.Header) + @sizeOf(@TypeOf(message));
    var memory = gpa.alloc(u8, size) catch unreachable;
-
 
    @as(*align(1) headers.Header, @ptrCast(memory.ptr)).* = headers.Header{
        .kind = comptime packet_meta.mapMessageToKind(@TypeOf(message)),
@@ -232,7 +232,6 @@ const Peer = struct {
     address: ?std.net.Address = null,
     timeout: u64 = 0,
     salt: u64 = 0,
-    batch: BatchBuilder = .{},
     received_messages: bb.SequenceBuffer(ReceivedMessageInfo, u16, 255) = .{},
     packets_in_flight: bb.SequenceBuffer(PacketData, u16, 255) = .{},
     messages_in_flight: bb.SequenceBuffer(ReliableMessageInfo, u16, 255) = .{},
@@ -272,7 +271,7 @@ fn findAvailablePeerIndex() PeerIndex {
 // TODO(anjo): We can make a better assumption as to the
 // size of this buffer from connected_peers*sizeof(expected_traffic)*safety_factor.
 // and push it via the temporary_allocator
-var input_buffer: bb.ByteBuffer(2048) = .{};
+var input_buffer: bb.ByteBuffer(8192) = .{};
 
 pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
     var total_bytes_read: u64 = 0;
@@ -291,10 +290,12 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
         input_buffer.top += @intCast(nbytes);
     }
 
+    input_buffer_stat.samples.push(input_buffer.top);
+
     var peer = &peers.buffer[peer_index];
 
     var num_events: usize = 0;
-    var events = temp_allocator.alloc(Event, 128) catch unreachable;
+    var events = frame_allocator.alloc(Event, 128) catch unreachable;
 
     // TODO(anjo): This might be candidate for threading if there
     // are enough entries.
@@ -304,7 +305,10 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
         };
         while (byte_view.hasData()) {
             const batch_header = byte_view.pop(headers.BatchHeader);
-            std.debug.assert(batch_header.num_packets > 0);
+            if (batch_header.num_packets == 0) {
+                log.info("Empty batch??", .{});
+                break;
+            }
 
             //
             // Here we make the assumption that
@@ -328,7 +332,7 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
             // remaining).
             //
             if (batch_header.size > byte_view.remainingSpace()) {
-                log.info("We received a partial packet", .{});
+                log.info("We received a partial packet, expected {}B, got {}B", .{batch_header.size, byte_view.remainingSpace()});
                 log.info("dropping", .{});
                 break;
             }
@@ -465,7 +469,7 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
     var received_data: std.BoundedArray(ReceivedData, 128) = .{};
     input_buffer.clear();
     var num_events: usize = 0;
-    var events = temp_allocator.alloc(Event, 128) catch unreachable;
+    var events = frame_allocator.alloc(Event, 128) catch unreachable;
 
     // Timeout disconnected peers
     //const tickrate = 60; // TODO: move somewhere
@@ -528,6 +532,8 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
         input_buffer.top += @intCast(nbytes);
     }
 
+    input_buffer_stat.samples.push(input_buffer.top);
+
     var peers_with_data: std.BoundedArray(PeerIndex, max_peer_count) = .{};
     //for (received_data.slice()) |data| {
     //    var peer = &peers.buffer[data.peer_index];
@@ -587,7 +593,6 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
 
     for (peers_with_data.slice()) |index| {
         const peer = &peers.buffer[index];
-        peer.batch.clear();
 
         //
         // We deal with connections here, no need to force
@@ -700,15 +705,12 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
     var total_bytes_sent: u64 = 0;
 
     // TODO(anjo): use temporary allocator instead
-    var output_buffer: bb.ByteBuffer(1024) = .{};
+    var output_buffer = bb.ByteBufferSlice.init(frame_allocator, 8192);
     output_buffer.push(headers.BatchHeader{
         .num_packets = 0,
         .id = 0,
     });
     var header: *align(1) headers.BatchHeader = @ptrCast(&output_buffer.data[0]);
-
-    // TODO(anjo): verbose
-    //log.info("processing messages for peer {}", .{peer_index.?});
 
     var have_reliable_packets = false;
     var packet_data: PacketData = .{};
@@ -726,8 +728,10 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
 
                 // TODO(anjo): verbose
                 //log.info("  found message in flight", .{});
-                if (rmi.data.len > output_buffer.remainingSize())
+                if (rmi.data.len > output_buffer.remainingSize()) {
+                    log.info("Packet {} of size {} too large for buffer {}/{}", .{rmi.id, rmi.data.len, output_buffer.remainingSize(), output_buffer.data.len});
                     break;
+                }
                 // TODO(anjo): verbose
                 //log.info("  message {} fits in buffer", .{@as(*align(1) const headers.Header, @ptrCast(rmi.data.ptr)).kind});
                 if (rmi.reliable and !rmi.acked) {
@@ -747,6 +751,8 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
         // TODO(anjo): verbose
         //log.info("wrap {} {}", .{peer.last_outgoing_acked_message_id, peer.current_message_id});
     }
+
+    output_buffer_stat.samples.push(output_buffer.size());
 
     header.salt = peer.salt;
     header.size = @as(u16, @intCast(output_buffer.size())) - @sizeOf(headers.BatchHeader);
@@ -774,9 +780,6 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
         entry.batch.header = @ptrCast(&entry.batch.buffer.data[0]);
         entry.push_time = timer.?.read();
         entry.address = peer.address;
-
-        std.debug.assert(output_buffer.top <= fragment_size);
-
 
 
     }
@@ -895,6 +898,6 @@ pub fn process_ack(peer_index: PeerIndex, batch: *align(1) const headers.BatchHe
 
     while (!peer.messages_in_flight.isset(peer.last_outgoing_acked_message_id) and
            peer.last_outgoing_acked_message_id != peer.current_message_id) :
-        (peer.last_outgoing_acked_message_id += 1)
+        (peer.last_outgoing_acked_message_id = @addWithOverflow(peer.last_outgoing_acked_message_id, 1)[0])
     {}
 }

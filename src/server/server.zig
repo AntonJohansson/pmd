@@ -56,10 +56,11 @@ pub fn main() !void {
     memory.frame_allocator = arena_allocator.allocator();
     memory.persistent_allocator = general_purpose_allocator.allocator();
 
-    net.temp_allocator = memory.persistent_allocator;
+    net.frame_allocator = memory.frame_allocator;
 
     var module = try code_module.CodeModule(struct {
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
+        authorizedUpdate: *fn (vars: *const Vars, memory: *Memory, dt: f32) void,
         draw: *fn (memory: *Memory) void,
     }).init(memory.persistent_allocator, "zig-out/lib", "game");
 
@@ -159,17 +160,18 @@ pub fn main() !void {
                                 const id = try peer.ids.addOne();
                                 id.* = common.newPlayerId();
                                 player.id = id.*;
-                                player.pos = v3 {.x = 0, .y = 0, .z = 0};
-                                player.vel = v3 {.x = 0, .y = 0, .z = 0};
-                                player.dir = v3 {.x = 1, .y = 0, .z = 0};
-                                player.yaw = 0;
-                                player.pitch = 0;
 
                                 log.info("A new player joined the game: {}", .{id.*});
 
                                 // Joined response for player trying to connect
                                 net.pushMessage(e.peer_index, packet.PlayerJoinResponse{
-                                    .player = player.*,
+                                    .id = id.*,
+                                });
+
+                                // Add to respawn queue
+                                memory.respawns.appendAssumeCapacity(.{
+                                    .id = id.*,
+                                    .time_left = 1.0,
                                 });
 
                                 // Send peer joined packet to all other clients
@@ -214,6 +216,68 @@ pub fn main() !void {
                         }
                     }
                 }
+            }
+
+            module.function_table.authorizedUpdate(vars, &memory, dt);
+
+            for (memory.new_spawns.constSlice()) |p| {
+                net.pushMessageToAllPeers(packet.SpawnPlayer{
+                    .player = p.*,
+                });
+            }
+            memory.new_spawns.resize(0) catch unreachable;
+
+            if (memory.new_damage.len > 0) {
+                var p = packet.NewDamage {};
+                @memcpy(p.new_damage[0..memory.new_damage.len], memory.new_damage.constSlice());
+                p.num_damage = memory.new_damage.len;
+                memory.new_damage.resize(0) catch unreachable;
+                net.pushMessageToAllPeers(p);
+            }
+
+            if (memory.new_sounds.len > 0) {
+                var p = packet.NewSounds {};
+                @memcpy(p.new_sounds[0..memory.new_sounds.len], memory.new_sounds.constSlice());
+                p.num_sounds = memory.new_sounds.len;
+                memory.new_sounds.resize(0) catch unreachable;
+                net.pushMessageToAllPeers(p);
+            }
+
+            if (memory.new_hitscans.len > 0) {
+                for (memory.new_hitscans.constSlice()) |h| {
+                    memory.hitscans.appendAssumeCapacity(h);
+                }
+
+                var p = packet.NewHitscans {};
+                @memcpy(p.new_hitscans[0..memory.new_hitscans.len], memory.new_hitscans.constSlice());
+                p.num_hitscans = memory.new_hitscans.len;
+                memory.new_hitscans.resize(0) catch unreachable;
+                net.pushMessageToAllPeers(p);
+                std.log.info("new hitscan", .{});
+            }
+
+            if (memory.new_nades.len > 0) {
+                for (memory.new_nades.constSlice()) |n| {
+                    memory.nades.appendAssumeCapacity(n);
+                }
+
+                var p = packet.NewNades {};
+                @memcpy(p.new_nades[0..memory.new_nades.len], memory.new_nades.constSlice());
+                p.num_nades = memory.new_nades.len;
+                memory.new_nades.resize(0) catch unreachable;
+                net.pushMessageToAllPeers(p);
+            }
+
+            if (memory.new_explosions.len > 0) {
+                for (memory.new_explosions.constSlice()) |e| {
+                    memory.explosions.appendAssumeCapacity(e);
+                }
+
+                var p = packet.NewExplosions {};
+                @memcpy(p.new_explosions[0..memory.new_explosions.len], memory.new_explosions.constSlice());
+                p.num_explosions = memory.new_explosions.len;
+                memory.explosions.resize(0) catch unreachable;
+                net.pushMessageToAllPeers(p);
             }
 
             //

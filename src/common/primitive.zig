@@ -46,7 +46,7 @@ pub const Cube2 = struct {
     model: m4,
 };
 
-pub const Camera3d = struct {
+pub const Camera3d = extern struct {
     pos: v3 = .{},
     dir: v3 = .{},
     proj: m4 = .{},

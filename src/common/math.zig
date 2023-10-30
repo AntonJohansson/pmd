@@ -173,14 +173,14 @@ pub fn v3normalize(v: v3) v3 {
 // m4
 //
 
-pub const m4 = struct {
+pub const m4 = extern struct {
     m00: f32 = undefined, m01: f32 = undefined, m02: f32 = undefined, m03: f32 = undefined,
     m10: f32 = undefined, m11: f32 = undefined, m12: f32 = undefined, m13: f32 = undefined,
     m20: f32 = undefined, m21: f32 = undefined, m22: f32 = undefined, m23: f32 = undefined,
     m30: f32 = undefined, m31: f32 = undefined, m32: f32 = undefined, m33: f32 = undefined,
 };
 
-pub const m3 = struct {
+pub const m3 = extern struct {
     m00: f32 = undefined, m01: f32 = undefined, m02: f32 = undefined,
     m10: f32 = undefined, m11: f32 = undefined, m12: f32 = undefined,
     m20: f32 = undefined, m21: f32 = undefined, m22: f32 = undefined,

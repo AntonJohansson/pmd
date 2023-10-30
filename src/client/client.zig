@@ -252,13 +252,13 @@ pub fn main() !void {
     memory.frame_allocator = arena_allocator.allocator();
     memory.persistent_allocator = general_purpose_allocator.allocator();
 
-    net.temp_allocator = memory.persistent_allocator;
+    net.frame_allocator = memory.frame_allocator;
 
     //
     // Connect to server
     //
     var host: net.Host = .{};
-    const server_index = net.connect(memory.persistent_allocator, &host, "85.228.204.146", 9053) orelse return;
+    const server_index = net.connect(memory.persistent_allocator, &host, "192.168.1.71", 9053) orelse return;
     defer std.os.close(host.fd);
 
     //
@@ -367,6 +367,7 @@ pub fn main() !void {
     //
     var module = try code_module.CodeModule(struct {
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
+        authorizedUpdate: *fn (vars: *const Vars, memory: *Memory, dt: f32) void,
         draw: *fn (vars: *const Vars, memory: *Memory, b: *draw.Buffer, player_id: common.PlayerId, input: *const Input) void,
     }).init(memory.persistent_allocator, "zig-out/lib", "game");
 
@@ -426,7 +427,13 @@ pub fn main() !void {
             .hue = 80.0,
         };
         memory.players.appendAssumeCapacity(player);
+
+        memory.respawns.appendAssumeCapacity(.{
+            .id = id,
+            .time_left = 0.0,
+        });
     }
+
 
     timer = try std.time.Timer.start();
     key_repeat_timer = try std.time.Timer.start();
@@ -453,14 +460,10 @@ pub fn main() !void {
     var running = true;
     while (running) {
         frame_start_time = timer.read();
-        //accumulator += frame_time;
 
-
-        //while (accumulator >= desired_frame_time) {
-        //    if (accumulator >= desired_frame_time) {
-        //        accumulator -= desired_frame_time;
-        //    }
         {
+            memory.stat_data.start("frame");
+            defer memory.stat_data.end();
 
             scroll_delta = 0.0;
             glfw.pollEvents();
@@ -472,8 +475,6 @@ pub fn main() !void {
                 running = false;
 
             {
-                //const s = perf_stats.get(.ModuleReloadCheck).startTime();
-                //defer s.endTime();
                 if (try module.reloadIfChanged(memory.persistent_allocator)) {
                     //_ = module.function_table.fofo();
                 }
@@ -489,17 +490,16 @@ pub fn main() !void {
             //
             var events: []net.Event = undefined;
             {
-                //const s = perf_stats.get(.ReadNetData).startTime();
-                //defer s.endTime();
+                memory.stat_data.start("net receive");
+                defer memory.stat_data.end();
 
                 events = net.receiveMessagesClient(&host, server_index);
-
-                //net.net_stats.get(.NetIn).samples.push(total_bytes_read);
             }
 
             //
             // Process network data
             //
+            memory.stat_data.start("net process");
             for (events) |event| {
                 switch (event) {
                     .peer_connected => {
@@ -544,7 +544,7 @@ pub fn main() !void {
                             .PlayerJoinResponse => {
                                 const message: *align(1) packet.PlayerJoinResponse = @ptrCast(e.data);
                                 const player = try memory.players.addOne();
-                                player.* = message.player;
+                                player.id = message.id;
 
                                 // We don't handle the case where there is no
                                 // room for a local player, this should never
@@ -556,8 +556,8 @@ pub fn main() !void {
                                         break;
                                     }
                                 }
-
                                 log.info("joined, we have id {}", .{player.id});
+                                connected = true;
                             },
                             .PeerJoined => {
                                 const message: *align(1) packet.PeerJoined = @ptrCast(e.data);
@@ -572,7 +572,19 @@ pub fn main() !void {
                                     _ = memory.players.swapRemove(index.?);
                                 log.info("Player {} disconnected", .{message.id});
                             },
+                            .SpawnPlayer => {
+                                const message: *align(1) packet.SpawnPlayer = @ptrCast(e.data);
+                                const player = common.findPlayerById(&memory.players.buffer, message.player.id) orelse {
+                                    log.info("Trying to spawn player {}, which doesn't exist locally, hmmmm", .{message.player.id});
+                                    continue;
+                                };
+                                player.* = message.player;
+                                log.info("Spawning", .{});
+                            },
                             .PlayerUpdateAuth => {
+                                memory.stat_data.enabled = false;
+                                defer memory.stat_data.enabled = true;
+
                                 const message: *align(1) packet.PlayerUpdateAuth = @ptrCast(e.data);
                                 const local_player = findLocalPlayerById(&local_players, message.player.id);
                                 if (local_player != null) {
@@ -597,7 +609,6 @@ pub fn main() !void {
                                         player.?.* = auth_player;
                                     }
                                 }
-
                             },
                             .ServerPlayerUpdate => {
                                 const message: *align(1) packet.ServerPlayerUpdate = @ptrCast(e.data);
@@ -608,6 +619,38 @@ pub fn main() !void {
                                     current_player.* = player;
                                 }
                             },
+                            .NewSounds => {
+                                const message: *align(1) packet.NewSounds = @ptrCast(e.data);
+                                memory.new_sounds.appendSliceAssumeCapacity(message.new_sounds[0..message.num_sounds]);
+                            },
+                            .NewHitscans => {
+                                const message: *align(1) packet.NewHitscans = @ptrCast(e.data);
+                                for (message.new_hitscans[0..message.num_hitscans]) |h| {
+                                    var local =  false;
+                                    for (local_players) |l| {
+                                        if (l.id == h.id_from) {
+                                            local = true;
+                                            break;
+                                        }
+                                    }
+                                    if (local)
+                                        continue;
+                                    memory.new_hitscans.appendAssumeCapacity(h);
+                                }
+                            },
+                            .NewExplosions => {
+                                const message: *align(1) packet.NewExplosions = @ptrCast(e.data);
+                                appendSliceAssumeForceDstAlignment(1, common.Explosion, &memory.new_explosions, message.new_explosions[0..message.num_explosions]);
+                            },
+                            .NewNades => {
+                                const message: *align(1) packet.NewNades = @ptrCast(e.data);
+                                appendSliceAssumeForceDstAlignment(1, common.Nade, &memory.new_nades, message.new_nades[0..message.num_nades]);
+                            },
+                            .NewDamage => {
+                                const message: *align(1) packet.NewDamage = @ptrCast(e.data);
+                                appendSliceAssumeForceDstAlignment(1, common.Damage, &memory.new_damage, message.new_damage[0..message.num_damage]);
+                                std.log.info("wow", .{});
+                            },
                             else => {
                                 std.log.err("Unrecognized packet type: {}", .{e.kind});
                                 break;
@@ -615,6 +658,12 @@ pub fn main() !void {
                         }
                     }
                 }
+            }
+            memory.stat_data.end();
+
+            // TODO(anjo): Move to some "lobby" related thing
+            if (!connected) {
+                module.function_table.authorizedUpdate(&config.vars, &memory, dt);
             }
 
             //
@@ -678,10 +727,6 @@ pub fn main() !void {
                         memory.stat_data.end();
 
                         // TODO(anjo): We have to dealy with mouse buttons separately here which is annoying
-                        if (window.getMouseButton(.left) == .press) {
-                            lp.input.set(.Interact);
-                        }
-                        // TODO(anjo): We have to dealy with mouse buttons separately here which is annoying
                         lp.input.scroll = scroll_delta;
 
                         var delta: v2 = .{};
@@ -693,7 +738,7 @@ pub fn main() !void {
                             old_mouse_pos.y = @floatCast(pos.ypos);
                         }
 
-                        lp.input.cursor_delta = .{.x = delta.x/@as(f32, @floatFromInt(width)), .y = delta.y/@as(f32, @floatFromInt(height))};
+                        lp.input.cursor_delta = .{.x = config.vars.sensitivity*delta.x, .y = config.vars.sensitivity*delta.y};
 
                         if (!lp.input.isset(.Console)) {
                             // push input state
@@ -717,6 +762,38 @@ pub fn main() !void {
 
                         }
                     }
+
+                    // Move new_* to actual persistent buffers
+                    for (memory.new_sounds.constSlice()) |s| {
+                        playing_sounds.appendAssumeCapacity(.{
+                            .samples = sound_file_map[@intFromEnum(s)].samples,
+                        });
+                    }
+                    memory.new_sounds.resize(0) catch unreachable;
+
+                    for (memory.new_hitscans.constSlice()) |h| {
+                        memory.hitscans.appendAssumeCapacity(h);
+                    }
+                    memory.new_hitscans.resize(0) catch unreachable;
+
+                    for (memory.new_nades.constSlice()) |n| {
+                        memory.nades.appendAssumeCapacity(n);
+                    }
+                    memory.new_nades.resize(0) catch unreachable;
+
+                    for (memory.new_explosions.constSlice()) |e| {
+                        memory.explosions.appendAssumeCapacity(e);
+                    }
+                    memory.explosions.resize(0) catch unreachable;
+
+                    //for (memory.new_damage.constSlice()) |d| {
+                    //    var player = &memory.players.slice()[d.to];
+                    //    player.health -= @min(d.damage, player.health);
+                    //    if (player.health == 0.0) {
+                    //        std.log.info("{} died", .{d.to});
+                    //    }
+                    //}
+                    memory.new_damage.resize(0) catch unreachable;
                 }
 
                 memory.show_cursor = local_players[0].input.isset(.EnableCursor);
@@ -790,13 +867,6 @@ pub fn main() !void {
             // Audio
             //
             {
-                for (memory.new_sounds.constSlice()) |s| {
-                    playing_sounds.appendAssumeCapacity(.{
-                        .samples = sound_file_map[@intFromEnum(s)].samples,
-                    });
-                }
-                memory.new_sounds.resize(0) catch unreachable;
-
                 const num_needed_samples = 2*@as(usize, @intCast(sa.expect()));
 
                 var samples = try memory.frame_allocator.alloc(f32, num_needed_samples);
@@ -807,7 +877,7 @@ pub fn main() !void {
                     const num_available_samples = @min(s.samples.len-s.index, num_needed_samples);
 
                     for (0..num_available_samples) |i| {
-                        samples[i] += s.samples[s.index + i];
+                        samples[i] += 0.5*s.samples[s.index + i];
                     }
                     s.index += num_available_samples;
 
@@ -854,14 +924,15 @@ pub fn main() !void {
 
             _ = arena_allocator.reset(.retain_capacity);
         }
-
-
-
-
-
     }
 
     for (sound_file_map) |info| {
         memory.persistent_allocator.free(info.samples);
     }
+}
+
+fn appendSliceAssumeForceDstAlignment(comptime alignment: usize, comptime T: type, bounded_array: anytype, src: []align(alignment) const T) void {
+    const old_len = bounded_array.len;
+    bounded_array.len = @intCast(bounded_array.len + src.len);
+    @memcpy(@as([]align(alignment) T, @ptrCast(bounded_array.slice()[old_len..][0..src.len])), src);
 }

@@ -87,39 +87,48 @@ pub fn newPlayerId() PlayerId {
 const num_weapons = @typeInfo(Weapon).Enum.fields.len;
 pub const Weapon = enum(u8) {
     weapon_sniper,
+    weapon_pistol,
     weapon_nade,
 };
 
-pub const Ray = struct {
+pub const Ray = extern struct {
     dir: v3,
     pos: v3,
 };
 
-pub const Hitscan = struct {
+pub const Hitscan = extern struct {
     id_from: PlayerId,
     ray: Ray,
+    pitch: f32,
+    yaw: f32,
     time_left: f32,
 };
 
-pub const Nade = struct {
+pub const Nade = extern struct {
     id_from: PlayerId,
     time_left: f32,
 };
 
-pub const Explosion = struct {
+pub const Explosion = extern struct {
     id_from: PlayerId,
     pos: v3,
     radius: f32,
     time_left: f32,
 };
 
-pub const Damage = struct {
-    id: PlayerId,
+pub const Damage = extern struct {
+    from: PlayerId,
+    to: PlayerId,
     damage: f32,
 };
 
 pub const Player = extern struct {
     id: PlayerId,
+
+    state: enum(u8) {
+        dead,
+        alive,
+    } = .dead,
 
     // Position, velocity, and orientation
     pos: v3,
@@ -129,22 +138,27 @@ pub const Player = extern struct {
     pitch: f32,
 
     // Color
-    hue: f32 ,
+    hue: f32,
 
     health: f32 = 100.0,
 
     weapon_cooldowns: [num_weapons]f32 = .{0}**num_weapons,
     weapons: [num_weapons]Weapon = [num_weapons]Weapon{
         .weapon_sniper,
+        .weapon_pistol,
         .weapon_nade
     },
     weapon_current: u8 = 0,
+    weapon_last: u8 = 1,
 
     // State
     editor: bool = false,
     onground: bool = false,
     crouch: bool = false,
     sprint: bool = false,
+
+    // camera
+    camera: Camera3d = .{},
 };
 
 pub fn findIndexById(players: []Player, id: PlayerId) ?usize {
@@ -194,7 +208,7 @@ pub const WidgetModel = struct {
     move_type: WidgetMoveType = .move_axis,
 };
 
-pub const max_players = 4;
+pub const max_players = 5;
 
 pub const Entity = struct {
     plane: primitive.Plane = .{
@@ -213,13 +227,27 @@ pub const SoundType = enum(u8) {
     doink,
 };
 
+pub const RespawnEntry = struct {
+    id: PlayerId,
+    time_left: f32,
+};
+
 pub const Memory = struct {
     // game state
     players: std.BoundedArray(Player, max_players) = .{},
     entities: std.BoundedArray(Entity, 64) = .{},
-    new_sounds: std.BoundedArray(SoundType, 64) = .{},
 
-    camera: Camera3d = .{},
+    new_sounds:     std.BoundedArray(SoundType, 64) = .{},
+    new_hitscans:   std.BoundedArray(Hitscan,   64) = .{},
+    new_nades:      std.BoundedArray(Nade,      64) = .{},
+    new_explosions: std.BoundedArray(Explosion, 64) = .{},
+    new_damage:     std.BoundedArray(Damage,    64) = .{},
+
+    sounds:     std.BoundedArray(SoundType, 64) = .{},
+    hitscans:   std.BoundedArray(Hitscan,   64) = .{},
+    nades:      std.BoundedArray(Nade,      64) = .{},
+    explosions: std.BoundedArray(Explosion, 64) = .{},
+
     // camera2d
     target: v2 = .{.x = 0.5, .y = 0.5},
     zoom: f32 = 1,
@@ -245,6 +273,14 @@ pub const Memory = struct {
     stat_data: stat.StatData = .{},
 
     ray_model: ?m4 = null,
+
+    respawns: std.BoundedArray(RespawnEntry, 8) = .{},
+    new_spawns: std.BoundedArray(*Player, 8) = .{},
+
+    killfeed: bb.CircularArray(struct {
+        from: PlayerId,
+        to: PlayerId,
+    }, 8) = undefined,
 
     // in in ns
     time: u64 = 0,

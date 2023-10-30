@@ -57,7 +57,7 @@ pub const PlayerJoinRequest = extern struct {
 };
 
 pub const PlayerJoinResponse = extern struct {
-    player: Player,
+    id: PlayerId,
 };
 
 pub const PeerJoined = extern struct {
@@ -82,4 +82,38 @@ pub const PlayerUpdateAuth = extern struct {
 pub const ServerPlayerUpdate = extern struct {
     players: [common.max_players]Player,
     num_players: usize,
+};
+
+pub const NewSounds = extern struct {
+    new_sounds:     [16]common.SoundType = undefined,
+    num_sounds:     u16 = 0,
+};
+
+pub const NewHitscans = extern struct {
+    new_hitscans:   [16]common.Hitscan   = undefined,
+    num_hitscans:   u16 = 0,
+};
+
+pub const NewExplosions = extern struct {
+    new_explosions: [16]common.Explosion = undefined,
+    num_explosions: u16 = 0,
+};
+
+pub const NewNades = extern struct {
+    new_nades:      [16]common.Nade      = undefined,
+    num_nades:      u16 = 0,
+};
+
+pub const NewDamage = extern struct {
+    new_damage:     [16]common.Damage    = undefined,
+    num_damage:     u16 = 0,
+};
+
+pub const Kill = extern struct {
+    from: PlayerId,
+    to: PlayerId,
+};
+
+pub const SpawnPlayer = extern struct {
+    player: Player,
 };

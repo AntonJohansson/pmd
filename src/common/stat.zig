@@ -6,12 +6,15 @@ fn rdtsc() u32 {
 }
 
 pub const StatData = struct {
+    enabled: bool = true,
     entries: std.BoundedArray(StatEntry, 128) = .{},
     ids_being_tracked: std.BoundedArray(u16, 128) = .{},
 
     const Self = @This();
 
     pub fn start(self: *Self, name: []const u8) void {
+        if (!self.enabled)
+            return;
         const id = self.findId(name) orelse blk: {
             _ = self.entries.addOneAssumeCapacity();
             const new_id = self.entries.len-1;
@@ -35,6 +38,8 @@ pub const StatData = struct {
     }
 
     pub fn end(self: *Self) void {
+        if (!self.enabled)
+            return;
         std.debug.assert(self.ids_being_tracked.len != 0);
         const id = self.ids_being_tracked.pop();
         var stat = &self.entries.slice()[id];
@@ -53,6 +58,8 @@ pub const StatData = struct {
 const StatResult = struct {
     avg: u64,
     std: u64,
+    min: u64,
+    max: u64,
 };
 
 pub const StatEntry = struct {
@@ -84,6 +91,8 @@ pub const StatEntry = struct {
 
         var variance: u64 = 0;
 
+        var min: u64 = std.math.maxInt(u64);
+        var max: u64 = std.math.minInt(u64);
         for (self.samples.data) |s| {
             const d = @as(i64, @intCast(s)) - @as(i64, @intCast(avg));
             const mul = @mulWithOverflow(d,d);
@@ -91,6 +100,11 @@ pub const StatEntry = struct {
             if (mul[1] == 1)
                 continue;
             variance = @addWithOverflow(variance, @as(@TypeOf(variance), @intCast(mul[0])))[0];
+
+            if (s < min)
+                min = s;
+            if (s > max)
+                max = s;
         }
         variance /= self.samples.data.len-1;
 
@@ -99,6 +113,8 @@ pub const StatEntry = struct {
         return StatResult {
             .avg = avg,
             .std = @intFromFloat(std_float),
+            .min = min,
+            .max = max,
         };
     }
 };

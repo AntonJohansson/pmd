@@ -28,6 +28,8 @@ pub const Vars = struct {
     sidespeed: f32 = 320,
     sprintmod: f32 = 2,
 
+    sensitivity: f32 = 0.001,
+
 //cvar_t	cl_upspeed = {"cl_upspeed","200"};
 //cvar_t	cl_forwardspeed = {"cl_forwardspeed","200", true};
 //cvar_t	cl_backspeed = {"cl_backspeed","200", true};
@@ -48,6 +50,39 @@ pub const Vars = struct {
     // camera stuffs
     fov: f32 = 80.0,
     aspect: f32 = 16.0/9.0,
+
+    // weapon model stuff
+    sniper_len: f32 = 20.0,
+    sniper_w: f32 = 1.0,
+    sniper_off_z: f32 = -3.0,
+    sniper_off_x: f32 = 6.0,
+    sniper_off_y: f32 = 8.0,
+
+    sniper_stock_len: f32 = 12.0,
+    sniper_stock_w: f32 = 2.0,
+    sniper_stock_h: f32 = 3.0,
+    sniper_stock_off_x: f32 = -8.0,
+    sniper_stock_off_y: f32 = 0.0,
+    sniper_stock_off_z: f32 = -1.5,
+
+    sniper_scope_len: f32 = 6,
+    sniper_scope_w: f32 = 1.5,
+    sniper_scope_h: f32 = 1.5,
+    sniper_scope_off_x: f32 = -2.0,
+    sniper_scope_off_y: f32 = -0.0,
+    sniper_scope_off_z: f32 = 1.25,
+
+    pistol_len: f32 = 5.0,
+    pistol_w: f32 = 1.0,
+    pistol_off_x: f32 = 6.0,
+    pistol_off_y: f32 = 8.0,
+    pistol_off_z: f32 = -3.0,
+
+    pistol_handle_len: f32 = 2.0,
+    pistol_handle_w: f32 = 0.8,
+    pistol_handle_off_x: f32 = -2.0,
+    pistol_handle_off_y: f32 = 0.0,
+    pistol_handle_off_z: f32 = -1.2,
 };
 
 pub var vars: Vars = .{};

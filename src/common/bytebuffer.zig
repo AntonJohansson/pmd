@@ -1,5 +1,54 @@
 const std = @import("std");
 
+pub const ByteBufferSlice = struct {
+    data: []u8 = undefined,
+    top: u32 = 0,
+    bottom: u32 = 0,
+
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator, comptime N: u32) Self {
+        return Self {
+            .data = allocator.alloc(u8, N) catch unreachable,
+        };
+    }
+
+    pub fn clear(self: *Self) void {
+        self.top = 0;
+        self.bottom = 0;
+    }
+
+    pub fn push(self: *Self, data: anytype) void {
+        std.debug.assert(self.top + @sizeOf(@TypeOf(data)) <= self.data.len);
+        const DataPtr = *align(1) @TypeOf(data);
+        @as(DataPtr, @ptrCast(&self.data[self.top])).* = data;
+        self.top += @sizeOf(@TypeOf(data));
+    }
+
+    pub fn pop(self: *Self, comptime T: type) T {
+        std.debug.assert(self.bottom + @sizeOf(T) <= self.top);
+        const t = @as(*align(1) T, @ptrCast(&self.data[self.bottom])).*;
+        self.bottom += @sizeOf(T);
+        return t;
+    }
+
+    pub fn size(self: *Self) usize {
+        return self.top - self.bottom;
+    }
+
+    pub fn remainingSize(self: *Self) usize {
+        return self.data.len - self.top;
+    }
+
+    pub fn remainingData(self: *Self) []u8 {
+        return self.data[self.top..];
+    }
+
+    pub fn hasData(self: *Self) bool {
+        return self.size() > 0;
+    }
+};
+
 pub fn ByteBuffer(comptime N: u32) type {
     return struct {
         data: [N]u8 = undefined,

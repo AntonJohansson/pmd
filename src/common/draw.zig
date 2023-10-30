@@ -356,6 +356,13 @@ pub fn init() void {
             },
         };
         pip_desc.layout.attrs[0].format = .FLOAT3;
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            },
+        };
         pip_3d = sg.makePipeline(pip_desc);
         pass_action_3d.colors[0] = .{
             .load_action = .CLEAR,
@@ -546,18 +553,6 @@ pub fn deinit() void {
 }
 
 pub fn process(b: *Buffer, width: u32, height: u32) void {
-
-    //const width = raylib.GetScreenWidth();
-    //const height = raylib.GetScreenHeight();
-
-    //if (raylib.IsWindowResized()) {
-    //    raylib.UnloadRenderTexture(config.vars.rt);
-    //    config.vars.rt = raylib.LoadRenderTexture(width, height);
-    //}
-
-    //raylib.BeginDrawing();
-    //raylib.ClearBackground(raylib.BLACK);
-
     var vp: m4 = .{};
 
     while (b.hasData()) {
