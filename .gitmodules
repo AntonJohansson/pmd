@@ -7,3 +7,6 @@
 [submodule "third_party/sokol-zig"]
 	path = third_party/sokol-zig
 	url = https://github.com/floooh/sokol-zig
+[submodule "third_party/SDL_GameControllerDB"]
+	path = third_party/SDL_GameControllerDB
+	url = https://github.com/gabomdq/SDL_GameControllerDB
