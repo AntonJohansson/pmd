@@ -3,7 +3,7 @@ const std = @import("std");
 const common = @import("common");
 const Memory = common.Memory;
 const Player = common.Player;
-const PlayerId = common.PlayerId;
+const EntityId = common.EntityId;
 const Input = common.Input;
 
 //
@@ -57,7 +57,7 @@ pub const PlayerJoinRequest = extern struct {
 };
 
 pub const PlayerJoinResponse = extern struct {
-    id: PlayerId,
+    id: EntityId,
 };
 
 pub const PeerJoined = extern struct {
@@ -65,12 +65,12 @@ pub const PeerJoined = extern struct {
 };
 
 pub const PeerDisconnected = extern struct {
-    id: PlayerId,
+    id: EntityId,
 };
 
 pub const PlayerUpdate = extern struct {
     tick: u64,
-    id: PlayerId,
+    id: EntityId,
     input: Input,
 };
 
@@ -85,7 +85,7 @@ pub const ServerPlayerUpdate = extern struct {
 };
 
 pub const NewSounds = extern struct {
-    new_sounds:     [16]common.SoundType = undefined,
+    new_sounds:     [16]common.Sound = undefined,
     num_sounds:     u16 = 0,
 };
 
@@ -110,10 +110,14 @@ pub const NewDamage = extern struct {
 };
 
 pub const Kill = extern struct {
-    from: PlayerId,
-    to: PlayerId,
+    from: EntityId,
+    to: EntityId,
 };
 
 pub const SpawnPlayer = extern struct {
     player: Player,
+};
+
+pub const EntityUpdate = extern struct {
+    entity: common.Entity,
 };

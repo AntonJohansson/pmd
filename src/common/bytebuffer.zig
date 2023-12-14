@@ -133,7 +133,6 @@ pub fn CircularArray(comptime T: type, comptime size: usize) type {
 
         // Don't like this api
         pub fn push(self: *@This()) *T {
-            std.debug.assert(self.size+1 <= self.data.len);
             const index = (self.bottom + self.size) % self.data.len;
             self.size += 1;
             return &self.data[index];

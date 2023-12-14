@@ -4,7 +4,7 @@ const packet = @import("packet.zig");
 pub const MessageKind = blk: {
     const ti = @typeInfo(packet);
     std.debug.assert(ti == .Struct);
-    std.debug.assert(ti.Struct.fields.len < 1 << 8*@sizeOf(u8));
+    std.debug.assert(ti.Struct.fields.len < (1 << 8*@sizeOf(u8))-1);
 
     comptime var num_decls = ti.Struct.decls.len;
 
@@ -52,6 +52,8 @@ pub fn mapKindToMessage(comptime kind: MessageKind) type {
 }
 
 pub fn getMessageSize(kind: MessageKind) usize {
+    const ti = @typeInfo(MessageKind);
+    std.debug.assert(@intFromEnum(kind) < ti.Enum.fields.len);
     inline for (@typeInfo(MessageKind).Enum.fields) |f| {
         if (kind == @as(MessageKind, @enumFromInt(f.value))) {
             return @sizeOf(mapKindToMessage(@enumFromInt(f.value)));

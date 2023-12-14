@@ -49,17 +49,21 @@ pub const Cube2 = struct {
 pub const Camera3d = extern struct {
     pos: v3 = .{},
     dir: v3 = .{},
-    proj: m4 = .{},
-    view: m4 = .{},
+    proj: m4 = math.identity,
+    view: m4 = math.identity,
 };
+
 pub const Camera2d = struct {
     target: v2,
     zoom: f32,
+    scale: v2 = .{.x=0.5,.y=0.5},
+    offset: v2 = .{.x=0,.y=0},
 };
+
 pub const End3d = struct {};
 pub const End2d = struct {};
 
-pub const Plane = struct {
+pub const Plane = extern struct {
     model: m4,
 };
 

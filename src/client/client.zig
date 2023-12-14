@@ -1,4 +1,4 @@
-const std = @import("std") ;
+const std = @import("std");
 
 const common = @import("common");
 const bb = common.bb;
@@ -10,7 +10,7 @@ const config = common.config;
 const Vars = config.Vars;
 const Memory = common.Memory;
 const Player = common.Player;
-const PlayerId = common.PlayerId;
+const EntityId = common.EntityId;
 const Input = common.Input;
 const InputName = common.InputName;
 const draw = common.draw;
@@ -18,20 +18,8 @@ const draw = common.draw;
 const math = common.math;
 const v2 = math.v2;
 const v3 = math.v3;
-const v3add = math.v3add;
-const v3eql = math.v3eql;
-const v3scale = math.v3scale;
-const v3normalize = math.v3normalize;
 const f32equal = math.f32equal;
-const v3len2 = math.v3len2;
-const v3len = math.v3len;
 const m4 = math.m4;
-const m4model = math.m4model;
-const m4view = math.m4view;
-const m4view_from_camera = math.m4view_from_camera;
-const m4projection = math.m4projection;
-const m4mul = math.m4mul;
-const m4transpose = math.m4transpose;
 
 const net = @import("net");
 const headers = net.headers;
@@ -50,6 +38,8 @@ const slog = sokol.log;
 const glfw = @import("mach-glfw");
 const Key = glfw.Key;
 const MouseButton = glfw.MouseButton;
+const GamepadButton = glfw.GamepadButton;
+const GamepadAxis = glfw.GamepadAxis;
 
 const c = @cImport({
     @cDefine("STB_VORBIS_HEADER_ONLY", "");
@@ -95,12 +85,39 @@ const MouseScroll = struct {
     dir: MouseScrollDir,
 };
 
+const GamepadAxisAbsDir = enum {
+    larger_than_zero,
+    smaller_than_zero,
+};
+
+const GamepadAxisAbs = struct {
+    axis: GamepadAxis,
+    dir: GamepadAxisAbsDir,
+};
+
+const InputDeviceState = enum {
+    connected,
+    disconnected,
+    occupied,
+};
+
+const InputDevice = union(enum) {
+    mouse_keyboard: struct {
+    },
+    gamepad: struct {
+        id: u4,
+    },
+};
+
 // Represents all platform specific inputs such as keys/mouse buttons/scroll
 const InputType = union(enum) {
     unmapped: bool,
     key: Key,
     mouse_button: MouseButton,
     mouse_scroll: MouseScroll,
+    gamepad_button: GamepadButton,
+    gamepad_axis_abs: GamepadAxisAbs,
+    gamepad_axis: GamepadAxis,
 };
 
 const InputState = struct {
@@ -135,6 +152,27 @@ const InputMap = struct {
             .input_type = .{.mouse_scroll = .{.dir = dir}},
         };
     }
+
+    fn map_gamepad_button(self: *Self, input_name: InputName, trigger: TriggerType, button: GamepadButton) void {
+        self.map[@intFromEnum(input_name)] = InputState {
+            .trigger = trigger,
+            .input_type = .{.gamepad_button = button},
+        };
+    }
+
+    fn map_gamepad_axis(self: *Self, input_name: InputName, trigger: TriggerType, axis: GamepadAxis) void {
+        self.map[@intFromEnum(input_name)] = InputState {
+            .trigger = trigger,
+            .input_type = .{.gamepad_axis = axis},
+        };
+    }
+
+    fn map_gamepad_axis_abs(self: *Self, input_name: InputName, trigger: TriggerType, axis_abs: GamepadAxisAbs) void {
+        self.map[@intFromEnum(input_name)] = InputState {
+            .trigger = trigger,
+            .input_type = .{.gamepad_axis_abs = axis_abs},
+        };
+    }
 };
 
 //
@@ -146,11 +184,13 @@ const SoundType = common.SoundType;
 const SoundInfo = struct {
     path: []const u8,
     samples: []f32 = undefined,
+    volume: f32 = 1.0,
 };
 
 const PlayingSound = struct {
     samples: []f32 = undefined,
     index: usize = 0,
+    volume: f32 = 1.0,
 };
 
 //
@@ -158,16 +198,19 @@ const PlayingSound = struct {
 // splitscreen/couch co-op.
 //
 const LocalPlayer = struct {
-    input_map: InputMap,
+    input_device: ?InputDevice = null,
+    input_device_id: ?usize = null,
+    gameplay_input_map: ?*InputMap = null,
+    editor_input_map: ?*InputMap = null,
     input: Input = undefined,
 
     // TODO: We only need to allocate this when on network
     input_buffer: bb.CircularBuffer(Input, 256) = .{},
 
-    id: ?PlayerId = null,
+    id: ?EntityId = null,
 };
 
-fn findLocalPlayerById(local_players: []LocalPlayer, id: PlayerId) ?*LocalPlayer {
+fn findLocalPlayerById(local_players: []LocalPlayer, id: EntityId) ?*LocalPlayer {
     for (local_players) |*l| {
         if (l.id != null and l.id.? == id)
             return l;
@@ -186,11 +229,13 @@ var key_repeat_timer: std.time.Timer = undefined;
 var last_key: Key = .unknown;
 var last_char: u8 = 0;
 var repeat = false;
+var last_key_down = false;
 
 var capture_text = false;
+var wait_for_first_key_input = true;
 fn charCallback(window: glfw.Window, codepoint: u21) void {
     _ = window;
-    if (!capture_text)
+    if (!capture_text and !wait_for_first_key_input)
         return;
 
     // codepoint -> utf8 string
@@ -226,6 +271,11 @@ fn charCallback(window: glfw.Window, codepoint: u21) void {
     key_repeat_timer.reset();
     if (!(last_char >= 32 and last_char <= 126) or last_char == '`')
         return;
+
+    if (wait_for_first_key_input) {
+        wait_for_first_key_input = false;
+        return;
+    }
 
     if (memory.console_input.len < memory.console_input.buffer.len-1) {
         memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
@@ -303,8 +353,15 @@ pub fn main() !void {
     glfw.makeContextCurrent(window);
     glfw.swapInterval(1);
     window.setInputMode(.cursor, .disabled);
+    window.setInputModeRawMouseMotion(true);
     window.setCharCallback(charCallback);
     window.setScrollCallback(scrollCallback);
+
+    // Update gamepad database
+    {
+        const controller_db = @embedFile("gamecontrollerdb.txt");
+        _ = glfw.Joystick.updateGamepadMappings(controller_db);
+    }
 
     // initialize renderer
     draw.init();
@@ -324,14 +381,14 @@ pub fn main() !void {
     var sound_file_map: [num_sound_types]SoundInfo = undefined;
     const resource_dir = "res/";
     const audio_dir = resource_dir ++ "audio/";
-    sound_file_map[@intFromEnum(SoundType.death)]         = .{.path=audio_dir ++ "kill.ogg"};
-    sound_file_map[@intFromEnum(SoundType.slide)]         = .{.path=audio_dir ++ "slide.ogg"};
-    sound_file_map[@intFromEnum(SoundType.sniper)]        = .{.path=audio_dir ++ "sniper.ogg"};
-    sound_file_map[@intFromEnum(SoundType.weapon_switch)] = .{.path=audio_dir ++ "switch.ogg"};
-    sound_file_map[@intFromEnum(SoundType.step)]          = .{.path=audio_dir ++ "step.ogg"};
-    sound_file_map[@intFromEnum(SoundType.pip)]           = .{.path=audio_dir ++ "pip.ogg"};
-    sound_file_map[@intFromEnum(SoundType.explosion)]     = .{.path=audio_dir ++ "explosion.ogg"};
-    sound_file_map[@intFromEnum(SoundType.doink)]         = .{.path=audio_dir ++ "doink.ogg"};
+    sound_file_map[@intFromEnum(SoundType.death)]         = .{.path=audio_dir ++ "kill.ogg",      .volume=0.7};
+    sound_file_map[@intFromEnum(SoundType.slide)]         = .{.path=audio_dir ++ "slide.ogg",     .volume=0.7};
+    sound_file_map[@intFromEnum(SoundType.sniper)]        = .{.path=audio_dir ++ "sniper.ogg",    .volume=0.7};
+    sound_file_map[@intFromEnum(SoundType.weapon_switch)] = .{.path=audio_dir ++ "switch.ogg",    .volume=0.2};
+    sound_file_map[@intFromEnum(SoundType.step)]          = .{.path=audio_dir ++ "step.ogg",      .volume=0.7};
+    sound_file_map[@intFromEnum(SoundType.pip)]           = .{.path=audio_dir ++ "pip.ogg",       .volume=0.7};
+    sound_file_map[@intFromEnum(SoundType.explosion)]     = .{.path=audio_dir ++ "explosion.ogg", .volume=0.7};
+    sound_file_map[@intFromEnum(SoundType.doink)]         = .{.path=audio_dir ++ "doink.ogg",     .volume=0.7};
 
     // Load all sounds into buffers
     for (&sound_file_map) |*info| {
@@ -367,8 +424,9 @@ pub fn main() !void {
     //
     var module = try code_module.CodeModule(struct {
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
+        authorizedPlayerUpdate: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
         authorizedUpdate: *fn (vars: *const Vars, memory: *Memory, dt: f32) void,
-        draw: *fn (vars: *const Vars, memory: *Memory, b: *draw.Buffer, player_id: common.PlayerId, input: *const Input) void,
+        draw: *fn (vars: *const Vars, memory: *Memory, b: *draw.Buffer, player_id: common.EntityId, input: *const Input) void,
     }).init(memory.persistent_allocator, "zig-out/lib", "game");
 
     try module.open(memory.persistent_allocator);
@@ -378,62 +436,83 @@ pub fn main() !void {
     // Input state
     //
 
-    var input_map0 = InputMap{};
-    input_map0.map_key(.MoveForward,               .state,       .w);
-    input_map0.map_key(.MoveLeft,                  .state,       .a);
-    input_map0.map_key(.MoveBack,                  .state,       .s);
-    input_map0.map_key(.MoveRight,                 .state,       .d);
-    input_map0.map_mouse_scroll(.Jump,             .scroll_down);
-    input_map0.map_key(.Crouch,                    .state,       .left_control);
-    input_map0.map_key(.Sprint,                    .state,       .left_shift);
-    input_map0.map_key(.ResetCamera,               .rising_edge, .r);
-    input_map0.map_key(.Console,                   .toggle,      .grave_accent);
-    input_map0.map_key(.Enter,                     .rising_edge, .enter);
-    input_map0.map_key(.EnableCursor,              .toggle,      .escape);
-    input_map0.map_key(.Editor,                    .toggle,      .x);
-    input_map0.map_key(.Save,                      .rising_edge, .o);
-    input_map0.map_key(.Load,                      .rising_edge, .p);
-    input_map0.map_mouse_button(.MoveUp,           .state,       .five);
-    input_map0.map_mouse_button(.MoveDown,         .state,       .four);
-    input_map0.map_mouse_button(.Interact,         .rising_edge, .left);
-    input_map0.map_mouse_button(.AltInteract,      .state,       .right);
-    input_map0.map_key(.SwitchWeapon,              .rising_edge, .q);
+    const max_num_gamepads = @intFromEnum(glfw.Joystick.Id.last) + 1;
+    const keyboard_input_device_id = @intFromEnum(glfw.Joystick.Id.last) + 1;
+    var occupied_input_devices = [_]InputDeviceState{.connected}**(keyboard_input_device_id + 1);
 
-    var input_map1 = InputMap{};
+    var default_keyboard_input_map_gameplay = InputMap{};
+    default_keyboard_input_map_gameplay.map_key(.MoveForward,               .state,       .w);
+    default_keyboard_input_map_gameplay.map_key(.MoveLeft,                  .state,       .a);
+    default_keyboard_input_map_gameplay.map_key(.MoveBack,                  .state,       .s);
+    default_keyboard_input_map_gameplay.map_key(.MoveRight,                 .state,       .d);
+    default_keyboard_input_map_gameplay.map_mouse_scroll(.Jump,             .scroll_down);
+    default_keyboard_input_map_gameplay.map_key(.Crouch,                    .state,       .left_control);
+    default_keyboard_input_map_gameplay.map_key(.Sprint,                    .state,       .left_shift);
+    default_keyboard_input_map_gameplay.map_key(.ResetCamera,               .rising_edge, .r);
+    default_keyboard_input_map_gameplay.map_key(.Console,                   .toggle,      .grave_accent);
+    default_keyboard_input_map_gameplay.map_key(.Enter,                     .rising_edge, .enter);
+    default_keyboard_input_map_gameplay.map_key(.Editor,                    .toggle,      .x);
+    default_keyboard_input_map_gameplay.map_key(.Save,                      .rising_edge, .o);
+    default_keyboard_input_map_gameplay.map_key(.Load,                      .rising_edge, .p);
+    default_keyboard_input_map_gameplay.map_mouse_button(.MoveUp,           .state,       .five);
+    default_keyboard_input_map_gameplay.map_mouse_button(.MoveDown,         .state,       .four);
+    default_keyboard_input_map_gameplay.map_mouse_button(.Interact,         .rising_edge, .left);
+    default_keyboard_input_map_gameplay.map_mouse_button(.AltInteract,      .state, .right);
+    default_keyboard_input_map_gameplay.map_key(.SwitchWeapon,              .rising_edge, .q);
+
+    var default_keyboard_input_map_editor = InputMap{};
+    default_keyboard_input_map_editor.map_key(.MoveForward,               .state,       .w);
+    default_keyboard_input_map_editor.map_key(.MoveLeft,                  .state,       .a);
+    default_keyboard_input_map_editor.map_key(.MoveBack,                  .state,       .s);
+    default_keyboard_input_map_editor.map_key(.MoveRight,                 .state,       .d);
+    default_keyboard_input_map_editor.map_key(.MoveUp,                    .state,       .space);
+    default_keyboard_input_map_editor.map_key(.MoveDown,                  .state,       .left_control);
+    default_keyboard_input_map_editor.map_key(.Sprint,                    .state,       .left_shift);
+    default_keyboard_input_map_editor.map_key(.ResetCamera,               .rising_edge, .r);
+    default_keyboard_input_map_editor.map_key(.Console,                   .toggle,      .grave_accent);
+    default_keyboard_input_map_editor.map_key(.Enter,                     .rising_edge, .enter);
+    default_keyboard_input_map_editor.map_key(.InMenu,                    .toggle,      .escape);
+    default_keyboard_input_map_editor.map_key(.Editor,                    .toggle,      .x);
+    default_keyboard_input_map_editor.map_key(.Save,                      .rising_edge, .o);
+    default_keyboard_input_map_editor.map_key(.Load,                      .rising_edge, .p);
+    default_keyboard_input_map_editor.map_mouse_button(.Interact,         .state, .left);
+    default_keyboard_input_map_editor.map_mouse_button(.AltInteract,      .rising_edge, .right);
+
+    var default_gamepad_input_map_gameplay = InputMap{};
+    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveForward,    .state,       .{.axis = .left_y, .dir = .smaller_than_zero});
+    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveBack,       .state,       .{.axis = .left_y, .dir = .larger_than_zero});
+    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveRight,      .state,       .{.axis = .left_x, .dir = .larger_than_zero});
+    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveLeft,       .state,       .{.axis = .left_x, .dir = .smaller_than_zero});
+    default_gamepad_input_map_gameplay.map_gamepad_button(.Jump,             .rising_edge, .right_bumper);
+    default_gamepad_input_map_gameplay.map_gamepad_button(.Crouch,           .state,       .left_bumper);
+    //default_gamepad_input_map_gameplay.map_key(.Sprint,                    .state,       .left_shift);
+    default_gamepad_input_map_gameplay.map_gamepad_button(.Editor,           .rising_edge, .start);
+    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.Interact,       .rising_edge, .{.axis = .right_trigger, .dir = .larger_than_zero});
+    default_gamepad_input_map_gameplay.map_gamepad_button(.AltInteract,      .state,       .right_bumper);
+    default_gamepad_input_map_gameplay.map_gamepad_button(.SwitchWeapon,     .rising_edge, .y);
+
+
+    var debug_gamepad_off: usize = 0;
+    default_gamepad_input_map_gameplay.map_gamepad_button(.DebugIncGamepadOffset, .rising_edge, .dpad_up);
+    default_gamepad_input_map_gameplay.map_gamepad_button(.DebugDecGamepadOffset, .rising_edge, .dpad_down);
+
+    var default_gamepad_input_map_editor = InputMap{};
+    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveForward,    .state,       .{.axis = .left_y, .dir = .smaller_than_zero});
+    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveBack,       .state,       .{.axis = .left_y, .dir = .larger_than_zero});
+    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveRight,      .state,       .{.axis = .left_x, .dir = .larger_than_zero});
+    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveLeft,       .state,       .{.axis = .left_x, .dir = .smaller_than_zero});
+    default_gamepad_input_map_editor.map_gamepad_button(.MoveUp,           .state,       .a);
+    default_gamepad_input_map_editor.map_gamepad_button(.MoveDown,         .state,       .b);
+    //default_gamepad_input_map_editor.map_key(.Sprint,                    .state,       .left_shift);
+    default_gamepad_input_map_editor.map_gamepad_button(.Editor,           .toggle,      .start);
+    default_gamepad_input_map_editor.map_gamepad_button(.Interact,        .rising_edge, .x);
+    default_gamepad_input_map_editor.map_gamepad_button(.AltInteract,     .state,       .right_bumper);
 
     memory.vel_graph.data = try memory.persistent_allocator.alloc(f32, 2*fps);
 
     var draw_buffer: draw.Buffer = .{};
 
-    var local_players = [_]LocalPlayer{
-        .{.input_map = input_map0},
-        .{.input_map = input_map1},
-    };
-
-    // add a player so we can play locally
-    // TODO: don't perform attempts to read/write net
-    // if we're not connected.
-    {
-        const id = common.newPlayerId();
-        local_players[0].id = id;
-
-        const player = Player {
-            .id = id,
-            .pos = v3 {.x = 0, .y = 0, .z = 0},
-            .vel = v3 {.x = 0, .y = 0, .z = 0},
-            .dir = v3 {.x = 1, .y = 0, .z = 0},
-            .yaw = 0,
-            .pitch = 0,
-            .hue = 80.0,
-        };
-        memory.players.appendAssumeCapacity(player);
-
-        memory.respawns.appendAssumeCapacity(.{
-            .id = id,
-            .time_left = 0.0,
-        });
-    }
-
+    var local_players: std.BoundedArray(LocalPlayer, 16) = .{};
 
     timer = try std.time.Timer.start();
     key_repeat_timer = try std.time.Timer.start();
@@ -450,6 +529,14 @@ pub fn main() !void {
 
     //config.vars.bloom_upscale = raylib.LoadRenderTexture(width, height);
     //defer raylib.UnloadRenderTexture(config.vars.bloom_upscale);
+
+
+    // Scan for connected joysticks
+    {
+        //for (0..@intFromEnum(glfw.Joystick.Id.last)) |i| {
+        //    const present = glfw.Joystick.present(.{.jid = @enumFromInt(i)});
+        //}
+    }
 
     var connected = false;
 
@@ -504,8 +591,8 @@ pub fn main() !void {
                 switch (event) {
                     .peer_connected => {
                         // Clear local players and players in game when joining a server
-                        for (&local_players) |*l|
-                            l.id = null;
+                        for (local_players.slice()) |*lp|
+                            lp.id = null;
                         memory.players.len = 0;
                     },
                     .peer_disconnected => {
@@ -550,9 +637,9 @@ pub fn main() !void {
                                 // room for a local player, this should never
                                 // happen as we ourselves request to join,
                                 // so we should have space...
-                                for (&local_players) |*l| {
-                                    if (l.id == null) {
-                                        l.id = player.id;
+                                for (local_players.slice()) |*lp| {
+                                    if (lp.id == null) {
+                                        lp.id = player.id;
                                         break;
                                     }
                                 }
@@ -586,7 +673,7 @@ pub fn main() !void {
                                 defer memory.stat_data.enabled = true;
 
                                 const message: *align(1) packet.PlayerUpdateAuth = @ptrCast(e.data);
-                                const local_player = findLocalPlayerById(&local_players, message.player.id);
+                                const local_player = findLocalPlayerById(local_players.slice(), message.player.id);
                                 if (local_player != null) {
                                     const player = common.findPlayerById(&memory.players.buffer, message.player.id);
 
@@ -598,7 +685,7 @@ pub fn main() !void {
                                         module.function_table.update(&config.vars, &auth_memory, &auth_player, &old_input, dt);
                                     }
 
-                                    if (!v3eql(auth_player.pos, player.?.pos)) {
+                                    if (!v3.eql(auth_player.pos, player.?.pos)) {
                                         log.info("  auth for tick {}:\n  {}\n  {}\n  {}", .{
                                             message.tick,
                                             message.player.pos,
@@ -613,7 +700,7 @@ pub fn main() !void {
                             .ServerPlayerUpdate => {
                                 const message: *align(1) packet.ServerPlayerUpdate = @ptrCast(e.data);
                                 for (message.players[0..message.num_players]) |player| {
-                                    if (findLocalPlayerById(&local_players, player.id) != null)
+                                    if (findLocalPlayerById(local_players.slice(), player.id) != null)
                                         continue;
                                     const current_player = common.findPlayerById(&memory.players.buffer, player.id) orelse try memory.players.addOne();
                                     current_player.* = player;
@@ -621,14 +708,32 @@ pub fn main() !void {
                             },
                             .NewSounds => {
                                 const message: *align(1) packet.NewSounds = @ptrCast(e.data);
-                                memory.new_sounds.appendSliceAssumeCapacity(message.new_sounds[0..message.num_sounds]);
+                                for (message.new_sounds[0..message.num_sounds]) |s| {
+                                    // TODO(anjo): we're hardcoding to skip death sounds here...
+                                    //
+                                    // check if the sound was triggered by us, and in that
+                                    // case ignore it as we've already added it when we
+                                    // updated locally
+                                    if (s.type != .death) {
+                                        var local =  false;
+                                        for (local_players.constSlice()) |lp| {
+                                            if (lp.id == s.id_from) {
+                                                local = true;
+                                                break;
+                                            }
+                                        }
+                                        if (local)
+                                            continue;
+                                    }
+                                    memory.new_sounds.appendAssumeCapacity(s);
+                                }
                             },
                             .NewHitscans => {
                                 const message: *align(1) packet.NewHitscans = @ptrCast(e.data);
                                 for (message.new_hitscans[0..message.num_hitscans]) |h| {
                                     var local =  false;
-                                    for (local_players) |l| {
-                                        if (l.id == h.id_from) {
+                                    for (local_players.constSlice()) |lp| {
+                                        if (lp.id == h.id_from) {
                                             local = true;
                                             break;
                                         }
@@ -649,7 +754,21 @@ pub fn main() !void {
                             .NewDamage => {
                                 const message: *align(1) packet.NewDamage = @ptrCast(e.data);
                                 appendSliceAssumeForceDstAlignment(1, common.Damage, &memory.new_damage, message.new_damage[0..message.num_damage]);
-                                std.log.info("wow", .{});
+                            },
+                            .Kill => {
+                                const message: *align(1) packet.Kill = @ptrCast(e.data);
+                                var entry = memory.killfeed.push();
+                                entry.from = message.from;
+                                entry.to = message.to;
+                                entry.time_left = 2.0;
+                            },
+                            .EntityUpdate => {
+                                const message: *align(1) packet.EntityUpdate = @ptrCast(e.data);
+                                if (common.findEntityById(memory.entities.slice(), message.entity.id)) |entity| {
+                                    entity.* = message.entity;
+                                } else {
+                                    memory.entities.appendAssumeCapacity(message.entity);
+                                }
                             },
                             else => {
                                 std.log.err("Unrecognized packet type: {}", .{e.kind});
@@ -660,11 +779,6 @@ pub fn main() !void {
                 }
             }
             memory.stat_data.end();
-
-            // TODO(anjo): Move to some "lobby" related thing
-            if (!connected) {
-                module.function_table.authorizedUpdate(&config.vars, &memory, dt);
-            }
 
             //
             // Handle client input
@@ -682,91 +796,290 @@ pub fn main() !void {
                     memory.stat_data.start("client update");
                     defer memory.stat_data.end();
 
-                    const lp = &local_players[0];
-                    if (lp.id != null) {
-                        //lp.input.clear();
+                    for (occupied_input_devices, 0..) |d,i| {
+                        if (d == .connected) {
+                            // @unlikely
 
-                        memory.stat_data.start("gather input");
-                        for (&lp.input_map.map, 0..) |*state,i| {
+                            if (i == keyboard_input_device_id) {
+                                // Check if mouse/keyboard input happened
+                                const key_pressed = last_char > 0;
+                                const pos = window.getCursorPos();
+                                const mouse_moved = pos.xpos > 0 or pos.ypos > 0;
+                                if (key_pressed or mouse_moved) {
+                                    occupied_input_devices[i] = .occupied;
+                                    log.info("Mouse/keyboard", .{});
 
-                            const action: glfw.Action = switch (state.input_type) {
-                                InputType.key => |key| window.getKey(key),
-                                InputType.mouse_button => |mb| window.getMouseButton(mb),
-                                InputType.mouse_scroll => |ms| switch (ms.dir) {
-                                    .scroll_down => if (scroll_delta < 0.0) .press else .release,
-                                    .scroll_up   => if (scroll_delta > 0.0) .press else .release,
-                                },
-                                else => continue,
-                            };
+                                    // add a player so we can play locally
+                                    // TODO: don't perform attempts to read/write net
+                                    // if we're not connected.
+                                    {
+                                        const lp = local_players.addOneAssumeCapacity();
+                                        lp.id = common.newEntityId();
+                                        lp.input_device_id = i;
+                                        lp.gameplay_input_map = &default_keyboard_input_map_gameplay;
+                                        lp.editor_input_map = &default_keyboard_input_map_editor;
 
-                            const input_name: InputName = @enumFromInt(i);
-                            switch (state.trigger) {
-                                .state => {
-                                    const active = action == .press;
-                                    lp.input.setto(input_name, active);
-                                },
-                                .rising_edge => {
-                                    const active = state.last_action == .release and action == .press;
-                                    lp.input.setto(input_name, active);
-                                },
-                                .falling_edge => {
-                                    const active = state.last_action == .press and action == .release;
-                                    lp.input.setto(input_name, active);
-                                },
-                                .rising_or_falling_edge => {
-                                    const active = state.last_action != action;
-                                    lp.input.setto(input_name, active);
-                                },
-                                .toggle => {
-                                    const active = state.last_action == .release and action == .press;
-                                    lp.input.setto(input_name, active != lp.input.isset(input_name));
-                                },
+                                        const player = Player {
+                                            .id = lp.id.?,
+                                            .pos = v3 {.x = 0, .y = 0, .z = 10.0},
+                                            .vel = v3 {.x = 0, .y = 0, .z = 0},
+                                            .dir = v3 {.x = 1, .y = 0, .z = 0},
+                                            .yaw = 0,
+                                            .pitch = 0,
+                                        };
+                                        memory.players.appendAssumeCapacity(player);
+
+                                        memory.respawns.appendAssumeCapacity(.{
+                                            .id = lp.id.?,
+                                            .time_left = 0.0,
+                                        });
+                                    }
+
+                                }
+                            } else {
+                                // Check for gamepad input
+                                const index = (i + max_num_gamepads-debug_gamepad_off) % max_num_gamepads;
+                                var gamepad_press = false;
+                                if (occupied_input_devices[i] == .occupied)
+                                    continue;
+                                const joystick = glfw.Joystick{.jid = @enumFromInt(index)};
+                                const present = glfw.Joystick.present(joystick);
+                                if (present) {
+                                    const gamepad = glfw.Joystick.getGamepadState(joystick) orelse {
+                                        continue;
+                                    };
+                                    for (gamepad.buttons) |b| {
+                                        const action = @as(glfw.Action, @enumFromInt(b));
+                                        if (action == .press) {
+                                            gamepad_press = true;
+                                            occupied_input_devices[i] = .occupied;
+                                            log.info("Gamepad {}", .{i});
+
+                                            // add a player so we can play locally
+                                            // TODO: don't perform attempts to read/write net
+                                            // if we're not connected.
+                                            {
+                                                const lp = local_players.addOneAssumeCapacity();
+                                                lp.id = common.newEntityId();
+                                                lp.input_device_id = i;
+                                                lp.gameplay_input_map = &default_gamepad_input_map_gameplay;
+                                                lp.editor_input_map = &default_gamepad_input_map_editor;
+
+                                                const player = Player {
+                                                    .id = lp.id.?,
+                                                    .pos = v3 {.x = 0, .y = 0, .z = 10.0},
+                                                    .vel = v3 {.x = 0, .y = 0, .z = 0},
+                                                    .dir = v3 {.x = 1, .y = 0, .z = 0},
+                                                    .yaw = 0,
+                                                    .pitch = 0,
+                                                };
+                                                memory.players.appendAssumeCapacity(player);
+
+                                                memory.respawns.appendAssumeCapacity(.{
+                                                    .id = lp.id.?,
+                                                    .time_left = 0.0,
+                                                });
+                                            }
+
+                                            break;
+                                        }
+                                    }
+
+                                    if (gamepad_press)
+                                        break;
+                                }
                             }
-                            state.last_action = action;
                         }
-                        memory.stat_data.end();
+                    }
 
-                        // TODO(anjo): We have to dealy with mouse buttons separately here which is annoying
-                        lp.input.scroll = scroll_delta;
+                    for (local_players.slice()) |*lp| {
+                        if (lp.input_device_id == null)
+                            continue;
 
-                        var delta: v2 = .{};
-                        {
-                            const pos = window.getCursorPos();
-                            delta.x = @as(f32, @floatCast(pos.xpos)) - old_mouse_pos.x;
-                            delta.y = @as(f32, @floatCast(pos.ypos)) - old_mouse_pos.y;
-                            old_mouse_pos.x = @floatCast(pos.xpos);
-                            old_mouse_pos.y = @floatCast(pos.ypos);
-                        }
-
-                        lp.input.cursor_delta = .{.x = config.vars.sensitivity*delta.x, .y = config.vars.sensitivity*delta.y};
-
+                        // Collect inputs if we're not in the console
                         if (!lp.input.isset(.Console)) {
-                            // push input state
+                            const input_map = if (lp.input.isset(.Editor)) lp.editor_input_map.? else lp.gameplay_input_map.?;
 
-                            lp.input_buffer.push(lp.input);
+                            memory.stat_data.start("gather input");
+                            for (&input_map.map, 0..) |*state,i| {
 
-                            net.pushMessage(server_index, packet.PlayerUpdate{
-                                .tick = tick,
-                                .id = lp.id.?,
-                                .input = lp.input,
-                            });
+                                const action: glfw.Action = switch (state.input_type) {
+                                    InputType.key => |key| window.getKey(key),
+                                    InputType.mouse_button => |mb| window.getMouseButton(mb),
+                                    InputType.mouse_scroll => |ms| switch (ms.dir) {
+                                        .scroll_down => if (scroll_delta < 0.0) .press else .release,
+                                        .scroll_up   => if (scroll_delta > 0.0) .press else .release,
+                                    },
+                                    InputType.gamepad_button => |gb| blk: {
+                                        const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads-debug_gamepad_off) % max_num_gamepads);
+                                        const gamepad = glfw.Joystick.getGamepadState(.{.jid = index}) orelse {
+                                            continue;
+                                        };
+                                        break :blk gamepad.getButton(gb);
+                                    },
+                                    InputType.gamepad_axis_abs => |a| blk: {
+                                        const deadzone = 0.1;
+                                        const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads-debug_gamepad_off) % max_num_gamepads);
+                                        const gamepad = glfw.Joystick.getGamepadState(.{.jid = index}) orelse {
+                                            continue;
+                                        };
+                                        break :blk switch (a.dir) {
+                                            .larger_than_zero  => if (gamepad.getAxis(a.axis) >  deadzone) .press else .release,
+                                            .smaller_than_zero => if (gamepad.getAxis(a.axis) < -deadzone) .press else .release,
+                                        };
+                                    },
+                                    else => continue,
+                                };
 
-                            const player = common.findPlayerById(&memory.players.buffer, lp.id.?);
+                                const input_name: InputName = @enumFromInt(i);
+                                switch (state.trigger) {
+                                    .state => {
+                                        const active = action == .press;
+                                        lp.input.setto(input_name, active);
+                                    },
+                                    .rising_edge => {
+                                        const active = state.last_action == .release and action == .press;
+                                        lp.input.setto(input_name, active);
+                                    },
+                                    .falling_edge => {
+                                        const active = state.last_action == .press and action == .release;
+                                        lp.input.setto(input_name, active);
+                                    },
+                                    .rising_or_falling_edge => {
+                                        const active = state.last_action != action;
+                                        lp.input.setto(input_name, active);
+                                    },
+                                    .toggle => {
+                                        const active = state.last_action == .release and action == .press;
+                                        lp.input.setto(input_name, active != lp.input.isset(input_name));
+                                    },
+                                }
+                                state.last_action = action;
+                            }
+                            memory.stat_data.end();
+                        }
 
-                            // run predictive move
-                            if (player != null) {
-                                memory.stat_data.start("game update");
-                                defer memory.stat_data.end();
-                                module.function_table.update(&config.vars, &memory, player.?, &lp.input, dt);
+                        if (lp.input_device_id.? == keyboard_input_device_id) {
+                            // Mouse/keyboard specific inputs
+
+                            // TODO(anjo): We have to deal with mouse buttons separately here which is annoying
+                            lp.input.scroll = scroll_delta;
+
+                            var delta: v2 = .{};
+                            {
+                                const pos = window.getCursorPos();
+                                delta.x = @as(f32, @floatCast(pos.xpos)) - old_mouse_pos.x;
+                                delta.y = @as(f32, @floatCast(pos.ypos)) - old_mouse_pos.y;
+                                old_mouse_pos.x = @floatCast(pos.xpos);
+                                old_mouse_pos.y = @floatCast(pos.ypos);
                             }
 
+                            lp.input.cursor_delta = .{
+                                .x = config.vars.sensitivity*delta.x,
+                                .y = config.vars.sensitivity*delta.y
+                            };
+                        } else {
+                            // Gamepad specific inputs
+                            const deadzone = 0.1;
+                            const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads-debug_gamepad_off) % max_num_gamepads);
+                            const gamepad = glfw.Joystick.getGamepadState(.{.jid = index}) orelse {
+                                continue;
+                            };
+                            // TODO(anjo): @optimize
+                            var dx = gamepad.getAxis(.right_x);
+                            var dy = gamepad.getAxis(.right_y);
+                            var abs_dx = @abs(dx);
+                            var abs_dy = @abs(dy);
+                            dx = if (abs_dx > deadzone) dx else 0.0;
+                            dy = if (abs_dy > deadzone) dy else 0.0;
+                            abs_dx = if (abs_dx > deadzone) abs_dx else 1.0;
+                            abs_dy = if (abs_dy > deadzone) abs_dy else 1.0;
+                            // TODO(anjo): Add acceleration
+                            lp.input.cursor_delta.x = 20.0*config.vars.sensitivity*dx/abs_dx;
+                            // TODO(anjo): Move aspect ratio to camera
+                            lp.input.cursor_delta.y = (9.0/16.0)*20.0*config.vars.sensitivity*dy/abs_dy;
+                        }
+
+                        // push input state
+                        lp.input_buffer.push(lp.input);
+
+                        net.pushMessage(server_index, packet.PlayerUpdate{
+                            .tick = tick,
+                            .id = lp.id.?,
+                            .input = lp.input,
+                        });
+
+                        const player = common.findPlayerById(&memory.players.buffer, lp.id.?);
+
+                        // run predictive move
+                        if (player != null) {
+                            memory.stat_data.start("game update");
+                            defer memory.stat_data.end();
+                            module.function_table.update(&config.vars, &memory, player.?, &lp.input, dt);
+                            if (!connected) {
+                                module.function_table.authorizedPlayerUpdate(&config.vars, &memory, player.?, &lp.input, dt);
+                            }
+                        }
+
+                        // Handle console input for 0:th local player input
+                        capture_text = lp.input.isset(.Console);
+                        if (lp.input.isset(.Console)) {
+                            // TODO(anjo): Move to charcallack
+                            if (window.getKey(last_key) == .press) {
+                                last_key_down = true;
+                            } else if (window.getKey(last_key) == .release) {
+                                last_key_down = false;
+                            }
+                            if (last_key_down and (!repeat and key_repeat_timer.read() >= 500*std.time.us_per_s or
+                                    repeat and key_repeat_timer.read() >= 50*std.time.us_per_s)) {
+                                key_repeat_timer.reset();
+                                repeat = true;
+                            }
+
+                            if (memory.console_input_index > 0 and (window.getKey(.left) == .press or last_key == .left and repeat)) {
+                                memory.console_input_index -= 1;
+                            }
+                            if (memory.console_input_index < memory.console_input.len and (window.getKey(.right) == .press or last_key == .right and repeat)) {
+                                memory.console_input_index += 1;
+                            }
+                            if (memory.console_input_index > 0 and (window.getKey(.backspace) == .press or last_key == .backspace and repeat)) {
+                                _ = memory.console_input.orderedRemove(memory.console_input_index-1);
+                                memory.console_input.buffer[memory.console_input.len] = 0;
+                                memory.console_input_index -= 1;
+                            }
+                            if (memory.console_input.len < memory.console_input.buffer.len-1 and (last_char >= 32 and last_char <= 126 and repeat)) {
+                                memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
+                                memory.console_input.buffer[memory.console_input.len] = 0;
+                                memory.console_input_index += 1;
+                            }
+
+                            if (lp.input.isset(.Enter)) {
+                                command.dodododododododo(memory.console_input.slice());
+                                std.log.info("Running command: {s}", .{memory.console_input.slice()});
+
+                                memory.console_input_index = 0;
+                                memory.console_input.len = 0;
+                                memory.console_input.buffer[0] = 0;
+                            }
+                        }
+
+                        // @debug
+                        if (lp.input.isset(.DebugIncGamepadOffset)) {
+                            debug_gamepad_off += 1;
+                            log.info("debug_gamepad_off: {}", .{debug_gamepad_off});
+                        }
+                        if (lp.input.isset(.DebugDecGamepadOffset)) {
+                            if (debug_gamepad_off > 0)
+                                debug_gamepad_off -= 1;
+                            log.info("debug_gamepad_off: {}", .{debug_gamepad_off});
                         }
                     }
 
                     // Move new_* to actual persistent buffers
                     for (memory.new_sounds.constSlice()) |s| {
                         playing_sounds.appendAssumeCapacity(.{
-                            .samples = sound_file_map[@intFromEnum(s)].samples,
+                            .samples = sound_file_map[@intFromEnum(s.type)].samples,
+                            .volume = sound_file_map[@intFromEnum(s.type)].volume,
                         });
                     }
                     memory.new_sounds.resize(0) catch unreachable;
@@ -786,50 +1099,23 @@ pub fn main() !void {
                     }
                     memory.explosions.resize(0) catch unreachable;
 
-                    //for (memory.new_damage.constSlice()) |d| {
-                    //    var player = &memory.players.slice()[d.to];
-                    //    player.health -= @min(d.damage, player.health);
-                    //    if (player.health == 0.0) {
-                    //        std.log.info("{} died", .{d.to});
-                    //    }
-                    //}
                     memory.new_damage.resize(0) catch unreachable;
                 }
+            }
 
-                memory.show_cursor = local_players[0].input.isset(.EnableCursor);
-                capture_text = local_players[0].input.isset(.Console);
-                if (local_players[0].input.isset(.Console)) {
-                    //if (window.getKey(last_key) == .down and (!repeat and key_repeat_timer.read() >= 500*std.time.us_per_s or
-                    //        repeat and key_repeat_timer.read() >= 50*std.time.us_per_s)) {
-                    //    key_repeat_timer.reset();
-                    //    repeat = true;
-                    //}
-                    if (memory.console_input_index > 0 and (window.getKey(.left) == .press or last_key == .left and repeat)) {
-                        memory.console_input_index -= 1;
-                    }
-                    if (memory.console_input_index < memory.console_input.len and (window.getKey(.right) == .press or last_key == .right and repeat)) {
-                        memory.console_input_index += 1;
-                    }
-                    if (memory.console_input_index > 0 and (window.getKey(.backspace) == .press or last_key == .backspace and repeat)) {
-                        _ = memory.console_input.orderedRemove(memory.console_input_index-1);
-                        memory.console_input.buffer[memory.console_input.len] = 0;
-                        memory.console_input_index -= 1;
-                    }
-                    if (memory.console_input.len < memory.console_input.buffer.len-1 and (last_char >= 32 and last_char <= 126 and repeat)) {
-                        memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
-                        memory.console_input.buffer[memory.console_input.len] = 0;
-                        memory.console_input_index += 1;
-                    }
+            // TODO(anjo): Move to some "lobby" related thing
+            if (!connected) {
+                module.function_table.authorizedUpdate(&config.vars, &memory, dt);
+            }
 
-                    if (local_players[0].input.isset(.Enter)) {
-                        command.dodododododododo(memory.console_input.slice());
-                        std.log.info("Running command: {s}", .{memory.console_input.slice()});
-
-                        memory.console_input_index = 0;
-                        memory.console_input.len = 0;
-                        memory.console_input.buffer[0] = 0;
-                    }
-                }
+            // Send updated entities to server
+            for (memory.entities.slice()) |*e| {
+                if (!e.flags.updated_client)
+                    continue;
+                e.flags.updated_client = false;
+                net.pushMessageToAllPeers(packet.EntityUpdate {
+                    .entity = e.*,
+                });
             }
 
             //
@@ -849,7 +1135,7 @@ pub fn main() !void {
                 //defer s.endTime();
 
                 memory.stat_data.start("draw collect");
-                for (local_players) |lp| {
+                for (local_players.constSlice()) |lp| {
                     if (lp.id == null)
                         continue;
                     module.function_table.draw(&config.vars, &memory, &draw_buffer, lp.id.?, &lp.input);
@@ -857,7 +1143,7 @@ pub fn main() !void {
                 memory.stat_data.end();
 
                 memory.stat_data.start("draw process");
-                draw.process(&draw_buffer, width, height);
+                draw.process(&draw_buffer, width, height, local_players.len);
                 memory.stat_data.end();
 
                 window.swapBuffers();
@@ -877,7 +1163,7 @@ pub fn main() !void {
                     const num_available_samples = @min(s.samples.len-s.index, num_needed_samples);
 
                     for (0..num_available_samples) |i| {
-                        samples[i] += 0.5*s.samples[s.index + i];
+                        samples[i] += s.volume*s.samples[s.index + i];
                     }
                     s.index += num_available_samples;
 

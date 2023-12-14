@@ -37,12 +37,16 @@ pub const InputName = enum(u8) {
     Editor,
     Console,
     Enter,
-    EnableCursor,
+    InMenu,
     Save,
     Load,
 
     // Combat
     SwitchWeapon,
+
+    // Debug
+    DebugIncGamepadOffset,
+    DebugDecGamepadOffset,
 };
 
 pub const Input = extern struct {
@@ -74,10 +78,10 @@ pub const Input = extern struct {
     }
 };
 
-pub const PlayerId = u64;
-pub fn newPlayerId() PlayerId {
+pub const EntityId = u64;
+pub fn newEntityId() EntityId {
     const S = struct {
-        var id: PlayerId = 0;
+        var id: EntityId = 0;
     };
     const id = S.id;
     S.id += 1;
@@ -94,36 +98,37 @@ pub const Weapon = enum(u8) {
 pub const Ray = extern struct {
     dir: v3,
     pos: v3,
+    len: f32,
 };
 
 pub const Hitscan = extern struct {
-    id_from: PlayerId,
+    id_from: EntityId,
     ray: Ray,
-    pitch: f32,
-    yaw: f32,
+    width: f32,
+    total_time: f32,
     time_left: f32,
 };
 
 pub const Nade = extern struct {
-    id_from: PlayerId,
+    id_from: EntityId,
     time_left: f32,
 };
 
 pub const Explosion = extern struct {
-    id_from: PlayerId,
+    id_from: EntityId,
     pos: v3,
     radius: f32,
     time_left: f32,
 };
 
 pub const Damage = extern struct {
-    from: PlayerId,
-    to: PlayerId,
+    from: EntityId,
+    to: EntityId,
     damage: f32,
 };
 
 pub const Player = extern struct {
-    id: PlayerId,
+    id: EntityId,
 
     state: enum(u8) {
         dead,
@@ -137,10 +142,10 @@ pub const Player = extern struct {
     yaw: f32,
     pitch: f32,
 
-    // Color
-    hue: f32,
-
     health: f32 = 100.0,
+
+    aim_start_pos: v3 = .{},
+    aim_dir: v3 = .{},
 
     weapon_cooldowns: [num_weapons]f32 = .{0}**num_weapons,
     weapons: [num_weapons]Weapon = [num_weapons]Weapon{
@@ -161,7 +166,7 @@ pub const Player = extern struct {
     camera: Camera3d = .{},
 };
 
-pub fn findIndexById(players: []Player, id: PlayerId) ?usize {
+pub fn findIndexById(players: []Player, id: EntityId) ?usize {
     for (players, 0..) |p,i| {
         if (p.id == id)
             return i;
@@ -169,13 +174,22 @@ pub fn findIndexById(players: []Player, id: PlayerId) ?usize {
     return null;
 }
 
-pub fn findPlayerById(players: []Player, id: PlayerId) ?*Player {
+pub fn findPlayerById(players: []Player, id: EntityId) ?*Player {
     for (players) |*p| {
         if (p.id == id)
             return p;
     }
     return null;
 }
+
+pub fn findEntityById(entities: []Entity, id: EntityId) ?*Entity {
+    for (entities) |*e| {
+        if (e.id == id)
+            return e;
+    }
+    return null;
+}
+
 
 pub const Graph = struct {
     data: []f32,
@@ -208,9 +222,17 @@ pub const WidgetModel = struct {
     move_type: WidgetMoveType = .move_axis,
 };
 
-pub const max_players = 5;
+pub const max_players = 16;
 
-pub const Entity = struct {
+pub const Entity = extern struct {
+    id: EntityId,
+    flags: packed struct(u8) {
+        updated_server: bool = false,
+        updated_client: bool = false,
+        pad: u6 = 0,
+        // Crashes compiler
+        //pad: std.meta.Int(.unsigned, @bitSizeOf(@This())),
+    },
     plane: primitive.Plane = .{
         .model =.{},
     },
@@ -227,8 +249,14 @@ pub const SoundType = enum(u8) {
     doink,
 };
 
+pub const Sound = extern struct {
+    type: SoundType,
+    pos: v3,
+    id_from: EntityId,
+};
+
 pub const RespawnEntry = struct {
-    id: PlayerId,
+    id: EntityId,
     time_left: f32,
 };
 
@@ -237,13 +265,14 @@ pub const Memory = struct {
     players: std.BoundedArray(Player, max_players) = .{},
     entities: std.BoundedArray(Entity, 64) = .{},
 
-    new_sounds:     std.BoundedArray(SoundType, 64) = .{},
+    // TODO: move to frame allocator
+    new_sounds:     std.BoundedArray(Sound, 64) = .{},
     new_hitscans:   std.BoundedArray(Hitscan,   64) = .{},
     new_nades:      std.BoundedArray(Nade,      64) = .{},
     new_explosions: std.BoundedArray(Explosion, 64) = .{},
     new_damage:     std.BoundedArray(Damage,    64) = .{},
 
-    sounds:     std.BoundedArray(SoundType, 64) = .{},
+    sounds:     std.BoundedArray(Sound, 64) = .{},
     hitscans:   std.BoundedArray(Hitscan,   64) = .{},
     nades:      std.BoundedArray(Nade,      64) = .{},
     explosions: std.BoundedArray(Explosion, 64) = .{},
@@ -255,7 +284,6 @@ pub const Memory = struct {
     // debug
     vel_graph: Graph = undefined,
 
-    show_cursor: bool = false,
     cursor_pos: v2 = .{
         .x = 0.5,
         .y = 0.5,
@@ -275,11 +303,20 @@ pub const Memory = struct {
     ray_model: ?m4 = null,
 
     respawns: std.BoundedArray(RespawnEntry, 8) = .{},
+    // TODO: move to frame allocator
     new_spawns: std.BoundedArray(*Player, 8) = .{},
 
+    new_kills: std.BoundedArray(struct {
+        from: EntityId,
+        to: EntityId,
+    }, 8) = .{},
+
+    // @client
+    // TODO: Move to some sort of "lobby"
     killfeed: bb.CircularArray(struct {
-        from: PlayerId,
-        to: PlayerId,
+        from: EntityId,
+        to: EntityId,
+        time_left: f32,
     }, 8) = undefined,
 
     // in in ns

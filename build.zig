@@ -1,7 +1,7 @@
 const std = @import("std");
 const sokol = @import("third_party/sokol-zig/build.zig");
 
-pub fn build(b: *std.build.Builder) void {
+pub fn build(b: *std.build.Builder) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -48,6 +48,8 @@ pub fn build(b: *std.build.Builder) void {
     //
     // client
     //
+    const client_dir = try std.fs.cwd().openDir("src/client", .{});
+    try std.fs.cwd().copyFile("third_party/SDL_GameControllerDB/gamecontrollerdb.txt", client_dir, "gamecontrollerdb.txt", .{});
 
     const client = b.addExecutable(.{
         .name = "client",

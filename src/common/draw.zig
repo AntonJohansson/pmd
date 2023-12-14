@@ -9,22 +9,10 @@ const primitive = @import("primitive.zig");
 const Color = primitive.Color;
 
 const math = @import("math.zig");
+const v2 = math.v2;
 const v3 = math.v3;
 const v4 = math.v4;
-const v2 = math.v2;
-const v2add = math.v2add;
-const v3add = math.v3add;
-const v3scale = math.v3scale;
 const m4 = math.m4;
-const m4view = math.m4view;
-const m4projection = math.m4projection;
-const m4model = math.m4model;
-const m4modelWithRotations = math.m4modelWithRotations;
-const m4model2d = math.m4model2d;
-const m4modelFromZDir = math.m4modelFromZDir;
-const m4inverse = math.m4inverse;
-const m4transpose = math.m4transpose;
-const m4mul = math.m4mul;
 
 const sokol = @import("sokol");
 const sg = sokol.gfx;
@@ -184,7 +172,6 @@ var circle_bind = sg.Bindings{};
 var rectangle_bind = sg.Bindings{};
 var cube_bind = sg.Bindings{};
 var pass_action_2d = sg.PassAction{};
-var pass_action_3d = sg.PassAction{};
 
 const Uniforms = struct {
     mvp: m4,
@@ -364,10 +351,6 @@ pub fn init() void {
             },
         };
         pip_3d = sg.makePipeline(pip_desc);
-        pass_action_3d.colors[0] = .{
-            .load_action = .CLEAR,
-            .clear_value = .{.r = 0, .g = 0, .b = 0, .a = 1},
-        };
     }
     // 3d mesh shader
     {
@@ -376,6 +359,7 @@ pub fn init() void {
                 \\ #version 330
                 \\ layout(location=0) in vec3 position;
                 \\ uniform mat4 mvp;
+                \\ out vec4 vertex_pos;
                 \\ void main() {
                 \\   gl_Position = mvp * vec4(position, 1);
                 \\ }
@@ -408,10 +392,6 @@ pub fn init() void {
         };
         pip_desc.layout.attrs[0].format = .FLOAT3;
         pip_mesh = sg.makePipeline(pip_desc);
-        pass_action_3d.colors[0] = .{
-            .load_action = .CLEAR,
-            .clear_value = .{.r = 0, .g = 0, .b = 0, .a = 1},
-        };
     }
     // pip mesh line
     {
@@ -452,10 +432,6 @@ pub fn init() void {
         };
         pip_desc.layout.attrs[0].format = .FLOAT3;
         pip_mesh_line = sg.makePipeline(pip_desc);
-        pass_action_3d.colors[0] = .{
-            .load_action = .CLEAR,
-            .clear_value = .{.r = 0, .g = 0, .b = 0, .a = 1},
-        };
     }
     // 3d shader no depth
     {
@@ -493,10 +469,6 @@ pub fn init() void {
         };
         pip_desc.layout.attrs[0].format = .FLOAT3;
         pip_3d_no_depth = sg.makePipeline(pip_desc);
-        pass_action_3d.colors[0] = .{
-            .load_action = .CLEAR,
-            .clear_value = .{.r = 0, .g = 0, .b = 0, .a = 1},
-        };
     }
     // triangle strip
     {
@@ -552,8 +524,18 @@ pub fn deinit() void {
     //raylib.UnloadRenderTexture(config.vars.rt);
 }
 
-pub fn process(b: *Buffer, width: u32, height: u32) void {
+pub fn process(b: *Buffer, width: u32, height: u32, num_views: u32) void {
     var vp: m4 = .{};
+
+    if (num_views == 0)
+        return;
+
+    const views_per_row: u32 = @intFromFloat(@ceil(std.math.sqrt(@as(f32, @floatFromInt(num_views)))));
+    const views_per_col: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(num_views))/@as(f32, @floatFromInt(views_per_row))));
+    const view_width:  i32 = @intFromFloat(@as(f32, @floatFromInt(width))  / @as(f32, @floatFromInt(views_per_row)));
+    const view_height: i32 = @intFromFloat(@as(f32, @floatFromInt(height)) / @as(f32, @floatFromInt(views_per_col)));
+    var index_3d: u32 = 0;
+    var index_2d: u32 = 0;
 
     while (b.hasData()) {
         const header = b.pop(Header);
@@ -561,8 +543,29 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
         switch (header.kind) {
             .Camera3d => {
                 const camera = b.pop(primitive.Camera3d);
-                vp = m4mul(camera.proj, camera.view);
+                vp = m4.mul(camera.proj, camera.view);
+
+                var pass_action_3d = sg.PassAction{};
+                if (index_3d == 0) {
+                    pass_action_3d.colors[0] = .{
+                        .load_action = .CLEAR,
+                        .clear_value = .{.r = 0, .g = 0, .b = 0, .a = 1},
+                    };
+                } else {
+                    pass_action_3d.colors[0] = .{
+                        .load_action = .LOAD,
+                    };
+                }
                 sg.beginDefaultPass(pass_action_3d, @intCast(width), @intCast(height));
+
+                // index = j*height + i
+                const j = @divFloor(index_3d, views_per_row);
+                const i = index_3d - views_per_row*j;
+                std.log.info("{}: {}x{}, {}, {}", .{index_3d, views_per_row, views_per_col, i,j});
+                sg.applyViewport(view_width*@as(i32, @intCast(i)),
+                                 view_height*@as(i32, @intCast(j)),
+                                 view_width, view_height, true);
+                index_3d += 1;
             },
             .End3d => {
                 //raylib.EndMode3D();
@@ -572,8 +575,8 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
             .Camera2d => {
                 const camera = b.pop(primitive.Camera2d);
 
-                const view_to_world = m4model2d(camera.target, .{.x = 0.5/camera.zoom, .y = 0.5/camera.zoom});
-                const world_to_view = m4inverse(view_to_world);
+                const view_to_world = m4.model2d(camera.target, .{.x = 0.5/camera.zoom, .y = 0.5/camera.zoom});
+                const world_to_view = m4.inverse(view_to_world);
 
                 vp = world_to_view;
 
@@ -597,6 +600,15 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
                 //raylib.EndShaderMode();
                 sg.beginDefaultPass(pass_action_2d, @intCast(width), @intCast(height));
                 sg.applyPipeline(pip_2d);
+
+                // index = j*height + i
+                const j = @divFloor(index_2d, views_per_row);
+                const i = index_2d - views_per_row*j;
+                std.log.info("{}: {}x{}, {}, {}", .{index_2d, views_per_row, views_per_col, i,j});
+                sg.applyViewport(view_width*@as(i32, @intCast(i)),
+                                 view_height*@as(i32, @intCast(j)),
+                                 view_width, view_height, true);
+                index_2d += 1;
             },
             .End2d => {
                 sdtx.draw();
@@ -664,9 +676,9 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
                     .data = sg.asRange(m.verts),
                 });
 
-                const model = m4model(.{.x=0,.y=0,.z=0},.{.x=1,.y=1,.z=1});
+                const model = m4.model(.{.x=0,.y=0,.z=0},.{.x=1,.y=1,.z=1});
                 var uniforms = Uniforms {
-                    .mvp = m4transpose(m4mul(vp, model)),
+                    .mvp = m4.transpose(m4.mul(vp, model)),
                     .color = v4 {
                         .x = 255.0,
                         .y = 255.0,
@@ -680,10 +692,10 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
                 //
                 // we can probably use a geometry shader
                 //  https://learnopengl.com/Advanced-OpenGL/Geometry-Shader
-                sg.applyPipeline(pip_mesh_line);
-                sg.applyBindings(bind);
-                sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                sg.draw(0, @intCast(m.verts.len), 1);
+                //sg.applyPipeline(pip_mesh_line);
+                //sg.applyBindings(bind);
+                //sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                //sg.draw(0, @intCast(m.verts.len), 1);
 
                 uniforms.color.x = @as(f32, @floatFromInt(header.color.r))/255.0;
                 uniforms.color.y = @as(f32, @floatFromInt(header.color.g))/255.0;
@@ -700,9 +712,9 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
             .Rectangle => {
                 const r = b.pop(primitive.Rectangle);
                 const offset = v2 {.x = r.size.x/2, .y = r.size.y/2};
-                const model = m4model2d(v2add(r.pos, offset), r.size);
+                const model = m4.model2d(v2.add(r.pos, offset), r.size);
                 const uniforms = Uniforms {
-                    .mvp = m4transpose(m4mul(vp, model)),
+                    .mvp = m4.transpose(m4.mul(vp, model)),
                     .color = v4 {
                         .x = @as(f32, @floatFromInt(header.color.r))/255.0,
                         .y = @as(f32, @floatFromInt(header.color.g))/255.0,
@@ -718,7 +730,7 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
             .Cube => {
                 const c = b.pop(primitive.Cube);
 
-                const model = m4model(
+                const model = m4.model(
                     .{
                         .x = c.pos.x+c.size.x/2,
                         .y = c.pos.y+c.size.y/2,
@@ -730,7 +742,7 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
                         .z = c.size.z,
                     });
                 const uniforms = Uniforms {
-                    .mvp = m4transpose(m4mul(vp, model)),
+                    .mvp = m4.transpose(m4.mul(vp, model)),
                     .color = v4 {
                         .x = @as(f32, @floatFromInt(header.color.r))/255.0,
                         .y = @as(f32, @floatFromInt(header.color.g))/255.0,
@@ -750,7 +762,7 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
             .Cube2 => {
                 const c = b.pop(primitive.Cube2);
                 const uniforms = Uniforms {
-                    .mvp = m4transpose(m4mul(vp, c.model)),
+                    .mvp = m4.transpose(m4.mul(vp, c.model)),
                     .color = v4 {
                         .x = @as(f32, @floatFromInt(header.color.r))/255.0,
                         .y = @as(f32, @floatFromInt(header.color.g))/255.0,
@@ -770,7 +782,7 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
             .Plane => {
                 const p = b.pop(primitive.Plane);
                 const uniforms = Uniforms {
-                    .mvp = m4transpose(m4mul(vp, p.model)),
+                    .mvp = m4.transpose(m4.mul(vp, p.model)),
                     .color = v4 {
                         .x = @as(f32, @floatFromInt(header.color.r))/255.0,
                         .y = @as(f32, @floatFromInt(header.color.g))/255.0,
@@ -791,8 +803,8 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
                 const vector = b.pop(primitive.Vector);
 
                 const thickness = 0.5;
-                const model = m4modelFromZDir(
-                    v3add(vector.pos, v3scale(0.5*vector.scale, vector.dir)),
+                const model = m4.modelFromZDir(
+                    v3.add(vector.pos, v3.scale(0.5*vector.scale, vector.dir)),
                     .{
                         .x = thickness,
                         .y = thickness,
@@ -800,7 +812,7 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
                     },
                     vector.dir);
                 const uniforms = Uniforms {
-                    .mvp = m4transpose(m4mul(vp, model)),
+                    .mvp = m4.transpose(m4.mul(vp, model)),
                     .color = v4 {
                         .x = @as(f32, @floatFromInt(header.color.r))/255.0,
                         .y = @as(f32, @floatFromInt(header.color.g))/255.0,
@@ -820,7 +832,7 @@ pub fn process(b: *Buffer, width: u32, height: u32) void {
             .Circle => {
                 const circle = b.pop(primitive.Circle);
                 const uniforms = Uniforms {
-                    .mvp = m4transpose(m4mul(vp, circle.model)),
+                    .mvp = m4.transpose(m4.mul(vp, circle.model)),
                     .color = v4 {
                         .x = @as(f32, @floatFromInt(header.color.r))/255.0,
                         .y = @as(f32, @floatFromInt(header.color.g))/255.0,

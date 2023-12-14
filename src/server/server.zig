@@ -7,7 +7,7 @@ const packet_meta = net.packet_meta;
 const common = @import("common");
 const Memory = common.Memory;
 const Player = common.Player;
-const PlayerId = common.PlayerId;
+const EntityId = common.EntityId;
 const Input = common.Input;
 const InputType = common.InputType;
 const bb = common.bb;
@@ -29,7 +29,7 @@ var log: logging.Log = .{
 };
 
 const PeerData = struct {
-    ids: std.BoundedArray(PlayerId, 4) = .{},
+    ids: std.BoundedArray(EntityId, 4) = .{},
 
     pub fn clear(self: *@This()) void {
         self.ids.len = 0;
@@ -60,6 +60,7 @@ pub fn main() !void {
 
     var module = try code_module.CodeModule(struct {
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
+        authorizedPlayerUpdate: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
         authorizedUpdate: *fn (vars: *const Vars, memory: *Memory, dt: f32) void,
         draw: *fn (memory: *Memory) void,
     }).init(memory.persistent_allocator, "zig-out/lib", "game");
@@ -158,7 +159,7 @@ pub fn main() !void {
 
                                 var peer = &peers[e.peer_index];
                                 const id = try peer.ids.addOne();
-                                id.* = common.newPlayerId();
+                                id.* = common.newEntityId();
                                 player.id = id.*;
 
                                 log.info("A new player joined the game: {}", .{id.*});
@@ -202,12 +203,22 @@ pub fn main() !void {
                                     if (common.findPlayerById(memory.players.slice(), message.id)) |player| {
                                         const input: Input = message.input;
                                         module.function_table.update(vars, &memory, player, &input, dt);
+                                        module.function_table.authorizedPlayerUpdate(vars, &memory, player, &input, dt);
                                         net.pushMessage(e.peer_index, packet.PlayerUpdateAuth{
                                             .tick = message.tick,
                                             .player = player.*,
                                         });
                                     }
                                 }
+                            },
+                            .EntityUpdate => {
+                                const message: *align(1) packet.EntityUpdate = @ptrCast(e.data);
+                                if (common.findEntityById(memory.entities.slice(), message.entity.id)) |entity| {
+                                    entity.* = message.entity;
+                                } else {
+                                    memory.entities.appendAssumeCapacity(message.entity);
+                                }
+                                net.pushMessageToAllOtherPeers(e.peer_index, message.*);
                             },
                             else => {
                                 std.log.err("Unrecognized packet type: {}", .{e.kind});
@@ -219,6 +230,15 @@ pub fn main() !void {
             }
 
             module.function_table.authorizedUpdate(vars, &memory, dt);
+
+            for (memory.entities.slice()) |*e| {
+                if (!e.flags.updated_server)
+                    continue;
+                e.flags.updated_server = false;
+                net.pushMessageToAllPeers(packet.EntityUpdate {
+                    .entity = e.*,
+                });
+            }
 
             for (memory.new_spawns.constSlice()) |p| {
                 net.pushMessageToAllPeers(packet.SpawnPlayer{
@@ -253,7 +273,6 @@ pub fn main() !void {
                 p.num_hitscans = memory.new_hitscans.len;
                 memory.new_hitscans.resize(0) catch unreachable;
                 net.pushMessageToAllPeers(p);
-                std.log.info("new hitscan", .{});
             }
 
             if (memory.new_nades.len > 0) {
@@ -278,6 +297,16 @@ pub fn main() !void {
                 p.num_explosions = memory.new_explosions.len;
                 memory.explosions.resize(0) catch unreachable;
                 net.pushMessageToAllPeers(p);
+            }
+
+            if (memory.new_kills.len > 0) {
+                for (memory.new_kills.constSlice()) |k| {
+                    net.pushMessageToAllPeers(packet.Kill{
+                        .from = k.from,
+                        .to = k.to,
+                    });
+                }
+                memory.new_kills.resize(0) catch unreachable;
             }
 
             //

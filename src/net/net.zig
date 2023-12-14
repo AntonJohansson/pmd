@@ -300,6 +300,12 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
     // TODO(anjo): This might be candidate for threading if there
     // are enough entries.
     for (received_data.slice()) |data| {
+        if (data.data.len < @sizeOf(headers.BatchHeader)) {
+            // TODO(anjo): Handle partial packets?
+            // This happens after tabbing on my machine, we recieve a very small packet for some reason
+            continue;
+        }
+
         var byte_view = bb.ByteView{
             .data = data.data,
         };
@@ -472,23 +478,23 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
     var events = frame_allocator.alloc(Event, 128) catch unreachable;
 
     // Timeout disconnected peers
-    //const tickrate = 60; // TODO: move somewhere
-    //for (&peers.buffer, 0..) |*peer, i| {
-    //    if (peer.state == .Disconnected)
-    //        continue;
-    //    if (peer.timeout < std.time.ns_per_s / tickrate) {
-    //        pushMessage(@intCast(i), packet.ConnectionTimeout{});
-    //        events[num_events] = Event {
-    //            .peer_disconnected = .{
-    //                .peer_index = @intCast(i),
-    //            },
-    //        };
-    //        num_events += 1;
-    //        peer.state = .Disconnected;
-    //    } else {
-    //        peer.timeout -= std.time.ns_per_s / tickrate;
-    //    }
-    //}
+    const tickrate = 165; // TODO: move somewhere
+    for (&peers.buffer, 0..) |*peer, i| {
+        if (peer.state == .Disconnected)
+            continue;
+        if (peer.timeout < std.time.ns_per_s / tickrate) {
+            pushMessage(@intCast(i), packet.ConnectionTimeout{});
+            events[num_events] = Event {
+                .peer_disconnected = .{
+                    .peer_index = @intCast(i),
+                },
+            };
+            num_events += 1;
+            peer.state = .Disconnected;
+        } else {
+            peer.timeout -= std.time.ns_per_s / tickrate;
+        }
+    }
 
     while (true) {
         const nbytes = os.recvfrom(fd, input_buffer.remainingData(), 0, @ptrCast(&their_sa), &sl) catch 0;

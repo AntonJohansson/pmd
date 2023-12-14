@@ -1,19 +1,25 @@
-- [x] Simulate bad network
-- [x] Repeat connection packets until succeeed
-- [ ] Enforce max packets size (read size)
-- [ ] Fragmentation of large packets
-    - [ ] Break up large packets
-    - [ ] Reassemble packets using sequence number and uuid
-- [ ] Verify packets with crc32
-- [ ] Add clean disconnect packet
-- [ ] Make ACKable packets
-    - [ ] Attach packets to output until ACK is received for that packet
-    - This is useful to communicate non-relatime information from client -> server,
-      that needs to be correct (scoreboard etc.)
-- [ ] Batch packets
-
-- [ ] Movement
+- Game
     - [ ] Separate air max speed
-    - [ ]
+    - [ ] Floating point problems when far away
 
-- [x] Draw multiple players
+- Client
+
+- Server
+
+- Input
+    - [ ] Unify handling of ranges
+
+- Net
+    - [ ] Simulate bad network
+    - [ ] Repeat connection packets until succeeed
+    - [ ] Enforce max packets size (read size)
+    - [ ] Fragmentation of large packets
+        - [ ] Break up large packets
+        - [ ] Reassemble packets using sequence number and uuid
+    - [ ] Add clean disconnect packet
+    - [ ] Verify packets with crc32
+
+- Draw
+    - [ ] Instanced cube draw calls
+    - [ ] Cube outline
+    - [ ] Readd PP
