@@ -11,7 +11,7 @@ const stat = common.stat;
 const logging = common.logging;
 
 var log: logging.Log = .{
-    .mirror_to_stdio = false,
+    .mirror_to_stdio = true,
 };
 
 const message_receive_buffer_len = 128;
@@ -403,9 +403,6 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
                             };
                             num_events += 1;
                             log.info("connection successful", .{});
-
-                            pushMessage(peer_index, packet.PlayerJoinRequest{});
-                            log.info("Sening join request", .{});
                         }
                     },
                     .ConnectionDenied => {
@@ -758,18 +755,8 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
         //log.info("wrap {} {}", .{peer.last_outgoing_acked_message_id, peer.current_message_id});
     }
 
+
     output_buffer_stat.samples.push(output_buffer.size());
-
-    header.salt = peer.salt;
-    header.size = @as(u16, @intCast(output_buffer.size())) - @sizeOf(headers.BatchHeader);
-    header.id = peer.current_packet_id;
-    header.reliable = have_reliable_packets;
-    header.ack_bits = peer.ack_bits;
-    header.last_packet_id = peer.last_incoming_acked_packet_id;
-
-    peer.current_packet_id = @addWithOverflow(peer.current_packet_id, 1)[0];
-    peer.packets_in_flight.set(header.id, packet_data);
-
 
     //var i: u8 = 0;
     //while (i < entry.repeat) : (i += 1) {
@@ -777,6 +764,15 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
     //        continue;
 
     if (header.num_packets > 0) {
+        header.salt = peer.salt;
+        header.size = @as(u16, @intCast(output_buffer.size())) - @sizeOf(headers.BatchHeader);
+        header.id = peer.current_packet_id;
+        header.reliable = have_reliable_packets;
+        header.ack_bits = peer.ack_bits;
+        header.last_packet_id = peer.last_incoming_acked_packet_id;
+
+        peer.current_packet_id = @addWithOverflow(peer.current_packet_id, 1)[0];
+        peer.packets_in_flight.set(header.id, packet_data);
 
         //if (log.timer.read() - entry.push_time < log.debug.delay)
         //    break;
@@ -786,9 +782,8 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
         entry.batch.header = @ptrCast(&entry.batch.buffer.data[0]);
         entry.push_time = timer.?.read();
         entry.address = peer.address;
-
-
     }
+
     //}
 
     if (entries.size > 0) {

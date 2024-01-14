@@ -594,8 +594,11 @@ pub fn main() !void {
                         for (local_players.slice()) |*lp|
                             lp.id = null;
                         memory.players.len = 0;
+                        log.info("connected", .{});
+                        connected = true;
                     },
                     .peer_disconnected => {
+                        log.info("connected", .{});
                     },
                     .message_received => |e| {
                         switch (e.kind) {
@@ -637,14 +640,19 @@ pub fn main() !void {
                                 // room for a local player, this should never
                                 // happen as we ourselves request to join,
                                 // so we should have space...
-                                for (local_players.slice()) |*lp| {
+                                var local_player_id: ?usize = null;
+                                for (local_players.slice(), 0..) |*lp,i| {
                                     if (lp.id == null) {
+                                        local_player_id = i;
                                         lp.id = player.id;
                                         break;
                                     }
                                 }
-                                log.info("joined, we have id {}", .{player.id});
-                                connected = true;
+
+                                std.debug.assert(local_player_id != null);
+                                log.info("Joined", .{});
+                                log.info("  local player id: {}", .{local_player_id.?});
+                                log.info("  game player id: {}", .{player.id});
                             },
                             .PeerJoined => {
                                 const message: *align(1) packet.PeerJoined = @ptrCast(e.data);
@@ -814,25 +822,29 @@ pub fn main() !void {
                                     // if we're not connected.
                                     {
                                         const lp = local_players.addOneAssumeCapacity();
-                                        lp.id = common.newEntityId();
+                                        //lp.id = common.newEntityId();
+                                        lp.id = null;
                                         lp.input_device_id = i;
                                         lp.gameplay_input_map = &default_keyboard_input_map_gameplay;
                                         lp.editor_input_map = &default_keyboard_input_map_editor;
 
-                                        const player = Player {
-                                            .id = lp.id.?,
-                                            .pos = v3 {.x = 0, .y = 0, .z = 10.0},
-                                            .vel = v3 {.x = 0, .y = 0, .z = 0},
-                                            .dir = v3 {.x = 1, .y = 0, .z = 0},
-                                            .yaw = 0,
-                                            .pitch = 0,
-                                        };
-                                        memory.players.appendAssumeCapacity(player);
+                                        net.pushMessage(server_index, packet.PlayerJoinRequest{});
+                                        log.info("Sening join request", .{});
 
-                                        memory.respawns.appendAssumeCapacity(.{
-                                            .id = lp.id.?,
-                                            .time_left = 0.0,
-                                        });
+                                        //const player = Player {
+                                        //    .id = lp.id.?,
+                                        //    .pos = v3 {.x = 0, .y = 0, .z = 10.0},
+                                        //    .vel = v3 {.x = 0, .y = 0, .z = 0},
+                                        //    .dir = v3 {.x = 1, .y = 0, .z = 0},
+                                        //    .yaw = 0,
+                                        //    .pitch = 0,
+                                        //};
+                                        //memory.players.appendAssumeCapacity(player);
+
+                                        //memory.respawns.appendAssumeCapacity(.{
+                                        //    .id = lp.id.?,
+                                        //    .time_left = 0.0,
+                                        //});
                                     }
 
                                 }
@@ -893,7 +905,7 @@ pub fn main() !void {
                     }
 
                     for (local_players.slice()) |*lp| {
-                        if (lp.input_device_id == null)
+                        if (lp.input_device_id == null or lp.id == null)
                             continue;
 
                         // Collect inputs if we're not in the console
@@ -1003,11 +1015,13 @@ pub fn main() !void {
                         // push input state
                         lp.input_buffer.push(lp.input);
 
-                        net.pushMessage(server_index, packet.PlayerUpdate{
-                            .tick = tick,
-                            .id = lp.id.?,
-                            .input = lp.input,
-                        });
+                        if (connected) {
+                            net.pushMessage(server_index, packet.PlayerUpdate{
+                                .tick = tick,
+                                .id = lp.id.?,
+                                .input = lp.input,
+                            });
+                        }
 
                         const player = common.findPlayerById(&memory.players.buffer, lp.id.?);
 
@@ -1017,6 +1031,7 @@ pub fn main() !void {
                             defer memory.stat_data.end();
                             module.function_table.update(&config.vars, &memory, player.?, &lp.input, dt);
                             if (!connected) {
+                                std.log.info("auth ", .{});
                                 module.function_table.authorizedPlayerUpdate(&config.vars, &memory, player.?, &lp.input, dt);
                             }
                         }
@@ -1100,6 +1115,8 @@ pub fn main() !void {
                     memory.explosions.resize(0) catch unreachable;
 
                     memory.new_damage.resize(0) catch unreachable;
+
+                    memory.new_spawns.resize(0) catch unreachable;
                 }
             }
 
@@ -1109,13 +1126,15 @@ pub fn main() !void {
             }
 
             // Send updated entities to server
-            for (memory.entities.slice()) |*e| {
-                if (!e.flags.updated_client)
-                    continue;
-                e.flags.updated_client = false;
-                net.pushMessageToAllPeers(packet.EntityUpdate {
-                    .entity = e.*,
-                });
+            if (connected) {
+                for (memory.entities.slice()) |*e| {
+                    if (!e.flags.updated_client)
+                        continue;
+                    e.flags.updated_client = false;
+                    net.pushMessageToAllPeers(packet.EntityUpdate {
+                        .entity = e.*,
+                    });
+                }
             }
 
             //

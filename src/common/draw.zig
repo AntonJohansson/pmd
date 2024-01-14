@@ -19,7 +19,7 @@ const sg = sokol.gfx;
 const slog = sokol.log;
 const sdtx = sokol.debugtext;
 
-pub const Buffer = bb.ByteBuffer(32*8192);
+pub const Buffer = bb.ByteBuffer(128*8192);
 
 pub const Pipeline = enum {
     no_depth,
@@ -530,12 +530,14 @@ pub fn process(b: *Buffer, width: u32, height: u32, num_views: u32) void {
     if (num_views == 0)
         return;
 
-    const views_per_row: u32 = @intFromFloat(@ceil(std.math.sqrt(@as(f32, @floatFromInt(num_views)))));
-    const views_per_col: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(num_views))/@as(f32, @floatFromInt(views_per_row))));
-    const view_width:  i32 = @intFromFloat(@as(f32, @floatFromInt(width))  / @as(f32, @floatFromInt(views_per_row)));
+    const views_per_col: u32 = @intFromFloat(@ceil(std.math.sqrt(@as(f32, @floatFromInt(num_views)))));
+    const views_per_row: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(num_views))/@as(f32, @floatFromInt(views_per_col))));
+    var view_width:  i32 = @intFromFloat(@as(f32, @floatFromInt(width))  / @as(f32, @floatFromInt(views_per_row)));
     const view_height: i32 = @intFromFloat(@as(f32, @floatFromInt(height)) / @as(f32, @floatFromInt(views_per_col)));
     var index_3d: u32 = 0;
     var index_2d: u32 = 0;
+    const num_missing_views = views_per_col*views_per_row - num_views;
+    const need_view_stretch = num_missing_views > 0;
 
     while (b.hasData()) {
         const header = b.pop(Header);
@@ -559,11 +561,14 @@ pub fn process(b: *Buffer, width: u32, height: u32, num_views: u32) void {
                 sg.beginDefaultPass(pass_action_3d, @intCast(width), @intCast(height));
 
                 // index = j*height + i
-                const j = @divFloor(index_3d, views_per_row);
-                const i = index_3d - views_per_row*j;
-                std.log.info("{}: {}x{}, {}, {}", .{index_3d, views_per_row, views_per_col, i,j});
-                sg.applyViewport(view_width*@as(i32, @intCast(i)),
-                                 view_height*@as(i32, @intCast(j)),
+                const row_index = @divFloor(index_3d, views_per_row);
+                const col_index = index_3d - views_per_row*row_index;
+                if (need_view_stretch and row_index == views_per_col-1) {
+                    const num_last_row_views = views_per_row - num_missing_views;
+                    view_width = @intFromFloat(@as(f32, @floatFromInt(width))  / @as(f32, @floatFromInt(num_last_row_views)));
+                }
+                sg.applyViewport(view_width*@as(i32, @intCast(col_index)),
+                                 view_height*@as(i32, @intCast(row_index)),
                                  view_width, view_height, true);
                 index_3d += 1;
             },
@@ -580,33 +585,18 @@ pub fn process(b: *Buffer, width: u32, height: u32, num_views: u32) void {
 
                 vp = world_to_view;
 
-                //var final_rt: raylib.RenderTexture = config.vars.rt;
-                //raylib.BeginMode2D(raylib.Camera2D {
-                //    .offset = .{
-                //        .x = @as(f32, @floatFromInt(width))/2,
-                //        .y = @as(f32, @floatFromInt(height))/2
-                //    },
-                //    .target = .{
-                //        .x = @as(f32, @floatFromInt(width))*camera.target.x,
-                //        .y = @as(f32, @floatFromInt(height))*camera.target.y,
-                //    },
-                //    .rotation = 0,
-                //    .zoom = camera.zoom,
-                //});
-                //raylib.BeginShaderMode(cc_shader);
-                //    raylib.DrawTextureEx(final_rt.texture,
-                //        .{.x = 0.0, .y = 0.0}, 0.0, 1.0,
-                //        raylib.WHITE);
-                //raylib.EndShaderMode();
                 sg.beginDefaultPass(pass_action_2d, @intCast(width), @intCast(height));
                 sg.applyPipeline(pip_2d);
 
                 // index = j*height + i
-                const j = @divFloor(index_2d, views_per_row);
-                const i = index_2d - views_per_row*j;
-                std.log.info("{}: {}x{}, {}, {}", .{index_2d, views_per_row, views_per_col, i,j});
-                sg.applyViewport(view_width*@as(i32, @intCast(i)),
-                                 view_height*@as(i32, @intCast(j)),
+                const row_index = @divFloor(index_2d, views_per_row);
+                const col_index = index_2d - views_per_row*row_index;
+                if (need_view_stretch and row_index == views_per_col-1) {
+                    const num_last_row_views = views_per_row - num_missing_views;
+                    view_width = @intFromFloat(@as(f32, @floatFromInt(width))  / @as(f32, @floatFromInt(num_last_row_views)));
+                }
+                sg.applyViewport(view_width*@as(i32, @intCast(col_index)),
+                                 view_height*@as(i32, @intCast(row_index)),
                                  view_width, view_height, true);
                 index_2d += 1;
             },
