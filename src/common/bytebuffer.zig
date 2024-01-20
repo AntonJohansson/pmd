@@ -84,6 +84,10 @@ pub fn ByteBuffer(comptime N: u32) type {
             return self.data.len - self.top;
         }
 
+        pub fn dataSlice(self: *Self) []u8 {
+            return self.data[self.bottom..self.top];
+        }
+
         pub fn remainingData(self: *Self) []u8 {
             return self.data[self.top..];
         }

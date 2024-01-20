@@ -49,6 +49,7 @@ pub const Vars = struct {
 
     // camera stuffs
     fov: f32 = 80.0,
+    fov_zoom: f32 = 40.0,
     aspect: f32 = 16.0/9.0,
 
     // weapon model stuff
@@ -77,6 +78,9 @@ pub const Vars = struct {
     pistol_off_x: f32 = 6.0,
     pistol_off_y: f32 = 8.0,
     pistol_off_z: f32 = -3.0,
+    pistol_scope_len: f32 = 4.5,
+    pistol_scope_w: f32 = 0.05,
+    pistol_scope_h: f32 = 0.2,
 
     pistol_handle_len: f32 = 2.0,
     pistol_handle_w: f32 = 0.8,

@@ -2,13 +2,16 @@ const std = @import("std");
 
 pub const bb = @import("bytebuffer.zig");
 pub const math = @import("math.zig");
-pub const draw = @import("draw.zig");
 pub const stat = @import("stat.zig");
 pub const config = @import("config.zig");
 pub const primitive = @import("primitive.zig");
 pub const code_module = @import("code_module.zig");
 pub const logging = @import("logging.zig");
 pub const command = @import("command.zig");
+pub const profile = @import("profile.zig");
+pub const draw_meta = @import("draw_meta.zig");
+pub const draw_api = @import("draw_api.zig");
+pub const threadpool = @import("threadpool.zig");
 
 const v2 = math.v2;
 const v3 = math.v3;
@@ -88,11 +91,59 @@ pub fn newEntityId() EntityId {
     return id;
 }
 
-const num_weapons = @typeInfo(Weapon).Enum.fields.len;
-pub const Weapon = enum(u8) {
-    weapon_sniper,
-    weapon_pistol,
-    weapon_nade,
+pub const Weapon = extern struct {
+    type: enum(u8) {
+        sniper,
+        pistol,
+        nade,
+    } = .sniper,
+    state: enum(u8) {
+        normal,
+        cooldown,
+        zoom,
+        reload,
+    } = .normal,
+    total_cooldown: f32,
+    cooldown: f32 = 0,
+    total_reload_cooldown: f32,
+    total_zoom_cooldown: f32,
+    kickback_time: f32,
+    kickback_scale: f32,
+    total_ammo: u8,
+    ammo: u8,
+};
+
+pub const sniper = Weapon {
+    .type = .sniper,
+    .total_cooldown = 1.0,
+    .total_reload_cooldown = 1.0,
+    .total_zoom_cooldown = 1.0,
+    .kickback_time = 0.05,
+    .kickback_scale = 20.0,
+    .total_ammo = 5,
+    .ammo = 5,
+};
+
+pub const pistol = Weapon {
+    .type = .pistol,
+    .total_cooldown = 0.1,
+    .total_reload_cooldown = 1.0,
+    .total_zoom_cooldown = 1.0,
+    .kickback_time = 0.3,
+    .kickback_scale = 3.0,
+    .total_ammo = 10,
+    .ammo = 10,
+};
+
+pub const nade = Weapon {
+    .type = .nade,
+    .total_cooldown = 0.1,
+    .total_reload_cooldown = 1.0,
+    .total_zoom_cooldown = 1.0,
+    .kickback_time = 0.3,
+    .kickback_scale = 3.0,
+    .total_ammo = 1,
+    .ammo = 1,
 };
 
 pub const Ray = extern struct {
@@ -147,12 +198,7 @@ pub const Player = extern struct {
     aim_start_pos: v3 = .{},
     aim_dir: v3 = .{},
 
-    weapon_cooldowns: [num_weapons]f32 = .{0}**num_weapons,
-    weapons: [num_weapons]Weapon = [num_weapons]Weapon{
-        .weapon_sniper,
-        .weapon_pistol,
-        .weapon_nade
-    },
+    weapons: [3]Weapon = .{sniper, pistol, nade},
     weapon_current: u8 = 0,
     weapon_last: u8 = 1,
 
@@ -190,7 +236,6 @@ pub fn findEntityById(entities: []Entity, id: EntityId) ?*Entity {
     return null;
 }
 
-
 pub const Graph = struct {
     data: []f32,
     max: f32 = 1,
@@ -202,6 +247,7 @@ pub fn graphAppend(g: *Graph, y: f32) void {
     g.data[g.top] = y;
     g.top = (g.top + 1) % g.data.len;
 }
+
 pub const WidgetMoveType = enum {
     move_axis,
     move_plane,
@@ -209,6 +255,7 @@ pub const WidgetMoveType = enum {
     rotate_y,
     rotate_z
 };
+
 pub const WidgetModel = struct {
     model: *m4 = undefined,
 
@@ -260,6 +307,19 @@ pub const RespawnEntry = struct {
     time_left: f32,
 };
 
+pub const Lobby = struct {
+    killfeed: bb.CircularArray(struct {
+        from: EntityId,
+        to: EntityId,
+        time_left: f32,
+    }, 8) = undefined,
+};
+
+pub const MemoryAllocators = struct {
+    frame: std.mem.Allocator = undefined,
+    persistent: std.mem.Allocator = undefined,
+};
+
 pub const Memory = struct {
     // game state
     players: std.BoundedArray(Player, max_players) = .{},
@@ -289,14 +349,16 @@ pub const Memory = struct {
         .y = 0.5,
     },
 
+    // Console
     console_input_index: usize = 0,
     console_input: std.BoundedArray(u8, 128) = .{},
 
+    // Editor
     selected_entity: ?u32 = null,
     widget: WidgetModel = .{},
 
-    frame_allocator: std.mem.Allocator = undefined,
-    persistent_allocator: std.mem.Allocator = undefined,
+    // Memory
+    mem: MemoryAllocators = .{},
 
     stat_data: stat.StatData = .{},
 

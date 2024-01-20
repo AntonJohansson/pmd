@@ -24,3 +24,18 @@
     - [ ] Instanced cube draw calls
     - [ ] Cube outline
     - [ ] Readd PP
+
+First gameplay test:
+    - [ ] higher friction 
+    - [ ] Swoosh
+    - [ ] Editing
+        - [ ] Draw widget on top
+        - [ ] Interactive widget
+        - [ ] Widget + shift -> scale
+        - [ ] Cubes instead of planes
+        - [ ] Delete cubes
+        - [ ] Multiple select
+    - [ ] Send map from server -> client
+    - [ ] Draw outline
+    - [ ] Shoot from barrel when zoomed in
+    - [ ] Make sure you know when you hit and when you get hit

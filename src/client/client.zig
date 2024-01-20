@@ -13,7 +13,8 @@ const Player = common.Player;
 const EntityId = common.EntityId;
 const Input = common.Input;
 const InputName = common.InputName;
-const draw = common.draw;
+const draw_api = common.draw_api;
+const draw = @import("draw.zig");
 
 const math = common.math;
 const v2 = math.v2;
@@ -22,6 +23,8 @@ const f32equal = math.f32equal;
 const m4 = math.m4;
 
 const net = @import("net");
+const res = @import("res");
+
 const headers = net.headers;
 const packet = net.packet;
 const packet_meta = net.packet_meta;
@@ -297,18 +300,27 @@ pub fn main() !void {
     //    and has to be freed manually.
     // 2. ArenaAllocator for temporary data that during a frame
     var general_purpose_allocator: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_allocator.deinit();
-    memory.frame_allocator = arena_allocator.allocator();
-    memory.persistent_allocator = general_purpose_allocator.allocator();
+    var fixed_allocator = std.heap.FixedBufferAllocator.init(try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, 128000*std.mem.page_size));
+    log.info("{}", .{fixed_allocator.buffer.len});
+    defer std.heap.page_allocator.free(fixed_allocator.buffer);
+    memory.mem.frame = fixed_allocator.threadSafeAllocator();
+    memory.mem.persistent = general_purpose_allocator.allocator();
 
-    net.frame_allocator = memory.frame_allocator;
+    try common.threadpool.start(memory.mem.persistent);
+
+    net.mem = memory.mem;
+    res.mem = memory.mem;
 
     //
     // Connect to server
     //
     var host: net.Host = .{};
-    const server_index = net.connect(memory.persistent_allocator, &host, "192.168.1.71", 9053) orelse return;
+    const ip = "85.228.207.30";
+    const port = 9053;
+    const server_index = net.connect(&host, ip, port) orelse {
+        log.err("Failed to connect to server {s}:{}", .{ip, port});
+        return;
+    };
     defer std.os.close(host.fd);
 
     //
@@ -333,7 +345,7 @@ pub fn main() !void {
     // GLFW init
     //
     if (!glfw.init(.{})) {
-        std.log.err("Failed to initialize GLFW: {?s}", .{glfw.getErrorString()});
+        log.err("Failed to initialize GLFW: {?s}", .{glfw.getErrorString()});
         std.process.exit(1);
     }
     defer glfw.terminate();
@@ -345,8 +357,8 @@ pub fn main() !void {
         .opengl_profile = .opengl_core_profile,
     };
 
-    const window = glfw.Window.create(400, 300, "floating", null, null, hints) orelse {
-        std.log.err("Failed to open window: {?s}", .{glfw.getErrorString()});
+    const window = glfw.Window.create(800, 600, "floating", null, null, hints) orelse {
+        log.err("Failed to open window: {?s}", .{glfw.getErrorString()});
         std.process.exit(1);
     };
     defer window.destroy();
@@ -364,7 +376,7 @@ pub fn main() !void {
     }
 
     // initialize renderer
-    draw.init();
+    draw.init(memory.mem);
     defer draw.deinit();
 
     //
@@ -393,26 +405,26 @@ pub fn main() !void {
     // Load all sounds into buffers
     for (&sound_file_map) |*info| {
         const file = std.fs.cwd().openFile(info.path, .{}) catch |err| {
-            std.log.err("Failed to open file: {s} ({})", .{info.path, err});
+            log.err("Failed to open file: {s} ({})", .{info.path, err});
             return;
         };
 
-        const buf = file.readToEndAlloc(memory.persistent_allocator, 1024*1024*1024) catch {
-            std.log.err("Failed to read file: {s}", .{info.path});
+        const buf = file.readToEndAlloc(memory.mem.persistent, 1024*1024*1024) catch {
+            log.err("Failed to read file: {s}", .{info.path});
             return;
         };
-        defer memory.persistent_allocator.free(buf);
+        defer memory.mem.persistent.free(buf);
 
         var err: c_int = undefined;
         const vorbis = c.stb_vorbis_open_memory(buf.ptr, @intCast(buf.len), &err, null) orelse {
-            std.log.err("Failed to decode file: {s}", .{info.path});
+            log.err("Failed to decode file: {s}", .{info.path});
             return;
         };
         std.debug.assert(err == 0);
 
         const vorbis_info = c.stb_vorbis_get_info(vorbis);
         const num_samples: usize = @as(c_uint, @intCast(vorbis_info.channels))*c.stb_vorbis_stream_length_in_samples(vorbis);
-        info.samples = memory.persistent_allocator.alloc(f32, num_samples) catch unreachable;
+        info.samples = memory.mem.persistent.alloc(f32, num_samples) catch unreachable;
         const samples_per_channel = c.stb_vorbis_get_samples_float_interleaved(vorbis, vorbis_info.channels, &info.samples[0], @intCast(num_samples));
         std.debug.assert(samples_per_channel*2 == num_samples);
     }
@@ -426,10 +438,10 @@ pub fn main() !void {
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
         authorizedPlayerUpdate: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
         authorizedUpdate: *fn (vars: *const Vars, memory: *Memory, dt: f32) void,
-        draw: *fn (vars: *const Vars, memory: *Memory, b: *draw.Buffer, player_id: common.EntityId, input: *const Input) void,
-    }).init(memory.persistent_allocator, "zig-out/lib", "game");
+        draw: *fn (vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, player_id: common.EntityId, input: *const Input) void,
+    }).init(memory.mem.persistent, "zig-out/lib", "game");
 
-    try module.open(memory.persistent_allocator);
+    try module.open(memory.mem.persistent);
     defer module.close();
 
     //
@@ -508,9 +520,9 @@ pub fn main() !void {
     default_gamepad_input_map_editor.map_gamepad_button(.Interact,        .rising_edge, .x);
     default_gamepad_input_map_editor.map_gamepad_button(.AltInteract,     .state,       .right_bumper);
 
-    memory.vel_graph.data = try memory.persistent_allocator.alloc(f32, 2*fps);
+    memory.vel_graph.data = try memory.mem.persistent.alloc(f32, 2*fps);
 
-    var draw_buffer: draw.Buffer = .{};
+    var command_buffer: draw_api.CommandBuffer = .{};
 
     var local_players: std.BoundedArray(LocalPlayer, 16) = .{};
 
@@ -519,17 +531,6 @@ pub fn main() !void {
 
     var frame_start_time: u64 = 0;
     var frame_end_time: u64 = 0;
-    //var accumulator: u64 = 0;
-
-    //config.vars.bloom_downscale = raylib.LoadRenderTexture(
-    //    @divTrunc(width, @intCast(c_int, config.vars.bloom_scale)),
-    //    @divTrunc(height,@intCast(c_int, config.vars.bloom_scale)));
-    //defer raylib.UnloadRenderTexture(config.vars.bloom_downscale);
-    //raylib.SetTextureWrap(config.vars.bloom_downscale.texture, raylib.TEXTURE_WRAP_CLAMP);
-
-    //config.vars.bloom_upscale = raylib.LoadRenderTexture(width, height);
-    //defer raylib.UnloadRenderTexture(config.vars.bloom_upscale);
-
 
     // Scan for connected joysticks
     {
@@ -548,6 +549,8 @@ pub fn main() !void {
     while (running) {
         frame_start_time = timer.read();
 
+        log.info("---- Starting tick {}", .{tick});
+
         {
             memory.stat_data.start("frame");
             defer memory.stat_data.end();
@@ -562,7 +565,7 @@ pub fn main() !void {
                 running = false;
 
             {
-                if (try module.reloadIfChanged(memory.persistent_allocator)) {
+                if (try module.reloadIfChanged(memory.mem.persistent)) {
                     //_ = module.function_table.fofo();
                 }
             }
@@ -591,8 +594,9 @@ pub fn main() !void {
                 switch (event) {
                     .peer_connected => {
                         // Clear local players and players in game when joining a server
-                        for (local_players.slice()) |*lp|
+                        for (local_players.slice()) |*lp| {
                             lp.id = null;
+                        }
                         memory.players.len = 0;
                         log.info("connected", .{});
                         connected = true;
@@ -624,22 +628,19 @@ pub fn main() !void {
                                 if (connected) {
                                     connected = false;
                                     running = false;
-                                    std.log.info("connection timeout", .{});
+                                    log.info("connection timeout", .{});
                                 }
                             },
                             .Joined => {
                                 const message: *align(1) packet.Joined = @ptrCast(e.data);
                                 tick = message.tick;
+                                log.info("Joined message", .{});
                             },
                             .PlayerJoinResponse => {
                                 const message: *align(1) packet.PlayerJoinResponse = @ptrCast(e.data);
                                 const player = try memory.players.addOne();
                                 player.id = message.id;
 
-                                // We don't handle the case where there is no
-                                // room for a local player, this should never
-                                // happen as we ourselves request to join,
-                                // so we should have space...
                                 var local_player_id: ?usize = null;
                                 for (local_players.slice(), 0..) |*lp,i| {
                                     if (lp.id == null) {
@@ -650,9 +651,9 @@ pub fn main() !void {
                                 }
 
                                 std.debug.assert(local_player_id != null);
-                                log.info("Joined", .{});
+                                log.info("Player joined", .{});
                                 log.info("  local player id: {}", .{local_player_id.?});
-                                log.info("  game player id: {}", .{player.id});
+                                log.info("  game player id: {}",  .{player.id});
                             },
                             .PeerJoined => {
                                 const message: *align(1) packet.PeerJoined = @ptrCast(e.data);
@@ -669,10 +670,7 @@ pub fn main() !void {
                             },
                             .SpawnPlayer => {
                                 const message: *align(1) packet.SpawnPlayer = @ptrCast(e.data);
-                                const player = common.findPlayerById(&memory.players.buffer, message.player.id) orelse {
-                                    log.info("Trying to spawn player {}, which doesn't exist locally, hmmmm", .{message.player.id});
-                                    continue;
-                                };
+                                const player = common.findPlayerById(&memory.players.buffer, message.player.id) orelse unreachable;
                                 player.* = message.player;
                                 log.info("Spawning", .{});
                             },
@@ -779,7 +777,7 @@ pub fn main() !void {
                                 }
                             },
                             else => {
-                                std.log.err("Unrecognized packet type: {}", .{e.kind});
+                                log.err("Unrecognized packet type: {}", .{e.kind});
                                 break;
                             },
                         }
@@ -822,8 +820,11 @@ pub fn main() !void {
                                     // if we're not connected.
                                     {
                                         const lp = local_players.addOneAssumeCapacity();
-                                        //lp.id = common.newEntityId();
-                                        lp.id = null;
+                                        if (!connected) {
+                                            lp.id = common.newEntityId();
+                                        } else {
+                                            lp.id = null;
+                                        }
                                         lp.input_device_id = i;
                                         lp.gameplay_input_map = &default_keyboard_input_map_gameplay;
                                         lp.editor_input_map = &default_keyboard_input_map_editor;
@@ -831,20 +832,22 @@ pub fn main() !void {
                                         net.pushMessage(server_index, packet.PlayerJoinRequest{});
                                         log.info("Sening join request", .{});
 
-                                        //const player = Player {
-                                        //    .id = lp.id.?,
-                                        //    .pos = v3 {.x = 0, .y = 0, .z = 10.0},
-                                        //    .vel = v3 {.x = 0, .y = 0, .z = 0},
-                                        //    .dir = v3 {.x = 1, .y = 0, .z = 0},
-                                        //    .yaw = 0,
-                                        //    .pitch = 0,
-                                        //};
-                                        //memory.players.appendAssumeCapacity(player);
+                                        if (!connected) {
+                                            const player = Player {
+                                                .id = lp.id.?,
+                                                .pos = v3 {.x = 0, .y = 0, .z = 10.0},
+                                                .vel = v3 {.x = 0, .y = 0, .z = 0},
+                                                .dir = v3 {.x = 1, .y = 0, .z = 0},
+                                                .yaw = 0,
+                                                .pitch = 0,
+                                            };
+                                            memory.players.appendAssumeCapacity(player);
 
-                                        //memory.respawns.appendAssumeCapacity(.{
-                                        //    .id = lp.id.?,
-                                        //    .time_left = 0.0,
-                                        //});
+                                            memory.respawns.appendAssumeCapacity(.{
+                                                .id = lp.id.?,
+                                                .time_left = 0.0,
+                                            });
+                                        }
                                     }
 
                                 }
@@ -872,33 +875,40 @@ pub fn main() !void {
                                             // if we're not connected.
                                             {
                                                 const lp = local_players.addOneAssumeCapacity();
-                                                lp.id = common.newEntityId();
+                                                if (!connected) {
+                                                    lp.id = common.newEntityId();
+                                                } else {
+                                                    lp.id = null;
+                                                }
                                                 lp.input_device_id = i;
                                                 lp.gameplay_input_map = &default_gamepad_input_map_gameplay;
                                                 lp.editor_input_map = &default_gamepad_input_map_editor;
 
-                                                const player = Player {
-                                                    .id = lp.id.?,
-                                                    .pos = v3 {.x = 0, .y = 0, .z = 10.0},
-                                                    .vel = v3 {.x = 0, .y = 0, .z = 0},
-                                                    .dir = v3 {.x = 1, .y = 0, .z = 0},
-                                                    .yaw = 0,
-                                                    .pitch = 0,
-                                                };
-                                                memory.players.appendAssumeCapacity(player);
+                                                if (!connected) {
+                                                    const player = Player {
+                                                        .id = lp.id.?,
+                                                        .pos = v3 {.x = 0, .y = 0, .z = 10.0},
+                                                        .vel = v3 {.x = 0, .y = 0, .z = 0},
+                                                        .dir = v3 {.x = 1, .y = 0, .z = 0},
+                                                        .yaw = 0,
+                                                        .pitch = 0,
+                                                    };
+                                                    memory.players.appendAssumeCapacity(player);
 
-                                                memory.respawns.appendAssumeCapacity(.{
-                                                    .id = lp.id.?,
-                                                    .time_left = 0.0,
-                                                });
+                                                    memory.respawns.appendAssumeCapacity(.{
+                                                        .id = lp.id.?,
+                                                        .time_left = 0.0,
+                                                    });
+                                                }
                                             }
 
                                             break;
                                         }
                                     }
 
-                                    if (gamepad_press)
+                                    if (gamepad_press) {
                                         break;
+                                    }
                                 }
                             }
                         }
@@ -1031,7 +1041,6 @@ pub fn main() !void {
                             defer memory.stat_data.end();
                             module.function_table.update(&config.vars, &memory, player.?, &lp.input, dt);
                             if (!connected) {
-                                std.log.info("auth ", .{});
                                 module.function_table.authorizedPlayerUpdate(&config.vars, &memory, player.?, &lp.input, dt);
                             }
                         }
@@ -1070,7 +1079,7 @@ pub fn main() !void {
 
                             if (lp.input.isset(.Enter)) {
                                 command.dodododododododo(memory.console_input.slice());
-                                std.log.info("Running command: {s}", .{memory.console_input.slice()});
+                                log.info("Running command: {s}", .{memory.console_input.slice()});
 
                                 memory.console_input_index = 0;
                                 memory.console_input.len = 0;
@@ -1157,12 +1166,12 @@ pub fn main() !void {
                 for (local_players.constSlice()) |lp| {
                     if (lp.id == null)
                         continue;
-                    module.function_table.draw(&config.vars, &memory, &draw_buffer, lp.id.?, &lp.input);
+                    module.function_table.draw(&config.vars, &memory, &command_buffer, lp.id.?, &lp.input);
                 }
                 memory.stat_data.end();
 
                 memory.stat_data.start("draw process");
-                draw.process(&draw_buffer, width, height, local_players.len);
+                draw.process(&command_buffer, width, height, local_players.len);
                 memory.stat_data.end();
 
                 window.swapBuffers();
@@ -1174,7 +1183,7 @@ pub fn main() !void {
             {
                 const num_needed_samples = 2*@as(usize, @intCast(sa.expect()));
 
-                var samples = try memory.frame_allocator.alloc(f32, num_needed_samples);
+                var samples = try memory.mem.frame.alloc(f32, num_needed_samples);
                 @memset(samples, 0);
 
                 var num_samples: usize = 0;
@@ -1227,13 +1236,15 @@ pub fn main() !void {
                 while (timer.read() - start_sleep < time_left) {}
             }
 
-            _ = arena_allocator.reset(.retain_capacity);
+            fixed_allocator.reset();
         }
     }
 
     for (sound_file_map) |info| {
-        memory.persistent_allocator.free(info.samples);
+        memory.mem.persistent.free(info.samples);
     }
+
+    common.threadpool.join();
 }
 
 fn appendSliceAssumeForceDstAlignment(comptime alignment: usize, comptime T: type, bounded_array: anytype, src: []align(alignment) const T) void {

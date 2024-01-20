@@ -29,6 +29,15 @@ pub fn build(b: *std.build.Builder) !void {
     });
 
     //
+    // res
+    //
+
+    const res = b.createModule(.{
+        .source_file = .{.path = "src/res/res.zig"},
+        .dependencies = &.{.{.name="common",.module=common}},
+    });
+
+    //
     // lib
     //
 
@@ -42,6 +51,7 @@ pub fn build(b: *std.build.Builder) !void {
     libgame.addModule("sokol", sokol_module);
     libgame.addModule("common", common);
     libgame.addModule("net", net);
+    libgame.addModule("res", res);
     libgame.linkLibrary(sokol_build);
     _ = b.installArtifact(libgame);
 
@@ -66,11 +76,21 @@ pub fn build(b: *std.build.Builder) !void {
             "-Wextra",
             "-Werror",
         }});
+    client.addCSourceFile(.{
+        .file = .{
+            .path = "src/client/stb.c"
+        },
+        .flags = &.{
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+        }});
     client.addIncludePath(std.build.LazyPath.relative("src/client"));
     client.linkLibC();
     client.addModule("sokol", sokol_module);
     client.addModule("common", common);
     client.addModule("net", net);
+    client.addModule("res", res);
     client.linkLibrary(sokol_build);
     b.installArtifact(client);
 
@@ -102,6 +122,7 @@ pub fn build(b: *std.build.Builder) !void {
     });
     server.addModule("common", common);
     server.addModule("net", net);
+    server.addModule("res", res);
     server.linkLibC();
     b.installArtifact(server);
 

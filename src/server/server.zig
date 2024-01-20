@@ -53,27 +53,27 @@ pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_allocator.deinit();
-    memory.frame_allocator = arena_allocator.allocator();
-    memory.persistent_allocator = general_purpose_allocator.allocator();
+    memory.mem.frame = arena_allocator.allocator();
+    memory.mem.persistent = general_purpose_allocator.allocator();
 
-    net.frame_allocator = memory.frame_allocator;
+    net.mem = memory.mem;
 
     var module = try code_module.CodeModule(struct {
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
         authorizedPlayerUpdate: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
         authorizedUpdate: *fn (vars: *const Vars, memory: *Memory, dt: f32) void,
         draw: *fn (memory: *Memory) void,
-    }).init(memory.persistent_allocator, "zig-out/lib", "game");
+    }).init(memory.mem.persistent, "zig-out/lib", "game");
 
     // TODO(anjo): Pass module name through compile time constants and don't rely on trying to
     // guess the name
-    module.open(memory.persistent_allocator) catch {
+    module.open(memory.mem.persistent) catch {
         log.err("Failed to open module: {s}", .{module.name});
         return;
     };
     defer module.close();
 
-    const host = net.bind(memory.persistent_allocator, 9053) orelse return;
+    const host = net.bind(9053) orelse return;
     defer std.os.closeSocket(host.fd);
 
     var new_connections: std.BoundedArray(NewConnectionData, 4) = .{};
@@ -100,9 +100,11 @@ pub fn main() !void {
     while (running) {
         frame_start_time = timer.read();
 
+        log.info("---- Starting tick {}", .{tick});
+
         {
             {
-                if (try module.reloadIfChanged(memory.persistent_allocator)) {
+                if (try module.reloadIfChanged(memory.mem.persistent)) {
                     //_ = module.function_table.fofo();
                 }
             }

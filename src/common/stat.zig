@@ -46,7 +46,7 @@ pub const StatData = struct {
         _ = stat.endTime();
     }
 
-    fn findId(self: *Self, name: []const u8) ?u16 {
+    pub fn findId(self: *Self, name: []const u8) ?u16 {
         for (self.entries.constSlice(), 0..self.entries.len) |stat,i| {
             if (std.mem.eql(u8, stat.name, name))
                 return @intCast(i);

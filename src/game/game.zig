@@ -32,19 +32,7 @@ const v4 = math.v4;
 const m3 = math.m3;
 const m4 = math.m4;
 
-const draw_api = common.draw;
-const pushCube = draw_api.pushCube;
-const pushVector = draw_api.pushVector;
-const pushPlane = draw_api.pushPlane;
-const pushRectangle = draw_api.pushRectangle;
-const pushLine = draw_api.pushLine;
-const pushText = draw_api.pushText;
-const push = draw_api.push;
-const pushNoDepth = draw_api.pushNoDepth;
-const begin3d = draw_api.begin3d;
-const end3d = draw_api.end3d;
-const begin2d = draw_api.begin2d;
-const end2d = draw_api.end2d;
+const draw_api = common.draw_api;
 
 const widget_length = 20.0;
 const widget_thickness = 2.0;
@@ -173,37 +161,37 @@ fn updateWidget(widget: *common.WidgetModel, input: *const Input, start: v3, dir
     }
 }
 
-fn drawWidget(b: *draw_api.Buffer, widget: *common.WidgetModel) void {
+fn drawWidget(b: *draw_api.CommandBuffer, widget: *common.WidgetModel) void {
     const model = widget.model.*;
     // x y z axes
-    push(b, primitive.Cube2 {
+    b.push(primitive.Cube {
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_x)),
     }, .{.r=255,.g=0,.b=0,.a=255});
-    push(b, primitive.Cube2 {
+    b.push(primitive.Cube {
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_y)),
     }, .{.r=0,.g=255,.b=0,.a=255});
-    push(b, primitive.Cube2 {
+    b.push(primitive.Cube {
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_z)),
     }, .{.r=0,.g=0,.b=255,.a=255});
 
-    push(b, primitive.Cube2 {
+    b.push(primitive.Cube {
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_plane_xy)),
     }, .{.r=0,.g=0,.b=255,.a=255});
-    push(b, primitive.Cube2 {
+    b.push(primitive.Cube {
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_plane_yz)),
     }, .{.r=255,.g=0,.b=0,.a=255});
-    push(b, primitive.Cube2 {
+    b.push(primitive.Cube {
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_plane_xz)),
     }, .{.r=0,.g=255,.b=0,.a=255});
 
     const rot = m4.modelRot(model);
-    push(b, primitive.Circle{
+    b.push(primitive.Circle{
         .model = m4.modelSetRot(model, m3.mul(rot, m3.modelRotY(std.math.pi/2.0))),
     }, .{.r=255,.g=0,.b=0,.a=255});
-    push(b, primitive.Circle{
+    b.push(primitive.Circle{
         .model = m4.modelSetRot(model, m3.mul(rot, m3.modelRotX(std.math.pi/2.0))),
     }, .{.r=0,.g=255,.b=0,.a=255});
-    push(b, primitive.Circle{
+    b.push(primitive.Circle{
         .model = m4.modelSetRot(model, m3.mul(rot, m3.modelRotZ(std.math.pi/2.0))),
     }, .{.r=0,.g=0,.b=255,.a=255});
 }
@@ -383,12 +371,16 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
 
     // copy player pos to camera pos
     {
+        const weapon = player.weapons[player.weapon_current];
+        const in_zoom = weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown == weapon.total_zoom_cooldown;
+        const fov = if (in_zoom) vars.fov_zoom else vars.fov;
+
         const height: f32 = if (player.crouch) 15 else 22;
         const offset = v3 {.x = 0, .y = 0, .z = height};
         player.camera.pos = v3.add(player.pos, offset);
         player.camera.dir = player.dir;
         player.camera.view = m4.view(player.camera.pos, player.camera.dir);
-        player.camera.proj = m4.projection(0.01, 10000.0, vars.aspect, vars.fov);
+        player.camera.proj = m4.projection(0.01, 100000.0, vars.aspect, fov);
     }
 }
 
@@ -470,7 +462,6 @@ fn readEntitiesFromDisk(memory: *common.Memory) !void {
         memory.entities.appendAssumeCapacity(entity);
     }
 }
-
 
 export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
     // Update hitscans
@@ -654,13 +645,104 @@ export fn authorizedUpdate(vars: *const Vars, memory: *Memory, dt: f32) void {
 }
 
 fn weaponUpdate(memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
-    // Update weapon cooldowns
-    std.debug.assert(player.weapon_cooldowns.len == player.weapons.len);
-    for (0..player.weapons.len) |i| {
-        const c = &player.weapon_cooldowns[i];
-        if (c.* > 0) {
-            c.* -= @min(dt, c.*);
-        }
+    const weapon = &player.weapons[player.weapon_current];
+
+    switch (weapon.state) {
+        .normal => {
+            // fire
+            const can_fire = weapon.cooldown <= 0;
+            if (can_fire and input.isset(.Interact)) {
+                switch (weapon.type) {
+                    .sniper => {
+                        memory.new_sounds.appendAssumeCapacity(.{
+                            .type = .sniper,
+                            .pos = .{.x=0,.y=0,.z=0},
+                            .id_from = player.id,
+                        });
+                        fireSniperHitscan(memory, player);
+                    },
+                    .pistol => {
+                        memory.new_sounds.appendAssumeCapacity(.{
+                            .type = .sniper,
+                            .pos = .{.x=0,.y=0,.z=0},
+                            .id_from = player.id,
+                        });
+                        firePistolHitscan(memory, player);
+                    },
+                    .nade => {
+                        memory.new_sounds.appendAssumeCapacity(.{
+                            .type = .pip,
+                            .pos = .{.x=0,.y=0,.z=0},
+                            .id_from = player.id,
+                        });
+                    },
+                }
+
+                weapon.ammo -= 1;
+                if (weapon.ammo == 0) {
+                    weapon.cooldown = 1.0;
+                    weapon.state = .reload;
+                } else {
+                    weapon.cooldown = weapon.total_cooldown;
+                    weapon.state = .cooldown;
+                }
+            } else if (input.isset(.AltInteract)) {
+                weapon.state = .zoom;
+            }
+        },
+        .cooldown => {
+            weapon.cooldown -= dt;
+            if (weapon.cooldown <= 0) {
+                weapon.cooldown = 0;
+                weapon.state = .normal;
+            }
+        },
+        .zoom => {
+            if (input.isset(.AltInteract)) {
+                if (weapon.cooldown < weapon.total_zoom_cooldown) {
+                    weapon.cooldown += dt;
+                } else {
+                    weapon.cooldown = weapon.total_zoom_cooldown;
+                }
+
+                if (input.isset(.Interact) and weapon.cooldown == weapon.total_zoom_cooldown) {
+                    switch (weapon.type) {
+                        .sniper => {
+                            memory.new_sounds.appendAssumeCapacity(.{
+                                .type = .sniper,
+                                .pos = .{.x=0,.y=0,.z=0},
+                                .id_from = player.id,
+                            });
+                            fireSniperHitscan(memory, player);
+                        },
+                        .pistol => {
+                            memory.new_sounds.appendAssumeCapacity(.{
+                                .type = .sniper,
+                                .pos = .{.x=0,.y=0,.z=0},
+                                .id_from = player.id,
+                            });
+                            firePistolHitscan(memory, player);
+                        },
+                        else => unreachable,
+                    }
+                }
+            } else {
+                weapon.cooldown -= dt;
+                if (weapon.cooldown <= 0) {
+                    weapon.cooldown = 0;
+                    weapon.state = .normal;
+                }
+            }
+        },
+
+        .reload => {
+            weapon.cooldown -= dt;
+            if (weapon.cooldown <= 0) {
+                weapon.cooldown = 0;
+                weapon.ammo = weapon.total_ammo;
+                weapon.state = .normal;
+            }
+        },
     }
 
     if (input.isset(.SwitchWeapon)) {
@@ -675,45 +757,6 @@ fn weaponUpdate(memory: *Memory, player: *Player, input: *const Input, dt: f32) 
             .id_from = player.id,
         });
     }
-
-    const weapon = player.weapons[player.weapon_current];
-
-    // sniper zoom
-    if (weapon == .weapon_sniper and input.isset(.AltInteract)) {
-    }
-
-    // fire
-    const can_fire = player.weapon_cooldowns[player.weapon_current] <= 0;
-    if (can_fire and input.isset(.Interact)) {
-        switch (weapon) {
-            .weapon_sniper => {
-                player.weapon_cooldowns[player.weapon_current] = 1.0;
-                memory.new_sounds.appendAssumeCapacity(.{
-                    .type = .sniper,
-                    .pos = .{.x=0,.y=0,.z=0},
-                    .id_from = player.id,
-                });
-                fireSniperHitscan(memory, player);
-            },
-            .weapon_pistol => {
-                player.weapon_cooldowns[player.weapon_current] = 0.1;
-                memory.new_sounds.appendAssumeCapacity(.{
-                    .type = .sniper,
-                    .pos = .{.x=0,.y=0,.z=0},
-                    .id_from = player.id,
-                });
-                firePistolHitscan(memory, player);
-            },
-            .weapon_nade => {
-                player.weapon_cooldowns[player.weapon_current] = 3.0;
-                memory.new_sounds.appendAssumeCapacity(.{
-                    .type = .pip,
-                    .pos = .{.x=0,.y=0,.z=0},
-                    .id_from = player.id,
-                });
-            },
-        }
-    }
 }
 
 fn aim(vars: *const Vars, memory: *Memory, player: *Player) void {
@@ -727,15 +770,15 @@ fn aim(vars: *const Vars, memory: *Memory, player: *Player) void {
         const k = v3.cross(i,j);
 
         const weapon = player.weapons[player.weapon_current];
-        switch (weapon) {
-            .weapon_sniper => {
+        switch (weapon.type) {
+            .sniper => {
                 var base = player.camera.pos;
                 base = v3.add(base, v3.scale(-vars.sniper_off_x, j));
                 base = v3.add(base, v3.scale(vars.sniper_len/2+vars.sniper_off_y, i));
                 base = v3.add(base, v3.scale(vars.sniper_off_z, k));
                 start_pos = base;
             },
-            .weapon_pistol => {
+            .pistol => {
                 var base = player.camera.pos;
                 base = v3.add(base, v3.scale(-vars.pistol_off_x, j));
                 base = v3.add(base, v3.scale(vars.pistol_len/2+vars.pistol_off_y, i));
@@ -762,8 +805,8 @@ fn aim(vars: *const Vars, memory: *Memory, player: *Player) void {
         const k = v3.cross(i,j);
 
         const weapon = player.weapons[player.weapon_current];
-        switch (weapon) {
-            .weapon_sniper => {
+        switch (weapon.type) {
+            .sniper => {
                 var base = player.camera.pos;
                 base = v3.add(base, v3.scale(-vars.sniper_off_x, j));
                 base = v3.add(base, v3.scale(vars.sniper_off_z, k));
@@ -775,7 +818,7 @@ fn aim(vars: *const Vars, memory: *Memory, player: *Player) void {
                 gun_ray_pos = v3.add(base, v3.scale(vars.sniper_len/2+vars.sniper_off_y, new_ray));
                 gun_ray_dir = new_ray;
             },
-            .weapon_pistol => {
+            .pistol => {
                 var base = player.camera.pos;
                 base = v3.add(base, v3.scale(-vars.pistol_off_x, j));
                 base = v3.add(base, v3.scale(vars.pistol_off_z, k));
@@ -954,13 +997,13 @@ fn hsvToRgb(h: f32, s: f32, v: f32) Color {
     };
 }
 
-export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_id: common.EntityId, input: *const Input) void {
+export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, player_id: common.EntityId, input: *const Input) void {
     const player = common.findPlayerById(memory.players.slice(), player_id) orelse return;
     if (player.state == .dead)
         return;
     const camera = player.camera;
 
-    begin3d(b, camera);
+    b.push(camera, .{});
 
     // Draw map(?)
     var prng = std.rand.DefaultPrng.init(0);
@@ -970,17 +1013,20 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
         while (i < grid_size) : (i += 1) {
             var j: usize = 0;
             while (j < grid_size) : (j += 1) {
-                pushCube(b, .{
-                    .pos = .{
-                        .x = tile_size*@as(f32, @floatFromInt(i)) - tile_size*@as(f32, @floatFromInt(grid_size))/2,
-                        .y = tile_size*@as(f32, @floatFromInt(j)) - tile_size*@as(f32, @floatFromInt(grid_size))/2,
-                        .z = 0.0,
-                    },
-                    .size = .{
-                        .x = tile_size,
-                        .y = tile_size,
-                        .z = tile_base_height + tile_max_height*rand.float(f32),
-                    },
+                b.push(primitive.Cube{
+                    .model = m4.modelWithRotations(
+                        .{
+                            .x = tile_size*@as(f32, @floatFromInt(i)) - tile_size*@as(f32, @floatFromInt(grid_size))/2 + tile_size/2.0,
+                            .y = tile_size*@as(f32, @floatFromInt(j)) - tile_size*@as(f32, @floatFromInt(grid_size))/2 + tile_size/2.0,
+                            .z = (tile_base_height + tile_max_height*rand.float(f32))/2.0,
+                        },
+                        .{
+                            .x = tile_size,
+                            .y = tile_size,
+                            .z = tile_base_height + tile_max_height*rand.float(f32),
+                        },
+                        .{.x=0,.y=0,.z=0},
+                    ),
                 },
                 hsvToRgb(
                     80.0 + 10.0*(2.0*rand.float(f32)-1.0),
@@ -1015,13 +1061,14 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
     for (memory.entities.constSlice()) |e| {
         var plane = e.plane;
         plane.model = m4.modelSetScale(e.plane.model, .{.x=global_plane_size.x,.y=global_plane_size.y,.z=1});
-        pushPlane(b, plane, hsvToRgb(10, 0.6, 0.7));
+        b.push(plane, hsvToRgb(10, 0.6, 0.7));
         plane.model = m4.modelSetScale(e.plane.model, .{.x=global_plane_size.x-10,.y=global_plane_size.y-10,.z=2});
-        pushPlane(b, plane, hsvToRgb(10, 0.6, 0.5));
+        b.push(plane, hsvToRgb(10, 0.6, 0.5));
     }
 
-    if (input.isset(.Editor) and memory.selected_entity != null)
+    if (input.isset(.Editor) and memory.selected_entity != null) {
         drawWidget(b, &memory.widget);
+    }
 
     // Draw players
     const player_cube_size = 10;
@@ -1047,7 +1094,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                 .z=p.yaw,
             };
             const model = m4.modelWithRotations(pos, scale, rot);
-            push(b, primitive.Cube2 {
+            b.push(primitive.Cube {
                 .model = model,
             }, playerRandomColor(p.id, rand));
         } else {
@@ -1069,7 +1116,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                 .z=p.yaw,
             };
             const model = m4.modelWithRotations(pos, scale, rot);
-            push(b, primitive.Cube2 {
+            b.push(primitive.Cube {
                 .model = model,
             }, playerRandomColor(p.id, rand));
         }
@@ -1103,76 +1150,125 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
             move_offset = v3.add(move_offset, view_delta);
 
             const weapon = p.weapons[p.weapon_current];
-            switch (weapon) {
-                .weapon_sniper => {
-                    const offset = v3.add(v3.add(v3.add(v3.scale(vars.sniper_len/2+vars.sniper_off_y, forward),
-                                                     v3.scale(vars.sniper_off_x, right)),
-                                                     v3.scale(vars.sniper_off_z, up)),
-                                         move_offset);
 
-                    const model_sniper = m4.modelFromXDir(
-                                           v3.add(p.camera.pos, offset),
-                                           .{.x=1,.y=1,.z=1},
-                                           p.aim_dir);
-
-                    // barrel
-                    push(b, primitive.Cube2 {
-                        .model = m4.mul(model_sniper, m4.modelWithRotations(
-                                .{.x=0,.y=0,.z=0},
-                                .{.x=vars.sniper_len,.y=vars.sniper_w,.z=vars.sniper_w},
-                                .{.x=0,.y=0,.z=0}),
-                        ),
-                    }, playerRandomColor(p.id, rand));
-
-                    // stock
-                    push(b, primitive.Cube2 {
-                        .model = m4.mul(model_sniper, m4.modelWithRotations(
-                                .{
-                                    .x = vars.sniper_stock_off_x,
-                                    .y = vars.sniper_stock_off_y,
-                                    .z = vars.sniper_stock_off_z,
-                                },
-                            .{.x=vars.sniper_stock_len,.y=vars.sniper_stock_w,.z=vars.sniper_stock_h},
-                            .{.x=0,.y=0,.z=0}),
-                        ),
-                    }, playerRandomColor(p.id, rand));
-
-                    // scope
-                    push(b, primitive.Cube2 {
-                        .model = m4.mul(model_sniper, m4.modelWithRotations(
-                                .{
-                                    .x = vars.sniper_scope_off_x,
-                                    .y = vars.sniper_scope_off_y,
-                                    .z = vars.sniper_scope_off_z,
-                                },
-                            .{.x=vars.sniper_scope_len,.y=vars.sniper_scope_w,.z=vars.sniper_scope_h},
-                            .{.x=0,.y=0,.z=0}),
-                        ),
-                    }, playerRandomColor(p.id, rand));
+            var shoot_offset: v3 = .{.x=0,.y=0,.z=0};
+            switch (weapon.state) {
+                .cooldown => {
+                    const total_cd = weapon.total_cooldown;
+                    const kt = weapon.kickback_time;
+                    const cd = (total_cd - weapon.cooldown) / total_cd;
+                    const cd_scale = @as(f32, @floatFromInt(@intFromBool(cd < kt))) * (if (cd < kt/2.0) cd else kt-cd);
+                    shoot_offset = v3.scale(-weapon.kickback_scale*cd_scale, p.aim_dir);
                 },
-                .weapon_pistol => {
-                    const offset = v3.add(v3.add(v3.add(v3.scale(vars.pistol_len/2+vars.pistol_off_y, forward),
-                                                     v3.scale(vars.pistol_off_x, right)),
-                                                     v3.scale(vars.pistol_off_z, up)),
-                                         move_offset);
+                .reload => {
+                    const total_cd = weapon.total_reload_cooldown;
+                    const cd = (total_cd - weapon.cooldown) / total_cd;
+                    const cd_scale = @as(f32, @floatFromInt(@intFromBool(cd < 1.0))) * (if (cd < 0.5) cd else 1.0-cd);
+                    shoot_offset = v3.scale(-10.0*cd_scale, up);
+                },
+                else => {},
+            }
 
+            move_offset = v3.add(move_offset, shoot_offset);
+
+            switch (weapon.type) {
+                .sniper => {
+                    const start_offset = v3.add(v3.add(v3.scale(vars.sniper_len/2+vars.sniper_off_y, forward),
+                                                       v3.scale(vars.sniper_off_x, right)),
+                                                       v3.scale(vars.sniper_off_z, up));
+
+                    const zoom_fire = p.id == player_id and weapon.state == .zoom and weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
+
+                    var offset: v3 = .{};
+                    if (weapon.state == .zoom) {
+                        const t = weapon.cooldown / weapon.total_zoom_cooldown;
+                        const end_offset = v3.add(v3.add(v3.scale(vars.sniper_scope_off_x + 8.0, forward),
+                                                         v3.scale(0.0, right)),
+                                                         v3.scale(vars.sniper_scope_off_z - 2.5, up));
+                        offset = v3.lerp(start_offset, end_offset, t);
+                        offset = v3.add(offset, v3.scale(1.0 - t, move_offset));
+                    } else {
+                        offset = v3.add(start_offset, move_offset);
+                    }
+
+                    if (!zoom_fire) {
+                        const aim_dir = if (zoom_fire) p.camera.dir else p.aim_dir;
+                        const model_sniper = m4.modelFromXDir(
+                                               v3.add(p.camera.pos, offset),
+                                               .{.x=1,.y=1,.z=1},
+                                               aim_dir);
+
+                        // barrel
+                        b.push(primitive.Cube {
+                            .model = m4.mul(model_sniper, m4.modelWithRotations(
+                                    .{.x=0,.y=0,.z=0},
+                                    .{.x=vars.sniper_len,.y=vars.sniper_w,.z=vars.sniper_w},
+                                    .{.x=0,.y=0,.z=0}),
+                            ),
+                        }, playerRandomColor(p.id, rand));
+
+                        // stock
+                        b.push(primitive.Cube {
+                            .model = m4.mul(model_sniper, m4.modelWithRotations(
+                                    .{
+                                        .x = vars.sniper_stock_off_x,
+                                        .y = vars.sniper_stock_off_y,
+                                        .z = vars.sniper_stock_off_z,
+                                    },
+                                .{.x=vars.sniper_stock_len,.y=vars.sniper_stock_w,.z=vars.sniper_stock_h},
+                                .{.x=0,.y=0,.z=0}),
+                            ),
+                        }, playerRandomColor(p.id, rand));
+
+                        // scope
+                        b.push(primitive.Cube {
+                            .model = m4.mul(model_sniper, m4.modelWithRotations(
+                                    .{
+                                        .x = vars.sniper_scope_off_x,
+                                        .y = vars.sniper_scope_off_y,
+                                        .z = vars.sniper_scope_off_z,
+                                    },
+                                .{.x=vars.sniper_scope_len,.y=vars.sniper_scope_w,.z=vars.sniper_scope_h},
+                                .{.x=0,.y=0,.z=0}),
+                            ),
+                        }, playerRandomColor(p.id, rand));
+                    }
+                },
+                .pistol => {
+                    const start_offset = v3.add(v3.add(v3.scale(vars.pistol_len/2+vars.pistol_off_y, forward),
+                                                       v3.scale(vars.pistol_off_x, right)),
+                                                       v3.scale(vars.pistol_off_z, up));
+
+                    var offset: v3 = .{};
+                    if (weapon.state == .zoom) {
+                        const t = weapon.cooldown / weapon.total_zoom_cooldown;
+                        const end_offset = v3.add(v3.add(v3.scale(vars.pistol_handle_off_x + 8.0, forward),
+                                                         v3.scale(0.0, right)),
+                                                         v3.scale(vars.pistol_handle_off_z + 0.5, up));
+                        offset = v3.lerp(start_offset, end_offset, t);
+                        offset = v3.add(offset, v3.scale(1.0 - t, move_offset));
+                    } else {
+                        offset = v3.add(start_offset, move_offset);
+                    }
+
+                    const zoom_fire = weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
+                    const aim_dir = if (zoom_fire) p.camera.dir else p.aim_dir;
                     const model_pistol = m4.modelFromXDir(
                                            v3.add(p.camera.pos, offset),
                                            .{.x=1,.y=1,.z=1},
-                                           p.aim_dir);
-
+                                           aim_dir);
 
                     // barrel
-                    push(b, primitive.Cube2 {
+                    b.push(primitive.Cube {
                         .model = m4.mul(model_pistol, m4.modelWithRotations(
-                                .{.x=0,.y=0,.z=0},
-                                .{.x=vars.pistol_len,.y=vars.pistol_w,.z=vars.pistol_w},
-                                .{.x=0,.y=0,.z=0}),
+                            .{.x=0,.y=0,.z=0},
+                            .{.x=vars.pistol_len,.y=vars.pistol_w,.z=vars.pistol_w},
+                            .{.x=0,.y=0,.z=0}),
                         ),
                     }, playerRandomColor(p.id, rand));
 
                     // handle
-                    push(b, primitive.Cube2 {
+                    b.push(primitive.Cube {
                         .model = m4.mul(model_pistol, m4.modelWithRotations(
                             .{
                                 .x = vars.pistol_handle_off_x,
@@ -1183,8 +1279,25 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                             .{.x=0,.y=0,.z=0}),
                         ),
                     }, playerRandomColor(p.id, rand));
+
+                    // scope
+                    b.push(primitive.Cube {
+                        .model = m4.mul(model_pistol, m4.modelWithRotations(
+                            .{
+                                .x = vars.pistol_len/2.0 - vars.pistol_scope_len/2.0,
+                                .y = 0.0,
+                                .z = vars.pistol_w/2.0 + vars.pistol_scope_h/2.0,
+                            },
+                            .{
+                                .x=vars.pistol_scope_len,
+                                .y=vars.pistol_scope_w,
+                                .z=vars.pistol_scope_h
+                            },
+                            .{.x=0,.y=0,.z=0}),
+                        ),
+                    }, playerRandomColor(p.id, rand));
                 },
-                .weapon_nade => {
+                .nade => {
                 },
             }
         }
@@ -1194,7 +1307,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
     for (memory.hitscans.constSlice()) |h| {
         var col = playerRandomColor(h.id_from, rand);
         col.a = @intFromFloat(255.0*h.time_left/h.total_time);
-        push(b, primitive.Cube2 {
+        b.push(primitive.Cube {
             .model = m4.modelFromXDir(
                 v3.add(h.ray.pos, v3.scale(h.ray.len/2 + 2, h.ray.dir)),
                 .{.x=h.ray.len,.y=h.width,.z=h.width},
@@ -1203,12 +1316,12 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
         }, col);
     }
 
-    end3d(b);
+    b.push(primitive.End3d{}, .{});
 
-    begin2d(b, primitive.Camera2d {
+    b.push(primitive.Camera2d {
         .target = memory.target,
         .zoom = memory.zoom,
-    });
+    }, .{});
     //    if (vars.speedometer) {
     //        graphAppend(&memory.vel_graph, v3.len(memory.players.buffer[0].vel));
     //        drawGraph(b, &memory.vel_graph,
@@ -1224,7 +1337,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
         //        raylib.EnableCursor();
         //    }
             const console_height = 1.0/3.0;
-            pushRectangle(b, .{
+            b.push(primitive.Rectangle{
                 .pos = .{
                     .x = 0,
                     .y = 1 - (console_height - textheight),
@@ -1234,7 +1347,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                     .y = console_height,
                 }
             }, hsvToRgb(200, 0.5, 0.25));
-            pushRectangle(b, .{
+            b.push(primitive.Rectangle{
                 .pos = .{
                     .x = 0,
                     .y = 1 - console_height,
@@ -1257,7 +1370,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                 };
                 @memset(&text.str, 0);
                 std.mem.copy(u8, &text.str, memory.console_input.slice());
-                pushText(b, text, hsvToRgb(200, 0.75, 0.75));
+                b.push(text, hsvToRgb(200, 0.75, 0.75));
             }
         }
 
@@ -1275,8 +1388,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
             @memset(&text.str, 0);
 
             {
-
-                drawProfileData(memory, b);
+                //drawProfileData(memory, b);
                 //var x_offset: f32 = 5.0;
                 //if (vars.draw_fps) {
 
@@ -1294,22 +1406,36 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                     //}
                 //}
             }
+            
+            @memset(&text.str, 0);
+            {
+                if (memory.stat_data.findId("frame")) |id| {
+                    const result = memory.stat_data.entries.buffer[id].mean_std();
+                    const str = std.fmt.bufPrint(&text.str, "fps: {d:5.0}", .{1000000000 / result.avg}) catch unreachable;
+                    text.len = str.len;
+                    text.pos.x = 0.0;
+                    b.push(text, hsvToRgb(200, 0.75, 0.75));
+                }
+            }
+
 
             @memset(&text.str, 0);
             {
                 const str = std.fmt.bufPrint(&text.str, "speed: {d:5.0}", .{v3.len(memory.players.get(0).vel)}) catch unreachable;
                 text.len = str.len;
                 text.pos.x = 1.0 - 0.3;
-                pushText(b, text, hsvToRgb(200, 0.75, 0.75));
+                b.push(text, hsvToRgb(200, 0.75, 0.75));
             }
 
+            // ammo
             @memset(&text.str, 0);
             {
-                const str = std.fmt.bufPrint(&text.str, "onground: {}", .{memory.players.get(0).onground}) catch unreachable;
+                const size = 0.05;
+                const str = std.fmt.bufPrint(&text.str, "{}", .{player.weapons[player.weapon_current].ammo}) catch unreachable;
                 text.len = str.len;
-                text.pos.x = 0.0;
+                text.pos.x = 1.0 - 3*size + size + size/4.0;
                 text.pos.y = 0.05;
-                pushText(b, text, hsvToRgb(200, 0.75, 0.75));
+                b.push(text, hsvToRgb(200, 0.75, 0.75));
             }
 
             // killfeed
@@ -1320,7 +1446,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                     const entry = &memory.killfeed.data[index];
 
                     const size = 0.05;
-                    push(b, primitive.Rectangle {
+                    b.push(primitive.Rectangle {
                         .pos = .{
                             .x = 1.0 - 3*size,
                             .y = 1.0 - (size + 1.5*size*@as(f32, @floatFromInt(i))),
@@ -1328,7 +1454,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                         .size = .{.x = size, .y = size},
                     }, playerColor(entry.from));
 
-                    push(b, primitive.Rectangle {
+                    b.push(primitive.Rectangle {
                         .pos = .{
                             .x = 1.0 - 3*size + 2*size,
                             .y = 1.0 - (size + 1.5*size*@as(f32, @floatFromInt(i))),
@@ -1342,7 +1468,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
                         text.len = str.len;
                         text.pos.x = 1.0 - 3*size + size + size/4.0;
                         text.pos.y = 1.0 - (size - size/4.0 + 1.5*size*@as(f32, @floatFromInt(i)));
-                        pushText(b, text, hsvToRgb(200, 0.75, 0.75));
+                        b.push(text, hsvToRgb(200, 0.75, 0.75));
                     }
                 }
             }
@@ -1352,7 +1478,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
         if (input.isset(.InMenu)) {
             // cursor
             const cursor_size = 0.01;
-            push(b, primitive.Rectangle {
+            b.push(primitive.Rectangle {
                 .pos = .{
                     .x = memory.cursor_pos.x - cursor_size/2.0,
                     .y = memory.cursor_pos.y - cursor_size/2.0,
@@ -1364,52 +1490,153 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.Buffer, player_i
             }, hsvToRgb(350, 0.75, 0.75));
 
         } else {
+            const weapon = player.weapons[player.weapon_current];
+            const zoom_fire = weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
+
             // Crosshair
-            const cursor_thickness = 0.005;
-            const cursor_length = 0.01;
-            const cursor_gap = 0.02;
-            push(b, primitive.Rectangle {
-                .pos = .{
-                    .x = 0.5 - cursor_gap/2.0 - cursor_length,
-                    .y = 0.5 - cursor_thickness/2.0,
-                },
-                .size = .{
-                    .x = cursor_length,
-                    .y = cursor_thickness,
-                },
-            }, hsvToRgb(350, 0.75, 0.75));
-            push(b, primitive.Rectangle {
-                .pos = .{
-                    .x = 0.5 + cursor_gap/2.0,
-                    .y = 0.5 - cursor_thickness/2.0,
-                },
-                .size = .{
-                    .x = cursor_length,
-                    .y = cursor_thickness,
-                },
-            }, hsvToRgb(350, 0.75, 0.75));
-            push(b, primitive.Rectangle {
-                .pos = .{
-                    .x = 0.5 - cursor_thickness/2.0,
-                    .y = 0.5 + cursor_gap/2.0,
-                },
-                .size = .{
-                    .x = cursor_thickness,
-                    .y = cursor_length,
-                },
-            }, hsvToRgb(350, 0.75, 0.75));
-            push(b, primitive.Rectangle {
-                .pos = .{
-                    .x = 0.5 - cursor_thickness/2.0,
-                    .y = 0.5 - cursor_gap/2.0 - cursor_length,
-                },
-                .size = .{
-                    .x = cursor_thickness,
-                    .y = cursor_length,
-                },
-            }, hsvToRgb(350, 0.75, 0.75));
+            if (input.isset(.Editor)) {
+                const cursor_thickness = 0.004;
+                const color = hsvToRgb(
+                    (360.0/8.0) * @as(f32, @floatFromInt(player_id % 8)),
+                    0.3,
+                    0.9,
+                );
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.5 - cursor_thickness/2.0,
+                        .y = 0.5 - cursor_thickness/2.0,
+                    },
+                    .size = .{
+                        .x = cursor_thickness,
+                        .y = cursor_thickness,
+                    },
+                }, color);
+            } else if (!zoom_fire) {
+                const cursor_thickness = 0.004;
+                const cursor_length = 0.01;
+                const cursor_gap = 0.03;
+                const color = hsvToRgb(
+                    (360.0/8.0) * @as(f32, @floatFromInt(player_id % 8)),
+                    0.3,
+                    0.9,
+                );
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.5 - cursor_gap/2.0 - cursor_length,
+                        .y = 0.5 - cursor_thickness/2.0,
+                    },
+                    .size = .{
+                        .x = cursor_length,
+                        .y = cursor_thickness,
+                    },
+                }, color);
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.5 + cursor_gap/2.0,
+                        .y = 0.5 - cursor_thickness/2.0,
+                    },
+                    .size = .{
+                        .x = cursor_length,
+                        .y = cursor_thickness,
+                    },
+                }, color);
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.5 - cursor_thickness/2.0,
+                        .y = 0.5 + cursor_gap/2.0,
+                    },
+                    .size = .{
+                        .x = cursor_thickness,
+                        .y = cursor_length,
+                    },
+                }, color);
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.5 - cursor_thickness/2.0,
+                        .y = 0.5 - cursor_gap/2.0 - cursor_length,
+                    },
+                    .size = .{
+                        .x = cursor_thickness,
+                        .y = cursor_length,
+                    },
+                }, color);
+            } else if (zoom_fire) {
+                // Sniper crosshair
+                const cursor_thickness = 0.0025;
+                const gap = 0.75;
+
+                const color = hsvToRgb(
+                    (360.0/8.0) * @as(f32, @floatFromInt(player_id % 8)),
+                    0.8,
+                    0.2,
+                );
+
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.0,
+                        .y = 0.5 - cursor_thickness/2.0,
+                    },
+                    .size = .{
+                        .x = 1.0,
+                        .y = cursor_thickness,
+                    },
+                }, color);
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.5 - cursor_thickness/2.0,
+                        .y = 0.0,
+                    },
+                    .size = .{
+                        .x = cursor_thickness,
+                        .y = 1.0,
+                    },
+                }, color);
+
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.0,
+                        .y = 0.5+gap/2.0,
+                    },
+                    .size = .{
+                        .x = 1.0,
+                        .y = 0.5-gap/2.0,
+                    },
+                }, color);
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.0,
+                        .y = 0.0,
+                    },
+                    .size = .{
+                        .x = 1.0,
+                        .y = 0.5-gap/2.0,
+                    },
+                }, color);
+
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.5+gap/2.0,
+                        .y = 0.0,
+                    },
+                    .size = .{
+                        .x = 0.5-gap/2.0,
+                        .y = 1.0,
+                    },
+                }, color);
+                b.push(primitive.Rectangle {
+                    .pos = .{
+                        .x = 0.0,
+                        .y = 0.0,
+                    },
+                    .size = .{
+                        .x = 0.5-gap/2.0,
+                        .y = 1.0,
+                    },
+                }, color);
+
+            }
         }
-    end2d(b);
+    b.push(primitive.End2d{}, .{});
 }
 
 fn playerColor(id: common.EntityId) Color {
@@ -1435,7 +1662,7 @@ fn drawCenteredLine(b: *draw_api.Buffer, start: v2, end: v2, thickness: f32, col
     const new_start = v2.add(start, v2.scale(thickness/2.0, ortho));
     const new_end = v2.add(end, v2.scale(thickness/2.0, ortho));
 
-    pushLine(b, .{
+    b.push(b, primitive.Line{
         .start = new_start,
         .end = new_end,
         .thickness = thickness,
@@ -1445,7 +1672,7 @@ fn drawCenteredLine(b: *draw_api.Buffer, start: v2, end: v2, thickness: f32, col
 fn drawGraph(b: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f32, s: f32, v: f32) void {
     var bg = hsvToRgb(50.0, 0.75, 0.05);
     bg.a = @intFromFloat(0.75 * 255.0);
-    pushRectangle(b, .{
+    b.push(b, primitive.Rectangle{
         .pos = pos,
         .size = size,
     }, bg);
@@ -1488,7 +1715,7 @@ fn drawGraph(b: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f
         last_y = y;
     }
 
-    pushLine(b, .{
+    b.push(primitive.Line{
         .start =.{
             .x = pos.x + margin.x + scale_x * @as(f32, @floatFromInt(g.top)),
             .y = pos.y,
@@ -1501,7 +1728,7 @@ fn drawGraph(b: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f
     }, Color{.r = 128, .g = 128, .b = 128, .a = 255});
 }
 
-fn drawProfileData(memory: *Memory, b: *draw_api.Buffer) void {
+fn drawProfileData(memory: *Memory, b: *draw_api.CommandBuffer) void {
     var worklist: std.BoundedArray(struct {
         entry: *stat.StatEntry = undefined,
         depth: u32 = 0,
@@ -1538,7 +1765,7 @@ fn drawProfileData(memory: *Memory, b: *draw_api.Buffer) void {
 
         text.len = str.len;
         text.pos.x = fontsize*@as(f32, @floatFromInt(work.depth));
-        pushText(b, text, hsvToRgb(200, 0.75, 0.75));
+        b.push(text, hsvToRgb(200, 0.75, 0.75));
         text.pos.y -= fontsize;
 
         for (work.entry.children.slice()) |i| {

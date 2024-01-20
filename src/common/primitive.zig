@@ -4,10 +4,10 @@ const v3 = math.v3;
 const m4 = math.m4;
 
 pub const Color = struct {
-    r: u8,
-    g: u8,
-    b: u8,
-    a: u8,
+    r: u8 = 0,
+    g: u8 = 0,
+    b: u8 = 0,
+    a: u8 = 0,
 };
 
 pub const Text = struct {
@@ -38,11 +38,6 @@ pub const Rectangle = struct {
 };
 
 pub const Cube = struct {
-    pos: v3,
-    size: v3,
-};
-
-pub const Cube2 = struct {
     model: m4,
 };
 
@@ -72,3 +67,6 @@ pub const Vector = struct {
     pos: v3,
     scale: f32,
 };
+
+//pub const Texture  = struct {
+//};

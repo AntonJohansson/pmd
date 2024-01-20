@@ -14,8 +14,6 @@ var log: logging.Log = .{
     .mirror_to_stdio = true,
 };
 
-const message_receive_buffer_len = 128;
-
 const ClientHost = struct {
     fd: std.os.socket_t,
 };
@@ -45,9 +43,7 @@ const ReliableMessageInfo = struct {
     reliable: bool,
 };
 
-var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-const gpa = general_purpose_allocator.allocator();
-pub var frame_allocator: std.mem.Allocator = undefined;
+pub var mem: common.MemoryAllocators = .{};
 
 pub var input_buffer_stat: stat.StatEntry = .{};
 pub var output_buffer_stat: stat.StatEntry = .{};
@@ -76,8 +72,8 @@ pub const Host = struct {
     fd: std.os.socket_t = undefined,
 };
 
-pub fn bind(allocator: std.mem.Allocator, port: u16) ?Host {
-    const addr_list = std.net.getAddressList(allocator, "0.0.0.0", port) catch return null;
+pub fn bind(port: u16) ?Host {
+    const addr_list = std.net.getAddressList(mem.frame, "0.0.0.0", port) catch return null;
     defer addr_list.deinit();
 
     const flags = os.SOCK.DGRAM | os.SOCK.CLOEXEC | os.SOCK.NONBLOCK;
@@ -95,14 +91,21 @@ pub fn bind(allocator: std.mem.Allocator, port: u16) ?Host {
     return null;
 }
 
-pub fn connect(allocator: std.mem.Allocator, host: *Host, ip: []const u8, port: u16) ?PeerIndex {
-    const addr_list = std.net.getAddressList(allocator, ip, port) catch return null;
+pub fn connect(host: *Host, ip: []const u8, port: u16) ?PeerIndex {
+    const addr_list = std.net.getAddressList(mem.frame, ip, port) catch |err| {
+        log.err("Failed to get address list ({})", .{err});
+        return null;
+    };
     defer addr_list.deinit();
 
     const flags = os.SOCK.DGRAM | os.SOCK.CLOEXEC | os.SOCK.NONBLOCK;
     for (addr_list.addrs) |a| {
-        const fd = os.socket(a.any.family, flags, 0) catch continue;
-        os.connect(fd, &a.any, a.getOsSockLen()) catch {
+        const fd = os.socket(a.any.family, flags, 0) catch |err| {
+            log.info("Failed to create socket with flags {} ({})", .{flags, err});
+            continue;
+        };
+        os.connect(fd, &a.any, a.getOsSockLen()) catch |err| {
+            log.info("Failed to connect ({})", .{err});
             os.closeSocket(fd);
             continue;
         };
@@ -133,17 +136,23 @@ pub fn pushMessage(index: PeerIndex, message: anytype) void {
    peer.current_message_id = @addWithOverflow(peer.current_message_id, 1)[0];
 
    const size = @sizeOf(headers.Header) + @sizeOf(@TypeOf(message));
-   var memory = frame_allocator.alloc(u8, size) catch unreachable;
+   var memory = mem.frame.alloc(u8, size) catch unreachable;
 
+   const kind = comptime packet_meta.mapMessageToKind(@TypeOf(message));
    @as(*align(1) headers.Header, @ptrCast(memory.ptr)).* = headers.Header{
-       .kind = comptime packet_meta.mapMessageToKind(@TypeOf(message)),
+       .kind = kind,
        .id = message_id,
        .reliable = false,
    };
    @as(*align(1) @TypeOf(message), @ptrCast(memory.ptr + @sizeOf(headers.Header))).* = message;
 
    // TODO(anjo): verbose
-   //log.info("adding message {} / {} to peer {} queue", .{message_id, message_id % peer.messages_in_flight.data.len, index});
+   log.info("Pushing message", .{});
+   log.info("  message id: {}", .{message_id});
+   log.info("  message kind: {}", .{kind});
+   log.info("  message size: {}", .{@sizeOf(@TypeOf(message))});
+   log.info("  message index: {}", .{message_id % peer.messages_in_flight.data.len});
+   log.info("  message ptr: {*}",  .{memory.ptr});
 
    peer.messages_in_flight.set(message_id, ReliableMessageInfo {
        .id = message_id,
@@ -160,7 +169,7 @@ pub fn pushReliableMessage(index: PeerIndex, message: anytype) void {
    peer.current_message_id += 1;
 
    const size = @sizeOf(headers.Header) + @sizeOf(@TypeOf(message));
-   var memory = gpa.alloc(u8, size) catch unreachable;
+   var memory = mem.persistent.alloc(u8, size) catch unreachable;
 
    @as(*align(1) headers.Header, @ptrCast(memory.ptr)).* = headers.Header{
        .kind = comptime packet_meta.mapMessageToKind(@TypeOf(message)),
@@ -216,6 +225,7 @@ const ReceivedMessageInfo = struct {
 
 const ReceivedData = struct {
     peer_index: PeerIndex,
+    packet_header: headers.BatchHeader,
     data: []u8,
 };
 
@@ -227,14 +237,16 @@ const PeerState = enum(u8) {
 
 const peer_timeout = 5*std.time.ns_per_s;
 
+const message_receive_buffer_len = 255;
+
 const Peer = struct {
     state: PeerState = .Disconnected,
     address: ?std.net.Address = null,
     timeout: u64 = 0,
     salt: u64 = 0,
-    received_messages: bb.SequenceBuffer(ReceivedMessageInfo, u16, 255) = .{},
-    packets_in_flight: bb.SequenceBuffer(PacketData, u16, 255) = .{},
-    messages_in_flight: bb.SequenceBuffer(ReliableMessageInfo, u16, 255) = .{},
+    received_messages: bb.SequenceBuffer(ReceivedMessageInfo, u16, message_receive_buffer_len) = .{},
+    packets_in_flight: bb.SequenceBuffer(PacketData, u16, message_receive_buffer_len) = .{},
+    messages_in_flight: bb.SequenceBuffer(ReliableMessageInfo, u16, message_receive_buffer_len) = .{},
 
     current_packet_id: u16 = 0,
     current_message_id: u16 = 0,
@@ -274,95 +286,86 @@ fn findAvailablePeerIndex() PeerIndex {
 var input_buffer: bb.ByteBuffer(8192) = .{};
 
 pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
-    var total_bytes_read: u64 = 0;
     var received_data: std.BoundedArray(ReceivedData, 128) = .{};
-    input_buffer.clear();
     while (true) {
+        input_buffer.clear();
+
         const nbytes = os.recvfrom(host.fd, input_buffer.remainingData(), 0, null, null) catch 0;
-        if (nbytes == 0)
+        if (nbytes == 0) {
             break;
-        total_bytes_read += nbytes;
-
-        received_data.append(ReceivedData {
-            .peer_index = 0,
-            .data = input_buffer.data[input_buffer.top..input_buffer.top+nbytes],
-        }) catch unreachable;
+        }
+        if (nbytes < @sizeOf(headers.BatchHeader)) {
+            log.info("Recieved less data than packet header size", .{});
+            break;
+        }
         input_buffer.top += @intCast(nbytes);
-    }
 
-    input_buffer_stat.samples.push(input_buffer.top);
+        log.info("Received {} bytes", .{nbytes});
+        while (input_buffer.hasData()) {
+            const packet_header = input_buffer.pop(headers.BatchHeader);
+            if (input_buffer.size() < packet_header.size) {
+                log.info("Received partial packet {}/{} bytes", .{input_buffer.size(), packet_header.size});
+                break;
+            }
+            if (packet_header.num_packets == 0) {
+                log.info("Recieved empty packet", .{});
+                break;
+            }
+
+            log.info("  Contains packet", .{});
+            log.info("    num messages {}", .{packet_header.num_packets});
+            log.info("    size {}", .{packet_header.size});
+
+            const data = mem.frame.alloc(u8, packet_header.size) catch unreachable;
+            @memcpy(data, input_buffer.dataSlice());
+            input_buffer.bottom += packet_header.size;
+
+            received_data.append(ReceivedData {
+                .peer_index = 0,
+                .packet_header = packet_header,
+                .data = data,
+            }) catch unreachable;
+        }
+    }
 
     var peer = &peers.buffer[peer_index];
 
     var num_events: usize = 0;
-    var events = frame_allocator.alloc(Event, 128) catch unreachable;
+    var events = mem.frame.alloc(Event, 128) catch unreachable;
 
     // TODO(anjo): This might be candidate for threading if there
     // are enough entries.
+    log.info("Processing packets", .{});
     for (received_data.slice()) |data| {
-        if (data.data.len < @sizeOf(headers.BatchHeader)) {
-            // TODO(anjo): Handle partial packets?
-            // This happens after tabbing on my machine, we recieve a very small packet for some reason
-            continue;
+        // TODO(anjo): Verify packet here
+
+        if (data.packet_header.reliable) {
+            ack(peer, data.packet_header.id);
         }
+        process_ack(data.peer_index, data.packet_header);
 
         var byte_view = bb.ByteView{
             .data = data.data,
         };
-        while (byte_view.hasData()) {
-            const batch_header = byte_view.pop(headers.BatchHeader);
-            if (batch_header.num_packets == 0) {
-                log.info("Empty batch??", .{});
-                break;
+
+        log.info("  size: {}", .{byte_view.data.len});
+
+        // iterate over all message headers
+        var i: u16 = 0;
+        while (byte_view.hasData() and i < data.packet_header.num_packets) : (i += 1) {
+            const header = byte_view.pop(headers.Header);
+            const size = packet_meta.getMessageSize(header.kind);
+
+            log.info("  Message", .{});
+            log.info("    size: {}", .{size});
+
+            if (!header.reliable or peer.received_messages.get(header.id) == null) {
+                peer.received_messages.set(header.id, ReceivedMessageInfo {
+                    .kind = header.kind,
+                    .data = byte_view.data[byte_view.bottom..byte_view.bottom+size],
+                });
             }
-
-            //
-            // Here we make the assumption that
-            //
-            //  sizeof(input_buffer) > max_packet_size
-            //
-            // and most of the time, a single packet fits within
-            // a single ReceivedData entry.
-            //
-            // The uncommon case should only occur when a packet is cut of
-            // by the end of the input buffer, meaning we should be able
-            // to read from the socket again this frame and complete the
-            // packet.
-            //
-            // Either way we want to use the temporary allocator to
-            // get a buffer that'll fit the packet exactcly and assemble
-            // it there next frame or this frame. Note, we can assume
-            // that the remaining data of a fragmeneted packet can be
-            // uniquely identified via it's size (i.e. we assume we won't
-            // have partial packets for the same peer with the same data
-            // remaining).
-            //
-            if (batch_header.size > byte_view.remainingSpace()) {
-                log.info("We received a partial packet, expected {}B, got {}B", .{batch_header.size, byte_view.remainingSpace()});
-                log.info("dropping", .{});
-                break;
-            }
-
-            // TODO(anjo): Verify packet here
-
-            if (batch_header.reliable)
-                ack(peer, batch_header.id);
-            process_ack(data.peer_index, batch_header);
-
-            // iterate over all message headers
-            var i: u16 = 0;
-            while (byte_view.hasData() and i < batch_header.num_packets) : (i += 1) {
-                const header = byte_view.pop(headers.Header);
-                const size = packet_meta.getMessageSize(header.kind);
-
-                if (!header.reliable or peer.received_messages.get(header.id) == null) {
-                    peer.received_messages.set(header.id, ReceivedMessageInfo {
-                        .kind = header.kind,
-                        .data = byte_view.data[byte_view.bottom..byte_view.bottom+size],
-                    });
-                }
-                byte_view.advance(@intCast(size));
-            }
+            byte_view.advance(@intCast(size));
         }
     }
 
@@ -418,28 +421,27 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
         }
 
     } else if (peer.state == .Connected) {
+         //
+         // Collection of messages into events
+         //
 
-            //
-            // Collection of messages into events
-            //
-
-            var i: u16 = 0;
-            while (i < peer.received_messages.data.len) : (i += 1) {
-                if (peer.received_messages.isset(i) and !peer.received_messages.data[i].acked) {
-                    const rmi = peer.received_messages.data[i];
-                    peer.received_messages.data[i].acked = true;
-                    events[num_events] = Event {
-                        .message_received = .{
-                            .peer_index = peer_index,
-                            .kind = rmi.kind,
-                            .data = rmi.data,
-                        },
-                    };
-                    //peer.received_messages.unset(i);
-                    num_events += 1;
-                }
-            }
-        }
+         var i: u16 = 0;
+         while (i < peer.received_messages.data.len) : (i += 1) {
+             if (peer.received_messages.isset(i) and !peer.received_messages.data[i].acked) {
+                 const rmi = peer.received_messages.data[i];
+                 peer.received_messages.data[i].acked = true;
+                 events[num_events] = Event {
+                     .message_received = .{
+                         .peer_index = peer_index,
+                         .kind = rmi.kind,
+                         .data = rmi.data,
+                     },
+                 };
+                 //peer.received_messages.unset(i);
+                 num_events += 1;
+             }
+         }
+    }
 
 
     return events[0..num_events];
@@ -468,11 +470,9 @@ pub const Event = union(enum) {
 pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
     var their_sa: os.sockaddr.storage = undefined;
     var sl: u32 = @sizeOf(os.sockaddr.storage);
-    var total_bytes_read: u64 = 0;
     var received_data: std.BoundedArray(ReceivedData, 128) = .{};
-    input_buffer.clear();
     var num_events: usize = 0;
-    var events = frame_allocator.alloc(Event, 128) catch unreachable;
+    var events = mem.frame.alloc(Event, 128) catch unreachable;
 
     // Timeout disconnected peers
     const tickrate = 165; // TODO: move somewhere
@@ -494,10 +494,17 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
     }
 
     while (true) {
+        input_buffer.clear();
+
         const nbytes = os.recvfrom(fd, input_buffer.remainingData(), 0, @ptrCast(&their_sa), &sl) catch 0;
-        if (nbytes == 0)
+        if (nbytes == 0) {
             break;
-        total_bytes_read += nbytes;
+        }
+        if (nbytes < @sizeOf(headers.BatchHeader)) {
+            log.info("Recieved less data than packet header size", .{});
+            break;
+        }
+        input_buffer.top += @intCast(nbytes);
 
         const address = std.net.Address.initPosix(@ptrCast(&their_sa));
 
@@ -523,25 +530,34 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
             break :blk index;
         };
 
-        log.info("received {} bytes from ({}) {}", .{nbytes, peer_index, address});
         // Reset peer_timeout since we received data from the peer.
         peers.buffer[peer_index].timeout = peer_timeout;
 
-        received_data.append(ReceivedData {
-            .peer_index = peer_index,
-            .data = input_buffer.data[input_buffer.top..input_buffer.top+nbytes],
-        }) catch unreachable;
+        log.info("received {} bytes from ({}) {}", .{nbytes, peer_index, address});
+        while (input_buffer.hasData()) {
+            const packet_header = input_buffer.pop(headers.BatchHeader);
+            if (input_buffer.size() < packet_header.size) {
+                log.info("Received partial packet {}/{} bytes", .{input_buffer.size(), packet_header.size});
+                break;
+            }
+            if (packet_header.num_packets == 0) {
+                log.info("Recieved empty packet", .{});
+                break;
+            }
 
-        input_buffer.top += @intCast(nbytes);
+            const data = mem.frame.alloc(u8, packet_header.size) catch unreachable;
+            @memcpy(data, input_buffer.dataSlice());
+            input_buffer.bottom += packet_header.size;
+
+            received_data.append(ReceivedData {
+                .peer_index = peer_index,
+                .packet_header = packet_header,
+                .data = data,
+            }) catch unreachable;
+        }
     }
 
-    input_buffer_stat.samples.push(input_buffer.top);
-
     var peers_with_data: std.BoundedArray(PeerIndex, max_peer_count) = .{};
-    //for (received_data.slice()) |data| {
-    //    var peer = &peers.buffer[data.peer_index];
-    //    peer.received_messages.clear();
-    //}
 
     // TODO(anjo): This might be candidate for threading if there
     // are enough entries.
@@ -549,48 +565,34 @@ pub fn receiveMessagesServer(fd: std.os.socket_t) []Event {
         var peer = &peers.buffer[data.peer_index];
 
         // TODO(anjo): verbose
-        //log.info("data for {} of size {}", .{data.peer_index, data.data.len});
+
+        if (data.packet_header.reliable) {
+            ack(peer, data.packet_header.id);
+        }
+        process_ack(data.peer_index, data.packet_header);
+
+        // TODO(anjo): Verify packet here
 
         var byte_view = bb.ByteView{
             .data = data.data,
         };
-        while (byte_view.hasData()) {
-            const batch_header = byte_view.pop(headers.BatchHeader);
-            std.debug.assert(batch_header.num_packets > 0);
 
-            // TODO(anjo): verbose
-            //log.info("packet with {} messages", .{batch_header.num_packets});
+        // iterate over all message headers
+        var i: u16 = 0;
+        while (byte_view.hasData() and i < data.packet_header.num_packets) : (i += 1) {
+            const header = byte_view.pop(headers.Header);
+            const size = packet_meta.getMessageSize(header.kind);
 
-            // TODO(anjo): Verify packet here
+            std.debug.assert(byte_view.hasSpaceFor(@intCast(size)));
 
-            if (batch_header.reliable)
-                ack(peer, batch_header.id);
-            process_ack(data.peer_index, batch_header);
-
-            // iterate over all message headers
-            var i: u16 = 0;
-            while (byte_view.hasData() and i < batch_header.num_packets) : (i += 1) {
-                const header = byte_view.pop(headers.Header);
-                const size = packet_meta.getMessageSize(header.kind);
-
-                if (!byte_view.hasSpaceFor(@intCast(size))) {
-                    log.info("We received a partial packet, what do!", .{});
-                    std.debug.assert(false);
-                    // CONTHERE: We currently crash here for some reason
-                    // we're trying to get ack packets working, check this
-                    // with a lot of logging.
-                    // TODO(anjo): what do
-                }
-
-                if (!header.reliable or peer.received_messages.get(header.id) == null) {
-                    peer.received_messages.set(header.id, ReceivedMessageInfo {
-                        .kind = header.kind,
-                        .data = byte_view.data[byte_view.bottom..byte_view.bottom+size],
-                    });
-                    peers_with_data.append(data.peer_index) catch unreachable;
-                }
-                byte_view.advance(@intCast(size));
+            if (!header.reliable or peer.received_messages.get(header.id) == null) {
+                peer.received_messages.set(header.id, ReceivedMessageInfo {
+                    .kind = header.kind,
+                    .data = byte_view.data[byte_view.bottom..byte_view.bottom+size],
+                });
+                peers_with_data.append(data.peer_index) catch unreachable;
             }
+            byte_view.advance(@intCast(size));
         }
     }
 
@@ -707,14 +709,14 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
 
     var total_bytes_sent: u64 = 0;
 
-    // TODO(anjo): use temporary allocator instead
-    var output_buffer = bb.ByteBufferSlice.init(frame_allocator, 8192);
+    var output_buffer = bb.ByteBufferSlice.init(mem.frame, 8192);
     output_buffer.push(headers.BatchHeader{
         .num_packets = 0,
         .id = 0,
     });
     var header: *align(1) headers.BatchHeader = @ptrCast(&output_buffer.data[0]);
 
+    log.info("Constructing packet", .{});
     var have_reliable_packets = false;
     var packet_data: PacketData = .{};
     if (right_wrap_distance(peer.last_outgoing_acked_message_id, peer.current_message_id, peer.messages_in_flight.data.len) > 0) {
@@ -723,16 +725,27 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
         var id = peer.last_outgoing_acked_message_id;
         while (id != peer.current_message_id and id != (@addWithOverflow(peer.last_outgoing_acked_message_id, message_receive_buffer_len-1)[0]) % peer.messages_in_flight.data.len) : (id = @addWithOverflow(id, 1)[0]) {
             // TODO(anjo): verbose
-            //log.info("  checking id {}", .{id});
+            log.info("  checking id {}", .{id});
 
             const index: u16 = id % @as(u16, @intCast(peer.messages_in_flight.data.len));
             if (peer.messages_in_flight.isset(index)) {
                 const rmi = peer.messages_in_flight.data[index];
+                
+                {
+                    const h: *align(1) const headers.Header = @ptrCast(rmi.data.ptr);
+                    log.info("  Attempting to add message w. id {}", .{rmi.id});
+                    log.info("    kind: {}", .{h.kind});
+                    log.info("    size: {}", .{rmi.data.len});
+                    log.info("    ptr:  {*}", .{rmi.data.ptr});
+                }
 
                 // TODO(anjo): verbose
                 //log.info("  found message in flight", .{});
                 if (rmi.data.len > output_buffer.remainingSize()) {
-                    log.info("Packet {} of size {} too large for buffer {}/{}", .{rmi.id, rmi.data.len, output_buffer.remainingSize(), output_buffer.data.len});
+                    log.info("  Packet {} of size {} too large for buffer {}/{}", .{rmi.id, rmi.data.len, output_buffer.size(), output_buffer.data.len});
+                    if (!rmi.reliable or rmi.acked) {
+                        peer.messages_in_flight.unset(index);
+                    }
                     break;
                 }
                 // TODO(anjo): verbose
@@ -744,6 +757,7 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
                     peer.messages_in_flight.unset(index);
                 }
 
+                log.info("  Adding data of size {} bytes", .{rmi.data.len});
                 std.mem.copy(u8, output_buffer.data[output_buffer.top..output_buffer.top+rmi.data.len], rmi.data);
                 output_buffer.top += @intCast(rmi.data.len);
                 header.num_packets += 1;
@@ -753,8 +767,8 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
     } else {
         // TODO(anjo): verbose
         //log.info("wrap {} {}", .{peer.last_outgoing_acked_message_id, peer.current_message_id});
+        log.info("  No messages in queue", .{});
     }
-
 
     output_buffer_stat.samples.push(output_buffer.size());
 
@@ -782,6 +796,8 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
         entry.batch.header = @ptrCast(&entry.batch.buffer.data[0]);
         entry.push_time = timer.?.read();
         entry.address = peer.address;
+    } else {
+        log.info("  No packets in header", .{});
     }
 
     //}
@@ -796,7 +812,9 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
             const data = entry.batch.buffer.data[0..entry.batch.buffer.top];
             const bytes_sent = std.os.sendto(host.fd, data, 0, addr, len) catch 0;
             if (bytes_sent != data.len) {
-                std.log.info("Tried to send {}, actually sent {}", .{data.len, bytes_sent});
+                log.info("Tried to send {}, actually sent {}", .{data.len, bytes_sent});
+            } else {
+                log.info("Sent {} bytes", .{bytes_sent});
             }
             std.debug.assert(bytes_sent == data.len);
 
@@ -806,6 +824,8 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
             total_bytes_sent += bytes_sent;
             //net_stats.get(.NetOut).samples.push(total_bytes_sent);
         }
+    } else {
+        log.info("  No entries in queue", .{});
     }
 
 }
@@ -840,7 +860,7 @@ fn right_wrap_distance(a: u16, b: u16, len: u16) u16 {
 // process ack bits and remove reliable packages that have been
 // acked.
 //
-pub fn process_ack(peer_index: PeerIndex, batch: *align(1) const headers.BatchHeader) void {
+pub fn process_ack(peer_index: PeerIndex, batch: headers.BatchHeader) void {
     const peer = &peers.buffer[peer_index];
 
     // NOTE(anjo): If there's a really big delay between receiving packets
@@ -863,7 +883,7 @@ pub fn process_ack(peer_index: PeerIndex, batch: *align(1) const headers.BatchHe
                     const rmi = peer.messages_in_flight.get(id) orelse continue;
                     if (!rmi.acked) {
                         rmi.acked = true;
-                        gpa.free(rmi.data);
+                        mem.persistent.free(rmi.data);
                         peer.messages_in_flight.unset(id);
                     }
                 }
@@ -886,7 +906,7 @@ pub fn process_ack(peer_index: PeerIndex, batch: *align(1) const headers.BatchHe
                                 const rmi = peer.messages_in_flight.get(id) orelse continue;
                                 if (!rmi.acked) {
                                     rmi.acked = true;
-                                    gpa.free(rmi.data);
+                                    mem.persistent.free(rmi.data);
                                     peer.messages_in_flight.unset(id);
                                 }
                             }

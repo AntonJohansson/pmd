@@ -167,6 +167,10 @@ pub const v3 = extern struct {
         const s = 1.0 / len(v);
         return scale(s, v);
     }
+
+    pub fn lerp(a: v3, b: v3, t: f32) v3 {
+        return add(a, scale(t, sub(b,a)));
+    }
 };
 
 pub const v4 = extern struct {
