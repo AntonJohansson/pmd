@@ -3,11 +3,29 @@ const std = @import("std");
 const common = @import("common");
 const profile = common.profile;
 
+const logging = common.logging;
+var log: logging.Log = .{
+    .mirror_to_stdio = true,
+};
+
 const c = @cImport({
     @cInclude("./stb_image.c");
+    @cDefine("STB_VORBIS_HEADER_ONLY", "");
+    @cInclude("./stb_vorbis.c");
 });
 
 pub var mem: common.MemoryAllocators = .{};
+
+//
+// Directories
+//
+
+pub const dir_res = "./res/";
+pub const dir_audio = dir_res ++ "audio/";
+
+//
+// Images
+//
 
 pub const Image = struct {
     pixels: []u8 = undefined,
@@ -28,6 +46,31 @@ const Cubemap = struct {
     }
 };
 
+//
+// Audio
+//
+
+const SoundType = common.SoundType;
+
+const SoundInfo = struct {
+    path: []const u8,
+    samples: []f32 = undefined,
+    volume: f32 = 1.0,
+};
+
+const sound_info_map = blk: {
+    var map: [@typeInfo(SoundType).Enum.fields.len]SoundInfo = undefined;
+    map[@intFromEnum(.death)]         = .{.path=dir_audio ++ "kill.ogg",      .volume=0.7};
+    map[@intFromEnum(.slide)]         = .{.path=dir_audio ++ "slide.ogg",     .volume=0.7};
+    map[@intFromEnum(.sniper)]        = .{.path=dir_audio ++ "sniper.ogg",    .volume=0.7};
+    map[@intFromEnum(.weapon_switch)] = .{.path=dir_audio ++ "switch.ogg",    .volume=0.2};
+    map[@intFromEnum(.step)]          = .{.path=dir_audio ++ "step.ogg",      .volume=0.7};
+    map[@intFromEnum(.pip)]           = .{.path=dir_audio ++ "pip.ogg",       .volume=0.7};
+    map[@intFromEnum(.explosion)]     = .{.path=dir_audio ++ "explosion.ogg", .volume=0.7};
+    map[@intFromEnum(.doink)]         = .{.path=dir_audio ++ "doink.ogg",     .volume=0.7};
+    break :blk map;
+};
+
 pub fn readFileToMemory(path: []const u8) ![]u8 {
     const file = try std.fs.cwd().openFile(path, .{});
     const size = (try file.stat()).size;
@@ -43,7 +86,10 @@ pub fn loadImage(image: *Image, path: []const u8) !void {
     var channels: c_int = undefined;
     const desired_channels = 4;
 
-    const pixels = c.stbi_load_from_memory(buf.ptr, @intCast(buf.len), &width, &height, &channels, desired_channels);
+    const pixels = c.stbi_load_from_memory(buf.ptr, @intCast(buf.len), &width, &height, &channels, desired_channels) orelse {
+        log.err("Failed to decod image {s}", .{path});
+        return;
+    };
     defer c.stbi_image_free(pixels);
 
     const bytes: usize = @intCast(width*height*channels);
@@ -90,4 +136,22 @@ pub fn loadCubemap(width: u32, height: u32, paths: [6][]const u8) !Cubemap {
     common.threadpool.enqueue(work);
 
     return cm;
+}
+
+pub fn loadAudio(st: SoundType) !void {
+    const info = sound_info_map[@intFromEnum(st)];
+    const buf = try readFileToMemory(info.path);
+
+    var err: c_int = undefined;
+    const vorbis = c.stb_vorbis_open_memory(buf.ptr, @intCast(buf.len), &err, null) orelse {
+        log.err("Failed to decode file: {s}", .{info.path});
+        return;
+    };
+    std.debug.assert(err == 0);
+
+    const vorbis_info = c.stb_vorbis_get_info(vorbis);
+    const num_samples: usize = @as(c_uint, @intCast(vorbis_info.channels))*c.stb_vorbis_stream_length_in_samples(vorbis);
+    info.samples = try mem.persistent.alloc(f32, num_samples);
+    const samples_per_channel = c.stb_vorbis_get_samples_float_interleaved(vorbis, vorbis_info.channels, &info.samples[0], @intCast(num_samples));
+    std.debug.assert(samples_per_channel*2 == num_samples);
 }

@@ -25,6 +25,8 @@
     - [ ] Cube outline
     - [ ] Readd PP
 
+- [ ] Improve logs
+
 First gameplay test:
     - [ ] higher friction 
     - [ ] Swoosh
@@ -39,3 +41,4 @@ First gameplay test:
     - [ ] Draw outline
     - [ ] Shoot from barrel when zoomed in
     - [ ] Make sure you know when you hit and when you get hit
+

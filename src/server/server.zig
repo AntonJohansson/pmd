@@ -100,7 +100,7 @@ pub fn main() !void {
     while (running) {
         frame_start_time = timer.read();
 
-        log.info("---- Starting tick {}", .{tick});
+        //log.info("---- Starting tick {}", .{tick});
 
         {
             {

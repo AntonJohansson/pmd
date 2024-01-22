@@ -69,15 +69,6 @@ pub fn build(b: *std.build.Builder) !void {
     });
     client.addCSourceFile(.{
         .file = .{
-            .path = "src/client/stb_vorbis.c"
-        },
-        .flags = &.{
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-        }});
-    client.addCSourceFile(.{
-        .file = .{
             .path = "src/client/stb.c"
         },
         .flags = &.{

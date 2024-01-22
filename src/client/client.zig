@@ -44,11 +44,6 @@ const MouseButton = glfw.MouseButton;
 const GamepadButton = glfw.GamepadButton;
 const GamepadAxis = glfw.GamepadAxis;
 
-const c = @cImport({
-    @cDefine("STB_VORBIS_HEADER_ONLY", "");
-    @cInclude("./stb_vorbis.c");
-});
-
 //
 // Input
 //
@@ -105,8 +100,7 @@ const InputDeviceState = enum {
 };
 
 const InputDevice = union(enum) {
-    mouse_keyboard: struct {
-    },
+    mouse_keyboard: struct {},
     gamepad: struct {
         id: u4,
     },
@@ -125,7 +119,7 @@ const InputType = union(enum) {
 
 const InputState = struct {
     trigger: TriggerType = .state,
-    input_type: InputType = .{.unmapped = true},
+    input_type: InputType = .{ .unmapped = true },
     last_action: glfw.Action = .release,
 };
 
@@ -136,64 +130,46 @@ const InputMap = struct {
     const Self = @This();
 
     fn map_key(self: *Self, input_name: InputName, trigger: TriggerType, key: Key) void {
-        self.map[@intFromEnum(input_name)] = InputState {
+        self.map[@intFromEnum(input_name)] = InputState{
             .trigger = trigger,
-            .input_type = .{.key = key},
+            .input_type = .{ .key = key },
         };
     }
 
     fn map_mouse_button(self: *Self, input_name: InputName, input_type: TriggerType, mouse_button: MouseButton) void {
-        self.map[@intFromEnum(input_name)] = InputState {
+        self.map[@intFromEnum(input_name)] = InputState{
             .trigger = input_type,
-            .input_type = .{.mouse_button = mouse_button},
+            .input_type = .{ .mouse_button = mouse_button },
         };
     }
 
     fn map_mouse_scroll(self: *Self, input_name: InputName, dir: MouseScrollDir) void {
-        self.map[@intFromEnum(input_name)] = InputState {
+        self.map[@intFromEnum(input_name)] = InputState{
             .trigger = .state,
-            .input_type = .{.mouse_scroll = .{.dir = dir}},
+            .input_type = .{ .mouse_scroll = .{ .dir = dir } },
         };
     }
 
     fn map_gamepad_button(self: *Self, input_name: InputName, trigger: TriggerType, button: GamepadButton) void {
-        self.map[@intFromEnum(input_name)] = InputState {
+        self.map[@intFromEnum(input_name)] = InputState{
             .trigger = trigger,
-            .input_type = .{.gamepad_button = button},
+            .input_type = .{ .gamepad_button = button },
         };
     }
 
     fn map_gamepad_axis(self: *Self, input_name: InputName, trigger: TriggerType, axis: GamepadAxis) void {
-        self.map[@intFromEnum(input_name)] = InputState {
+        self.map[@intFromEnum(input_name)] = InputState{
             .trigger = trigger,
-            .input_type = .{.gamepad_axis = axis},
+            .input_type = .{ .gamepad_axis = axis },
         };
     }
 
     fn map_gamepad_axis_abs(self: *Self, input_name: InputName, trigger: TriggerType, axis_abs: GamepadAxisAbs) void {
-        self.map[@intFromEnum(input_name)] = InputState {
+        self.map[@intFromEnum(input_name)] = InputState{
             .trigger = trigger,
-            .input_type = .{.gamepad_axis_abs = axis_abs},
+            .input_type = .{ .gamepad_axis_abs = axis_abs },
         };
     }
-};
-
-//
-// Audio
-//
-
-const SoundType = common.SoundType;
-
-const SoundInfo = struct {
-    path: []const u8,
-    samples: []f32 = undefined,
-    volume: f32 = 1.0,
-};
-
-const PlayingSound = struct {
-    samples: []f32 = undefined,
-    index: usize = 0,
-    volume: f32 = 1.0,
 };
 
 //
@@ -280,7 +256,7 @@ fn charCallback(window: glfw.Window, codepoint: u21) void {
         return;
     }
 
-    if (memory.console_input.len < memory.console_input.buffer.len-1) {
+    if (memory.console_input.len < memory.console_input.buffer.len - 1) {
         memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
         memory.console_input.buffer[memory.console_input.len] = 0;
         memory.console_input_index += 1;
@@ -294,13 +270,19 @@ fn scrollCallback(window: glfw.Window, dx: f64, dy: f64) void {
     scroll_delta = @floatCast(dy);
 }
 
+const PlayingSound = struct {
+    samples: []f32 = undefined,
+    index: usize = 0,
+    volume: f32 = 1.0,
+};
+
 pub fn main() !void {
     // Setup the allocators we'll be using
     // 1. GeneralPurposeAllocator for persitent data that will exist accross frames
     //    and has to be freed manually.
     // 2. ArenaAllocator for temporary data that during a frame
     var general_purpose_allocator: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    var fixed_allocator = std.heap.FixedBufferAllocator.init(try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, 128000*std.mem.page_size));
+    var fixed_allocator = std.heap.FixedBufferAllocator.init(try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, 128000 * std.mem.page_size));
     log.info("{}", .{fixed_allocator.buffer.len});
     defer std.heap.page_allocator.free(fixed_allocator.buffer);
     memory.mem.frame = fixed_allocator.threadSafeAllocator();
@@ -318,7 +300,7 @@ pub fn main() !void {
     const ip = "85.228.207.30";
     const port = 9053;
     const server_index = net.connect(&host, ip, port) orelse {
-        log.err("Failed to connect to server {s}:{}", .{ip, port});
+        log.err("Failed to connect to server {s}:{}", .{ ip, port });
         return;
     };
     defer std.os.close(host.fd);
@@ -337,9 +319,7 @@ pub fn main() !void {
     //
     // Network state
     //
-    net.pushMessage(server_index, packet.ConnectionRequest{
-        .client_salt = crand.int(u64)
-    });
+    net.pushMessage(server_index, packet.ConnectionRequest{ .client_salt = crand.int(u64) });
 
     //
     // GLFW init
@@ -350,7 +330,7 @@ pub fn main() !void {
     }
     defer glfw.terminate();
 
-    const hints = glfw.Window.Hints {
+    const hints = glfw.Window.Hints{
         .context_version_major = 3,
         .context_version_minor = 3,
         .opengl_forward_compat = true,
@@ -389,46 +369,7 @@ pub fn main() !void {
     });
     defer sa.shutdown();
 
-    const num_sound_types = @typeInfo(SoundType).Enum.fields.len;
-    var sound_file_map: [num_sound_types]SoundInfo = undefined;
-    const resource_dir = "res/";
-    const audio_dir = resource_dir ++ "audio/";
-    sound_file_map[@intFromEnum(SoundType.death)]         = .{.path=audio_dir ++ "kill.ogg",      .volume=0.7};
-    sound_file_map[@intFromEnum(SoundType.slide)]         = .{.path=audio_dir ++ "slide.ogg",     .volume=0.7};
-    sound_file_map[@intFromEnum(SoundType.sniper)]        = .{.path=audio_dir ++ "sniper.ogg",    .volume=0.7};
-    sound_file_map[@intFromEnum(SoundType.weapon_switch)] = .{.path=audio_dir ++ "switch.ogg",    .volume=0.2};
-    sound_file_map[@intFromEnum(SoundType.step)]          = .{.path=audio_dir ++ "step.ogg",      .volume=0.7};
-    sound_file_map[@intFromEnum(SoundType.pip)]           = .{.path=audio_dir ++ "pip.ogg",       .volume=0.7};
-    sound_file_map[@intFromEnum(SoundType.explosion)]     = .{.path=audio_dir ++ "explosion.ogg", .volume=0.7};
-    sound_file_map[@intFromEnum(SoundType.doink)]         = .{.path=audio_dir ++ "doink.ogg",     .volume=0.7};
-
     // Load all sounds into buffers
-    for (&sound_file_map) |*info| {
-        const file = std.fs.cwd().openFile(info.path, .{}) catch |err| {
-            log.err("Failed to open file: {s} ({})", .{info.path, err});
-            return;
-        };
-
-        const buf = file.readToEndAlloc(memory.mem.persistent, 1024*1024*1024) catch {
-            log.err("Failed to read file: {s}", .{info.path});
-            return;
-        };
-        defer memory.mem.persistent.free(buf);
-
-        var err: c_int = undefined;
-        const vorbis = c.stb_vorbis_open_memory(buf.ptr, @intCast(buf.len), &err, null) orelse {
-            log.err("Failed to decode file: {s}", .{info.path});
-            return;
-        };
-        std.debug.assert(err == 0);
-
-        const vorbis_info = c.stb_vorbis_get_info(vorbis);
-        const num_samples: usize = @as(c_uint, @intCast(vorbis_info.channels))*c.stb_vorbis_stream_length_in_samples(vorbis);
-        info.samples = memory.mem.persistent.alloc(f32, num_samples) catch unreachable;
-        const samples_per_channel = c.stb_vorbis_get_samples_float_interleaved(vorbis, vorbis_info.channels, &info.samples[0], @intCast(num_samples));
-        std.debug.assert(samples_per_channel*2 == num_samples);
-    }
-
     var playing_sounds: std.BoundedArray(PlayingSound, 64) = .{};
 
     //
@@ -450,77 +391,76 @@ pub fn main() !void {
 
     const max_num_gamepads = @intFromEnum(glfw.Joystick.Id.last) + 1;
     const keyboard_input_device_id = @intFromEnum(glfw.Joystick.Id.last) + 1;
-    var occupied_input_devices = [_]InputDeviceState{.connected}**(keyboard_input_device_id + 1);
+    var occupied_input_devices = [_]InputDeviceState{.connected} ** (keyboard_input_device_id + 1);
 
     var default_keyboard_input_map_gameplay = InputMap{};
-    default_keyboard_input_map_gameplay.map_key(.MoveForward,               .state,       .w);
-    default_keyboard_input_map_gameplay.map_key(.MoveLeft,                  .state,       .a);
-    default_keyboard_input_map_gameplay.map_key(.MoveBack,                  .state,       .s);
-    default_keyboard_input_map_gameplay.map_key(.MoveRight,                 .state,       .d);
-    default_keyboard_input_map_gameplay.map_mouse_scroll(.Jump,             .scroll_down);
-    default_keyboard_input_map_gameplay.map_key(.Crouch,                    .state,       .left_control);
-    default_keyboard_input_map_gameplay.map_key(.Sprint,                    .state,       .left_shift);
-    default_keyboard_input_map_gameplay.map_key(.ResetCamera,               .rising_edge, .r);
-    default_keyboard_input_map_gameplay.map_key(.Console,                   .toggle,      .grave_accent);
-    default_keyboard_input_map_gameplay.map_key(.Enter,                     .rising_edge, .enter);
-    default_keyboard_input_map_gameplay.map_key(.Editor,                    .toggle,      .x);
-    default_keyboard_input_map_gameplay.map_key(.Save,                      .rising_edge, .o);
-    default_keyboard_input_map_gameplay.map_key(.Load,                      .rising_edge, .p);
-    default_keyboard_input_map_gameplay.map_mouse_button(.MoveUp,           .state,       .five);
-    default_keyboard_input_map_gameplay.map_mouse_button(.MoveDown,         .state,       .four);
-    default_keyboard_input_map_gameplay.map_mouse_button(.Interact,         .rising_edge, .left);
-    default_keyboard_input_map_gameplay.map_mouse_button(.AltInteract,      .state, .right);
-    default_keyboard_input_map_gameplay.map_key(.SwitchWeapon,              .rising_edge, .q);
+    default_keyboard_input_map_gameplay.map_key(.MoveForward, .state, .w);
+    default_keyboard_input_map_gameplay.map_key(.MoveLeft, .state, .a);
+    default_keyboard_input_map_gameplay.map_key(.MoveBack, .state, .s);
+    default_keyboard_input_map_gameplay.map_key(.MoveRight, .state, .d);
+    default_keyboard_input_map_gameplay.map_mouse_scroll(.Jump, .scroll_down);
+    default_keyboard_input_map_gameplay.map_key(.Crouch, .state, .left_control);
+    default_keyboard_input_map_gameplay.map_key(.Sprint, .state, .left_shift);
+    default_keyboard_input_map_gameplay.map_key(.ResetCamera, .rising_edge, .r);
+    default_keyboard_input_map_gameplay.map_key(.Console, .toggle, .grave_accent);
+    default_keyboard_input_map_gameplay.map_key(.Enter, .rising_edge, .enter);
+    default_keyboard_input_map_gameplay.map_key(.Editor, .toggle, .x);
+    default_keyboard_input_map_gameplay.map_key(.Save, .rising_edge, .o);
+    default_keyboard_input_map_gameplay.map_key(.Load, .rising_edge, .p);
+    default_keyboard_input_map_gameplay.map_mouse_button(.MoveUp, .state, .five);
+    default_keyboard_input_map_gameplay.map_mouse_button(.MoveDown, .state, .four);
+    default_keyboard_input_map_gameplay.map_mouse_button(.Interact, .rising_edge, .left);
+    default_keyboard_input_map_gameplay.map_mouse_button(.AltInteract, .state, .right);
+    default_keyboard_input_map_gameplay.map_key(.SwitchWeapon, .rising_edge, .q);
 
     var default_keyboard_input_map_editor = InputMap{};
-    default_keyboard_input_map_editor.map_key(.MoveForward,               .state,       .w);
-    default_keyboard_input_map_editor.map_key(.MoveLeft,                  .state,       .a);
-    default_keyboard_input_map_editor.map_key(.MoveBack,                  .state,       .s);
-    default_keyboard_input_map_editor.map_key(.MoveRight,                 .state,       .d);
-    default_keyboard_input_map_editor.map_key(.MoveUp,                    .state,       .space);
-    default_keyboard_input_map_editor.map_key(.MoveDown,                  .state,       .left_control);
-    default_keyboard_input_map_editor.map_key(.Sprint,                    .state,       .left_shift);
-    default_keyboard_input_map_editor.map_key(.ResetCamera,               .rising_edge, .r);
-    default_keyboard_input_map_editor.map_key(.Console,                   .toggle,      .grave_accent);
-    default_keyboard_input_map_editor.map_key(.Enter,                     .rising_edge, .enter);
-    default_keyboard_input_map_editor.map_key(.InMenu,                    .toggle,      .escape);
-    default_keyboard_input_map_editor.map_key(.Editor,                    .toggle,      .x);
-    default_keyboard_input_map_editor.map_key(.Save,                      .rising_edge, .o);
-    default_keyboard_input_map_editor.map_key(.Load,                      .rising_edge, .p);
-    default_keyboard_input_map_editor.map_mouse_button(.Interact,         .state, .left);
-    default_keyboard_input_map_editor.map_mouse_button(.AltInteract,      .rising_edge, .right);
+    default_keyboard_input_map_editor.map_key(.MoveForward, .state, .w);
+    default_keyboard_input_map_editor.map_key(.MoveLeft, .state, .a);
+    default_keyboard_input_map_editor.map_key(.MoveBack, .state, .s);
+    default_keyboard_input_map_editor.map_key(.MoveRight, .state, .d);
+    default_keyboard_input_map_editor.map_key(.MoveUp, .state, .space);
+    default_keyboard_input_map_editor.map_key(.MoveDown, .state, .left_control);
+    default_keyboard_input_map_editor.map_key(.Sprint, .state, .left_shift);
+    default_keyboard_input_map_editor.map_key(.ResetCamera, .rising_edge, .r);
+    default_keyboard_input_map_editor.map_key(.Console, .toggle, .grave_accent);
+    default_keyboard_input_map_editor.map_key(.Enter, .rising_edge, .enter);
+    default_keyboard_input_map_editor.map_key(.InMenu, .toggle, .escape);
+    default_keyboard_input_map_editor.map_key(.Editor, .toggle, .x);
+    default_keyboard_input_map_editor.map_key(.Save, .rising_edge, .o);
+    default_keyboard_input_map_editor.map_key(.Load, .rising_edge, .p);
+    default_keyboard_input_map_editor.map_mouse_button(.Interact, .state, .left);
+    default_keyboard_input_map_editor.map_mouse_button(.AltInteract, .rising_edge, .right);
 
     var default_gamepad_input_map_gameplay = InputMap{};
-    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveForward,    .state,       .{.axis = .left_y, .dir = .smaller_than_zero});
-    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveBack,       .state,       .{.axis = .left_y, .dir = .larger_than_zero});
-    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveRight,      .state,       .{.axis = .left_x, .dir = .larger_than_zero});
-    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveLeft,       .state,       .{.axis = .left_x, .dir = .smaller_than_zero});
-    default_gamepad_input_map_gameplay.map_gamepad_button(.Jump,             .rising_edge, .right_bumper);
-    default_gamepad_input_map_gameplay.map_gamepad_button(.Crouch,           .state,       .left_bumper);
+    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveForward, .state, .{ .axis = .left_y, .dir = .smaller_than_zero });
+    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveBack, .state, .{ .axis = .left_y, .dir = .larger_than_zero });
+    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveRight, .state, .{ .axis = .left_x, .dir = .larger_than_zero });
+    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveLeft, .state, .{ .axis = .left_x, .dir = .smaller_than_zero });
+    default_gamepad_input_map_gameplay.map_gamepad_button(.Jump, .rising_edge, .right_bumper);
+    default_gamepad_input_map_gameplay.map_gamepad_button(.Crouch, .state, .left_bumper);
     //default_gamepad_input_map_gameplay.map_key(.Sprint,                    .state,       .left_shift);
-    default_gamepad_input_map_gameplay.map_gamepad_button(.Editor,           .rising_edge, .start);
-    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.Interact,       .rising_edge, .{.axis = .right_trigger, .dir = .larger_than_zero});
-    default_gamepad_input_map_gameplay.map_gamepad_button(.AltInteract,      .state,       .right_bumper);
-    default_gamepad_input_map_gameplay.map_gamepad_button(.SwitchWeapon,     .rising_edge, .y);
-
+    default_gamepad_input_map_gameplay.map_gamepad_button(.Editor, .rising_edge, .start);
+    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.Interact, .rising_edge, .{ .axis = .right_trigger, .dir = .larger_than_zero });
+    default_gamepad_input_map_gameplay.map_gamepad_button(.AltInteract, .state, .right_bumper);
+    default_gamepad_input_map_gameplay.map_gamepad_button(.SwitchWeapon, .rising_edge, .y);
 
     var debug_gamepad_off: usize = 0;
     default_gamepad_input_map_gameplay.map_gamepad_button(.DebugIncGamepadOffset, .rising_edge, .dpad_up);
     default_gamepad_input_map_gameplay.map_gamepad_button(.DebugDecGamepadOffset, .rising_edge, .dpad_down);
 
     var default_gamepad_input_map_editor = InputMap{};
-    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveForward,    .state,       .{.axis = .left_y, .dir = .smaller_than_zero});
-    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveBack,       .state,       .{.axis = .left_y, .dir = .larger_than_zero});
-    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveRight,      .state,       .{.axis = .left_x, .dir = .larger_than_zero});
-    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveLeft,       .state,       .{.axis = .left_x, .dir = .smaller_than_zero});
-    default_gamepad_input_map_editor.map_gamepad_button(.MoveUp,           .state,       .a);
-    default_gamepad_input_map_editor.map_gamepad_button(.MoveDown,         .state,       .b);
+    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveForward, .state, .{ .axis = .left_y, .dir = .smaller_than_zero });
+    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveBack, .state, .{ .axis = .left_y, .dir = .larger_than_zero });
+    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveRight, .state, .{ .axis = .left_x, .dir = .larger_than_zero });
+    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveLeft, .state, .{ .axis = .left_x, .dir = .smaller_than_zero });
+    default_gamepad_input_map_editor.map_gamepad_button(.MoveUp, .state, .a);
+    default_gamepad_input_map_editor.map_gamepad_button(.MoveDown, .state, .b);
     //default_gamepad_input_map_editor.map_key(.Sprint,                    .state,       .left_shift);
-    default_gamepad_input_map_editor.map_gamepad_button(.Editor,           .toggle,      .start);
-    default_gamepad_input_map_editor.map_gamepad_button(.Interact,        .rising_edge, .x);
-    default_gamepad_input_map_editor.map_gamepad_button(.AltInteract,     .state,       .right_bumper);
+    default_gamepad_input_map_editor.map_gamepad_button(.Editor, .toggle, .start);
+    default_gamepad_input_map_editor.map_gamepad_button(.Interact, .rising_edge, .x);
+    default_gamepad_input_map_editor.map_gamepad_button(.AltInteract, .state, .right_bumper);
 
-    memory.vel_graph.data = try memory.mem.persistent.alloc(f32, 2*fps);
+    memory.vel_graph.data = try memory.mem.persistent.alloc(f32, 2 * fps);
 
     var command_buffer: draw_api.CommandBuffer = .{};
 
@@ -543,7 +483,7 @@ pub fn main() !void {
 
     @memset(&memory.console_input.buffer, 0);
 
-    var old_mouse_pos: v2 = .{.x = 0.0, .y = 0.0};
+    var old_mouse_pos: v2 = .{ .x = 0.0, .y = 0.0 };
 
     var running = true;
     while (running) {
@@ -620,7 +560,7 @@ pub fn main() !void {
                                 //}
 
                                 log.info("Running command: {s}", .{message.data[0..message.len]});
-                                command.dodododododododo( message.data[0..message.len]);
+                                command.dodododododododo(message.data[0..message.len]);
                             },
                             .ConnectionTimeout => {
                                 const message: *align(1) packet.ConnectionTimeout = @ptrCast(e.data);
@@ -642,7 +582,7 @@ pub fn main() !void {
                                 player.id = message.id;
 
                                 var local_player_id: ?usize = null;
-                                for (local_players.slice(), 0..) |*lp,i| {
+                                for (local_players.slice(), 0..) |*lp, i| {
                                     if (lp.id == null) {
                                         local_player_id = i;
                                         lp.id = player.id;
@@ -653,7 +593,7 @@ pub fn main() !void {
                                 std.debug.assert(local_player_id != null);
                                 log.info("Player joined", .{});
                                 log.info("  local player id: {}", .{local_player_id.?});
-                                log.info("  game player id: {}",  .{player.id});
+                                log.info("  game player id: {}", .{player.id});
                             },
                             .PeerJoined => {
                                 const message: *align(1) packet.PeerJoined = @ptrCast(e.data);
@@ -721,7 +661,7 @@ pub fn main() !void {
                                     // case ignore it as we've already added it when we
                                     // updated locally
                                     if (s.type != .death) {
-                                        var local =  false;
+                                        var local = false;
                                         for (local_players.constSlice()) |lp| {
                                             if (lp.id == s.id_from) {
                                                 local = true;
@@ -737,7 +677,7 @@ pub fn main() !void {
                             .NewHitscans => {
                                 const message: *align(1) packet.NewHitscans = @ptrCast(e.data);
                                 for (message.new_hitscans[0..message.num_hitscans]) |h| {
-                                    var local =  false;
+                                    var local = false;
                                     for (local_players.constSlice()) |lp| {
                                         if (lp.id == h.id_from) {
                                             local = true;
@@ -781,7 +721,7 @@ pub fn main() !void {
                                 break;
                             },
                         }
-                    }
+                    },
                 }
             }
             memory.stat_data.end();
@@ -802,7 +742,7 @@ pub fn main() !void {
                     memory.stat_data.start("client update");
                     defer memory.stat_data.end();
 
-                    for (occupied_input_devices, 0..) |d,i| {
+                    for (occupied_input_devices, 0..) |d, i| {
                         if (d == .connected) {
                             // @unlikely
 
@@ -833,11 +773,11 @@ pub fn main() !void {
                                         log.info("Sening join request", .{});
 
                                         if (!connected) {
-                                            const player = Player {
+                                            const player = Player{
                                                 .id = lp.id.?,
-                                                .pos = v3 {.x = 0, .y = 0, .z = 10.0},
-                                                .vel = v3 {.x = 0, .y = 0, .z = 0},
-                                                .dir = v3 {.x = 1, .y = 0, .z = 0},
+                                                .pos = v3{ .x = 0, .y = 0, .z = 10.0 },
+                                                .vel = v3{ .x = 0, .y = 0, .z = 0 },
+                                                .dir = v3{ .x = 1, .y = 0, .z = 0 },
                                                 .yaw = 0,
                                                 .pitch = 0,
                                             };
@@ -849,15 +789,14 @@ pub fn main() !void {
                                             });
                                         }
                                     }
-
                                 }
                             } else {
                                 // Check for gamepad input
-                                const index = (i + max_num_gamepads-debug_gamepad_off) % max_num_gamepads;
+                                const index = (i + max_num_gamepads - debug_gamepad_off) % max_num_gamepads;
                                 var gamepad_press = false;
                                 if (occupied_input_devices[i] == .occupied)
                                     continue;
-                                const joystick = glfw.Joystick{.jid = @enumFromInt(index)};
+                                const joystick = glfw.Joystick{ .jid = @enumFromInt(index) };
                                 const present = glfw.Joystick.present(joystick);
                                 if (present) {
                                     const gamepad = glfw.Joystick.getGamepadState(joystick) orelse {
@@ -885,11 +824,11 @@ pub fn main() !void {
                                                 lp.editor_input_map = &default_gamepad_input_map_editor;
 
                                                 if (!connected) {
-                                                    const player = Player {
+                                                    const player = Player{
                                                         .id = lp.id.?,
-                                                        .pos = v3 {.x = 0, .y = 0, .z = 10.0},
-                                                        .vel = v3 {.x = 0, .y = 0, .z = 0},
-                                                        .dir = v3 {.x = 1, .y = 0, .z = 0},
+                                                        .pos = v3{ .x = 0, .y = 0, .z = 10.0 },
+                                                        .vel = v3{ .x = 0, .y = 0, .z = 0 },
+                                                        .dir = v3{ .x = 1, .y = 0, .z = 0 },
                                                         .yaw = 0,
                                                         .pitch = 0,
                                                     };
@@ -923,30 +862,29 @@ pub fn main() !void {
                             const input_map = if (lp.input.isset(.Editor)) lp.editor_input_map.? else lp.gameplay_input_map.?;
 
                             memory.stat_data.start("gather input");
-                            for (&input_map.map, 0..) |*state,i| {
-
+                            for (&input_map.map, 0..) |*state, i| {
                                 const action: glfw.Action = switch (state.input_type) {
                                     InputType.key => |key| window.getKey(key),
                                     InputType.mouse_button => |mb| window.getMouseButton(mb),
                                     InputType.mouse_scroll => |ms| switch (ms.dir) {
                                         .scroll_down => if (scroll_delta < 0.0) .press else .release,
-                                        .scroll_up   => if (scroll_delta > 0.0) .press else .release,
+                                        .scroll_up => if (scroll_delta > 0.0) .press else .release,
                                     },
                                     InputType.gamepad_button => |gb| blk: {
-                                        const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads-debug_gamepad_off) % max_num_gamepads);
-                                        const gamepad = glfw.Joystick.getGamepadState(.{.jid = index}) orelse {
+                                        const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads - debug_gamepad_off) % max_num_gamepads);
+                                        const gamepad = glfw.Joystick.getGamepadState(.{ .jid = index }) orelse {
                                             continue;
                                         };
                                         break :blk gamepad.getButton(gb);
                                     },
                                     InputType.gamepad_axis_abs => |a| blk: {
                                         const deadzone = 0.1;
-                                        const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads-debug_gamepad_off) % max_num_gamepads);
-                                        const gamepad = glfw.Joystick.getGamepadState(.{.jid = index}) orelse {
+                                        const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads - debug_gamepad_off) % max_num_gamepads);
+                                        const gamepad = glfw.Joystick.getGamepadState(.{ .jid = index }) orelse {
                                             continue;
                                         };
                                         break :blk switch (a.dir) {
-                                            .larger_than_zero  => if (gamepad.getAxis(a.axis) >  deadzone) .press else .release,
+                                            .larger_than_zero => if (gamepad.getAxis(a.axis) > deadzone) .press else .release,
                                             .smaller_than_zero => if (gamepad.getAxis(a.axis) < -deadzone) .press else .release,
                                         };
                                     },
@@ -996,15 +934,12 @@ pub fn main() !void {
                                 old_mouse_pos.y = @floatCast(pos.ypos);
                             }
 
-                            lp.input.cursor_delta = .{
-                                .x = config.vars.sensitivity*delta.x,
-                                .y = config.vars.sensitivity*delta.y
-                            };
+                            lp.input.cursor_delta = .{ .x = config.vars.sensitivity * delta.x, .y = config.vars.sensitivity * delta.y };
                         } else {
                             // Gamepad specific inputs
                             const deadzone = 0.1;
-                            const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads-debug_gamepad_off) % max_num_gamepads);
-                            const gamepad = glfw.Joystick.getGamepadState(.{.jid = index}) orelse {
+                            const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads - debug_gamepad_off) % max_num_gamepads);
+                            const gamepad = glfw.Joystick.getGamepadState(.{ .jid = index }) orelse {
                                 continue;
                             };
                             // TODO(anjo): @optimize
@@ -1017,9 +952,9 @@ pub fn main() !void {
                             abs_dx = if (abs_dx > deadzone) abs_dx else 1.0;
                             abs_dy = if (abs_dy > deadzone) abs_dy else 1.0;
                             // TODO(anjo): Add acceleration
-                            lp.input.cursor_delta.x = 20.0*config.vars.sensitivity*dx/abs_dx;
+                            lp.input.cursor_delta.x = 20.0 * config.vars.sensitivity * dx / abs_dx;
                             // TODO(anjo): Move aspect ratio to camera
-                            lp.input.cursor_delta.y = (9.0/16.0)*20.0*config.vars.sensitivity*dy/abs_dy;
+                            lp.input.cursor_delta.y = (9.0 / 16.0) * 20.0 * config.vars.sensitivity * dy / abs_dy;
                         }
 
                         // push input state
@@ -1054,8 +989,9 @@ pub fn main() !void {
                             } else if (window.getKey(last_key) == .release) {
                                 last_key_down = false;
                             }
-                            if (last_key_down and (!repeat and key_repeat_timer.read() >= 500*std.time.us_per_s or
-                                    repeat and key_repeat_timer.read() >= 50*std.time.us_per_s)) {
+                            if (last_key_down and (!repeat and key_repeat_timer.read() >= 500 * std.time.us_per_s or
+                                repeat and key_repeat_timer.read() >= 50 * std.time.us_per_s))
+                            {
                                 key_repeat_timer.reset();
                                 repeat = true;
                             }
@@ -1067,11 +1003,11 @@ pub fn main() !void {
                                 memory.console_input_index += 1;
                             }
                             if (memory.console_input_index > 0 and (window.getKey(.backspace) == .press or last_key == .backspace and repeat)) {
-                                _ = memory.console_input.orderedRemove(memory.console_input_index-1);
+                                _ = memory.console_input.orderedRemove(memory.console_input_index - 1);
                                 memory.console_input.buffer[memory.console_input.len] = 0;
                                 memory.console_input_index -= 1;
                             }
-                            if (memory.console_input.len < memory.console_input.buffer.len-1 and (last_char >= 32 and last_char <= 126 and repeat)) {
+                            if (memory.console_input.len < memory.console_input.buffer.len - 1 and (last_char >= 32 and last_char <= 126 and repeat)) {
                                 memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
                                 memory.console_input.buffer[memory.console_input.len] = 0;
                                 memory.console_input_index += 1;
@@ -1101,10 +1037,11 @@ pub fn main() !void {
 
                     // Move new_* to actual persistent buffers
                     for (memory.new_sounds.constSlice()) |s| {
-                        playing_sounds.appendAssumeCapacity(.{
-                            .samples = sound_file_map[@intFromEnum(s.type)].samples,
-                            .volume = sound_file_map[@intFromEnum(s.type)].volume,
-                        });
+                        _ = s;
+                        //playing_sounds.appendAssumeCapacity(.{
+                        //    .samples = sound_file_map[@intFromEnum(s.type)].samples,
+                        //    .volume = sound_file_map[@intFromEnum(s.type)].volume,
+                        //});
                     }
                     memory.new_sounds.resize(0) catch unreachable;
 
@@ -1140,7 +1077,7 @@ pub fn main() !void {
                     if (!e.flags.updated_client)
                         continue;
                     e.flags.updated_client = false;
-                    net.pushMessageToAllPeers(packet.EntityUpdate {
+                    net.pushMessageToAllPeers(packet.EntityUpdate{
                         .entity = e.*,
                     });
                 }
@@ -1181,17 +1118,17 @@ pub fn main() !void {
             // Audio
             //
             {
-                const num_needed_samples = 2*@as(usize, @intCast(sa.expect()));
+                const num_needed_samples = 2 * @as(usize, @intCast(sa.expect()));
 
                 var samples = try memory.mem.frame.alloc(f32, num_needed_samples);
                 @memset(samples, 0);
 
                 var num_samples: usize = 0;
                 for (playing_sounds.slice()) |*s| {
-                    const num_available_samples = @min(s.samples.len-s.index, num_needed_samples);
+                    const num_available_samples = @min(s.samples.len - s.index, num_needed_samples);
 
                     for (0..num_available_samples) |i| {
-                        samples[i] += s.volume*s.samples[s.index + i];
+                        samples[i] += s.volume * s.samples[s.index + i];
                     }
                     s.index += num_available_samples;
 
@@ -1238,10 +1175,6 @@ pub fn main() !void {
 
             fixed_allocator.reset();
         }
-    }
-
-    for (sound_file_map) |info| {
-        memory.mem.persistent.free(info.samples);
     }
 
     common.threadpool.join();

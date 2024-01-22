@@ -117,7 +117,7 @@ pub const sniper = Weapon {
     .type = .sniper,
     .total_cooldown = 1.0,
     .total_reload_cooldown = 1.0,
-    .total_zoom_cooldown = 1.0,
+    .total_zoom_cooldown = 0.5,
     .kickback_time = 0.05,
     .kickback_scale = 20.0,
     .total_ammo = 5,
@@ -128,7 +128,7 @@ pub const pistol = Weapon {
     .type = .pistol,
     .total_cooldown = 0.1,
     .total_reload_cooldown = 1.0,
-    .total_zoom_cooldown = 1.0,
+    .total_zoom_cooldown = 0.2,
     .kickback_time = 0.3,
     .kickback_scale = 3.0,
     .total_ammo = 10,
@@ -269,7 +269,7 @@ pub const WidgetModel = struct {
     move_type: WidgetMoveType = .move_axis,
 };
 
-pub const max_players = 16;
+pub const max_players = 4;
 
 pub const Entity = extern struct {
     id: EntityId,
