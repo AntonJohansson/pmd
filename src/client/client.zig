@@ -13,6 +13,7 @@ const Player = common.Player;
 const EntityId = common.EntityId;
 const Input = common.Input;
 const InputName = common.InputName;
+const goosepack = common.goosepack;
 const draw_api = common.draw_api;
 const draw = @import("draw.zig");
 
@@ -23,7 +24,7 @@ const f32equal = math.f32equal;
 const m4 = math.m4;
 
 const net = @import("net");
-const res = @import("res");
+const res = common.res;
 
 const headers = net.headers;
 const packet = net.packet;
@@ -31,7 +32,7 @@ const packet_meta = net.packet_meta;
 
 const logging = common.logging;
 var log: logging.Log = .{
-    .mirror_to_stdio = true,
+    .mirror_to_stdio = false,
 };
 
 const sokol = @import("sokol");
@@ -294,10 +295,23 @@ pub fn main() !void {
     res.mem = memory.mem;
 
     //
+    // Load pack
+    //
+
+    const pack_in_memory: ?[]u8 = res.readFileToMemory(memory.mem.persistent, "res.gp") catch null;
+    defer {if (pack_in_memory) |bytes| memory.mem.persistent.free(bytes);}
+    goosepack.setAllocators(memory.mem.frame, memory.mem.persistent);
+    memory.pack = goosepack.init();
+    if (pack_in_memory) |bytes| {
+        try goosepack.load(&memory.pack, bytes);
+    }
+
+    //
     // Connect to server
     //
     var host: net.Host = .{};
-    const ip = "85.228.207.30";
+    //const ip = "85.228.207.30";
+    const ip = "localhost";
     const port = 9053;
     const server_index = net.connect(&host, ip, port) orelse {
         log.err("Failed to connect to server {s}:{}", .{ ip, port });
@@ -356,7 +370,7 @@ pub fn main() !void {
     }
 
     // initialize renderer
-    draw.init(memory.mem);
+    draw.init(memory.mem, &memory.pack);
     defer draw.deinit();
 
     //

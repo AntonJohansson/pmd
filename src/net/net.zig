@@ -11,7 +11,7 @@ const stat = common.stat;
 const logging = common.logging;
 
 var log: logging.Log = .{
-    .mirror_to_stdio = true,
+    .mirror_to_stdio = false,
 };
 
 const ClientHost = struct {

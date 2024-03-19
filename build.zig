@@ -29,15 +29,6 @@ pub fn build(b: *std.build.Builder) !void {
     });
 
     //
-    // res
-    //
-
-    const res = b.createModule(.{
-        .source_file = .{.path = "src/res/res.zig"},
-        .dependencies = &.{.{.name="common",.module=common}},
-    });
-
-    //
     // lib
     //
 
@@ -51,7 +42,6 @@ pub fn build(b: *std.build.Builder) !void {
     libgame.addModule("sokol", sokol_module);
     libgame.addModule("common", common);
     libgame.addModule("net", net);
-    libgame.addModule("res", res);
     libgame.linkLibrary(sokol_build);
     _ = b.installArtifact(libgame);
 
@@ -81,7 +71,6 @@ pub fn build(b: *std.build.Builder) !void {
     client.addModule("sokol", sokol_module);
     client.addModule("common", common);
     client.addModule("net", net);
-    client.addModule("res", res);
     client.linkLibrary(sokol_build);
     b.installArtifact(client);
 
@@ -113,7 +102,6 @@ pub fn build(b: *std.build.Builder) !void {
     });
     server.addModule("common", common);
     server.addModule("net", net);
-    server.addModule("res", res);
     server.linkLibC();
     b.installArtifact(server);
 
@@ -124,4 +112,40 @@ pub fn build(b: *std.build.Builder) !void {
     }
     const run_server_step = b.step("run-server", "Run the server");
     run_server_step.dependOn(&run_server_cmd.step);
+
+    //
+    // pack
+    //
+
+    const pack_dir = try std.fs.cwd().openDir("src/tools", .{});
+    try std.fs.cwd().copyFile("third_party/SDL_GameControllerDB/gamecontrollerdb.txt", pack_dir, "gamecontrollerdb.txt", .{});
+
+    const pack = b.addExecutable(.{
+        .name = "pack",
+        .root_source_file = .{ .path = "src/tools/pack.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    pack.addCSourceFile(.{
+        .file = .{
+            .path = "src/tools/stb.c"
+        },
+        .flags = &.{
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+    }});
+    pack.addModule("common", common);
+    pack.addIncludePath(std.build.LazyPath.relative("src/tools"));
+    pack.linkLibC();
+    b.installArtifact(pack);
+
+    const run_pack_cmd = b.addRunArtifact(pack);
+    run_pack_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_pack_cmd.addArgs(args);
+    }
+    const run_pack_step = b.step("run-pack", "Run pack");
+    run_pack_step.dependOn(&run_pack_cmd.step);
+
 }

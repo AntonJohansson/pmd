@@ -746,6 +746,8 @@ fn weaponUpdate(memory: *Memory, player: *Player, input: *const Input, dt: f32) 
     }
 
     if (input.isset(.SwitchWeapon)) {
+        weapon.cooldown = 0.0;
+
         // Switch current and last weapon
         const tmp = player.weapon_current;
         player.weapon_current = player.weapon_last;

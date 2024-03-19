@@ -20,7 +20,8 @@ const sg = sokol.gfx;
 const slog = sokol.log;
 const sdtx = sokol.debugtext;
 
-const res = @import("res");
+const res = common.res;
+const goosepack = common.goosepack;
 
 pub const Pipeline = enum {
     depth,
@@ -144,7 +145,7 @@ const cube_indices = [_]u16{
 
 //var cc_shader: raylib.Shader = undefined;
 //var font: raylib.Font = undefined;
-pub fn init(mem: common.MemoryAllocators) void {
+pub fn init(mem: common.MemoryAllocators, pack: *goosepack.Pack) void {
     _ = mem;
     sg.setup(.{
         .logger = .{ .func = slog.func },
@@ -471,14 +472,7 @@ pub fn init(mem: common.MemoryAllocators) void {
         });
 
         profile.start("cubemap");
-        const cubemap = res.loadCubemap(2048, 2048, [6][]const u8{
-            "./res/px.png",
-            "./res/nx.png",
-            "./res/py.png",
-            "./res/ny.png",
-            "./res/pz.png",
-            "./res/nz.png",
-        }) catch unreachable;
+        const cubemap = goosepack.lookup(pack, "res/cm").cubemap;
         profile.end();
 
         profile.sort();

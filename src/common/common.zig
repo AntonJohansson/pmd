@@ -12,6 +12,8 @@ pub const profile = @import("profile.zig");
 pub const draw_meta = @import("draw_meta.zig");
 pub const draw_api = @import("draw_api.zig");
 pub const threadpool = @import("threadpool.zig");
+pub const goosepack = @import("pack.zig");
+pub const res = @import("res.zig");
 
 const v2 = math.v2;
 const v3 = math.v3;
@@ -321,6 +323,7 @@ pub const MemoryAllocators = struct {
 };
 
 pub const Memory = struct {
+    pack: goosepack.Pack = undefined,
     // game state
     players: std.BoundedArray(Player, max_players) = .{},
     entities: std.BoundedArray(Entity, 64) = .{},

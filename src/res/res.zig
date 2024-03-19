@@ -14,14 +14,29 @@ const c = @cImport({
     @cInclude("./stb_vorbis.c");
 });
 
-pub var mem: common.MemoryAllocators = .{};
-
 //
+// Generic
+//
+
 // Directories
-//
-
 pub const dir_res = "./res/";
 pub const dir_audio = dir_res ++ "audio/";
+
+// Memory
+pub var mem: common.MemoryAllocators = .{};
+
+pub fn id(comptime path: []const u8) u32 {
+    return comptime blk: {
+        break :blk std.hash.Murmur3_32.hash(path);
+    };
+}
+
+pub fn readFileToMemory(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try std.fs.cwd().openFile(path, .{});
+    const size = (try file.stat()).size;
+    const buf = try file.readToEndAllocOptions(allocator, size, null, @alignOf(u64), null);
+    return buf;
+}
 
 //
 // Images
@@ -34,7 +49,11 @@ pub const Image = struct {
     channels: u32 = 0,
 };
 
-const Cubemap = struct {
+pub const Text = struct {
+    bytes: []u8 = undefined,
+};
+
+pub const Cubemap = struct {
     bytes: []u8 = undefined,
     width: u32 = 0,
     height: u32 = 0,
@@ -46,37 +65,9 @@ const Cubemap = struct {
     }
 };
 
-//
-// Audio
-//
-
-const SoundType = common.SoundType;
-
-const SoundInfo = struct {
-    path: []const u8,
+pub const Audio = struct {
     samples: []f32 = undefined,
-    volume: f32 = 1.0,
 };
-
-const sound_info_map = blk: {
-    var map: [@typeInfo(SoundType).Enum.fields.len]SoundInfo = undefined;
-    map[@intFromEnum(.death)]         = .{.path=dir_audio ++ "kill.ogg",      .volume=0.7};
-    map[@intFromEnum(.slide)]         = .{.path=dir_audio ++ "slide.ogg",     .volume=0.7};
-    map[@intFromEnum(.sniper)]        = .{.path=dir_audio ++ "sniper.ogg",    .volume=0.7};
-    map[@intFromEnum(.weapon_switch)] = .{.path=dir_audio ++ "switch.ogg",    .volume=0.2};
-    map[@intFromEnum(.step)]          = .{.path=dir_audio ++ "step.ogg",      .volume=0.7};
-    map[@intFromEnum(.pip)]           = .{.path=dir_audio ++ "pip.ogg",       .volume=0.7};
-    map[@intFromEnum(.explosion)]     = .{.path=dir_audio ++ "explosion.ogg", .volume=0.7};
-    map[@intFromEnum(.doink)]         = .{.path=dir_audio ++ "doink.ogg",     .volume=0.7};
-    break :blk map;
-};
-
-pub fn readFileToMemory(path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    const size = (try file.stat()).size;
-    const buf = try file.readToEndAlloc(mem.frame, size);
-    return buf;
-}
 
 pub fn loadImage(image: *Image, path: []const u8) !void {
     const buf = try readFileToMemory(path);
@@ -137,6 +128,31 @@ pub fn loadCubemap(width: u32, height: u32, paths: [6][]const u8) !Cubemap {
 
     return cm;
 }
+
+//
+// Audio
+//
+
+const SoundType = common.SoundType;
+
+const SoundInfo = struct {
+    path: []const u8,
+    samples: []f32 = undefined,
+    volume: f32 = 1.0,
+};
+
+const sound_info_map = blk: {
+    var map: [@typeInfo(SoundType).Enum.fields.len]SoundInfo = undefined;
+    map[@intFromEnum(.death)]         = .{.path=dir_audio ++ "kill.ogg",      .volume=0.7};
+    map[@intFromEnum(.slide)]         = .{.path=dir_audio ++ "slide.ogg",     .volume=0.7};
+    map[@intFromEnum(.sniper)]        = .{.path=dir_audio ++ "sniper.ogg",    .volume=0.7};
+    map[@intFromEnum(.weapon_switch)] = .{.path=dir_audio ++ "switch.ogg",    .volume=0.2};
+    map[@intFromEnum(.step)]          = .{.path=dir_audio ++ "step.ogg",      .volume=0.7};
+    map[@intFromEnum(.pip)]           = .{.path=dir_audio ++ "pip.ogg",       .volume=0.7};
+    map[@intFromEnum(.explosion)]     = .{.path=dir_audio ++ "explosion.ogg", .volume=0.7};
+    map[@intFromEnum(.doink)]         = .{.path=dir_audio ++ "doink.ogg",     .volume=0.7};
+    break :blk map;
+};
 
 pub fn loadAudio(st: SoundType) !void {
     const info = sound_info_map[@intFromEnum(st)];
