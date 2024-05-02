@@ -136,6 +136,7 @@ pub fn build(b: *std.build.Builder) !void {
             "-Werror",
     }});
     pack.addModule("common", common);
+    pack.addModule("sokol", sokol_module);
     pack.addIncludePath(std.build.LazyPath.relative("src/tools"));
     pack.linkLibC();
     b.installArtifact(pack);

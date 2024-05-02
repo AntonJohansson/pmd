@@ -28,10 +28,6 @@ pub const Circle = struct {
     model: m4,
 };
 
-pub const Mesh = struct {
-    verts: []const v3,
-};
-
 pub const Rectangle = struct {
     pos: v2,
     size: v2,
@@ -39,6 +35,12 @@ pub const Rectangle = struct {
 
 pub const Cube = struct {
     model: m4,
+};
+
+pub const Mesh = struct {
+    model: m4,
+    name: []const u8,
+    draw_children: bool = false,
 };
 
 pub const Camera3d = extern struct {
@@ -51,8 +53,8 @@ pub const Camera3d = extern struct {
 pub const Camera2d = struct {
     target: v2,
     zoom: f32,
-    scale: v2 = .{.x=0.5,.y=0.5},
-    offset: v2 = .{.x=0,.y=0},
+    scale: v2 = .{ .x = 0.5, .y = 0.5 },
+    offset: v2 = .{ .x = 0, .y = 0 },
 };
 
 pub const End3d = struct {};

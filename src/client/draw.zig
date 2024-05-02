@@ -14,7 +14,6 @@ const v3 = math.v3;
 const v4 = math.v4;
 const m4 = math.m4;
 
-
 const sokol = @import("sokol");
 const sg = sokol.gfx;
 const slog = sokol.log;
@@ -86,6 +85,87 @@ var rectangle_bind = sg.Bindings{};
 var cube_bind = sg.Bindings{};
 var pass_action_2d = sg.PassAction{};
 
+var pipelines: std.BoundedArray(sg.Pipeline, 16) = .{};
+var shd_3d: sg.Shader = undefined;
+
+const BindInfo = struct {
+    base: *const u8,
+    prim_index: u32,
+    mesh_index: u32,
+    bind: sg.Bindings,
+};
+
+var binds: std.BoundedArray(BindInfo, 64) = .{};
+
+fn sliceFromBufferView(model: res.Model, view: res.BufferView) []const u8 {
+    const base: [*]const u8 = @ptrCast(model.binary_data.ptr);
+    return (base + view.offset)[0..view.size];
+}
+
+fn buildBindForMesh(model: res.Model, mesh_index: u32, prim_index: u32) sg.Bindings {
+    const mesh = model.meshes[mesh_index];
+    const prim = mesh.primitives[prim_index];
+    var bind: sg.Bindings = .{};
+    if ((prim.buffer_types & res.bt_position) != 0) {
+        const buf = sliceFromBufferView(model, prim.pos);
+        bind.vertex_buffers[0] = sg.makeBuffer(.{
+            .data = sg.asRange(buf),
+        });
+    }
+    if ((prim.buffer_types & res.bt_indices) != 0) {
+        const buf = sliceFromBufferView(model, prim.indices);
+        bind.index_buffer = sg.makeBuffer(.{
+            .type = .INDEXBUFFER,
+            .data = sg.asRange(buf),
+        });
+    }
+    return bind;
+}
+
+fn bindForMesh(model: res.Model, mesh_index: u32, prim_index: u32) sg.Bindings {
+    for (binds.buffer) |info| {
+        if (info.base == @as(*const u8, @ptrCast(model.binary_data.ptr)) and info.mesh_index == mesh_index and info.prim_index == prim_index)
+            return info.bind;
+    }
+    const bind = buildBindForMesh(model, mesh_index, prim_index);
+    binds.appendAssumeCapacity(.{ .base = @ptrCast(model.binary_data.ptr), .mesh_index = mesh_index, .prim_index = prim_index, .bind = bind });
+    return bind;
+}
+
+fn buildPipelineForModel(model: res.Model) *sg.Pipeline {
+    _ = model;
+    var pass_desc = sg.PassDesc{};
+    pass_desc.color_attachments[0].image = offscreen_3d.color;
+    pass_desc.depth_stencil_attachment.image = offscreen_3d.depth;
+    offscreen_3d.pass = sg.makePass(pass_desc);
+
+    var desc = sg.PipelineDesc{
+        .index_type = .UINT16,
+        .shader = shd_3d,
+        .primitive_type = .TRIANGLE,
+        .cull_mode = .FRONT,
+        .sample_count = 1,
+        .depth = .{
+            .pixel_format = .DEPTH,
+            .compare = .LESS_EQUAL,
+            .write_enabled = true,
+        },
+    };
+    desc.colors[0] = .{
+        .blend = .{
+            .enabled = true,
+            .src_factor_rgb = .SRC_ALPHA,
+            .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+        },
+        .pixel_format = .RGBA8,
+    };
+    desc.layout.attrs[0].format = .FLOAT3;
+
+    const pip = pipelines.addOneAssumeCapacity();
+    pip.* = sg.makePipeline(desc);
+    return pip;
+}
+
 const Uniforms = struct {
     mvp: m4,
     color: v4,
@@ -117,9 +197,9 @@ const rectangle_vertices = [_]f32{ -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5 };
 const rectangle_indices = [_]u16{ 0, 1, 2, 0, 2, 3 };
 
 const textured_rectangle_vertices = [_]f32{
-    -1.0,  1.0, 0.0, 0.0, // top left
-     1.0,  1.0, 1.0, 0.0, // top right
-     1.0, -1.0, 1.0, 1.0, // bottom right
+    -1.0, 1.0, 0.0, 0.0, // top left
+    1.0, 1.0, 1.0, 0.0, // top right
+    1.0, -1.0, 1.0, 1.0, // bottom right
     -1.0, -1.0, 0.0, 1.0, // bottom left
 };
 const textured_rectangle_indices = [_]u16{ 0, 1, 2, 0, 2, 3 };
@@ -143,13 +223,22 @@ const cube_indices = [_]u16{
     3, 2, 6, 3, 6, 7, // bottom face
 };
 
+var cube_model: res.Model = undefined;
+var pip_cube_model = sg.Pipeline{};
+var bind_cube_model = sg.Bindings{};
+var pack: *goosepack.Pack = undefined;
+var mem: common.MemoryAllocators = undefined;
+
 //var cc_shader: raylib.Shader = undefined;
 //var font: raylib.Font = undefined;
-pub fn init(mem: common.MemoryAllocators, pack: *goosepack.Pack) void {
-    _ = mem;
+pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
+    mem = _mem;
+
     sg.setup(.{
         .logger = .{ .func = slog.func },
     });
+
+    pack = _pack;
 
     // Setup debug text
     var sdtx_desc = sdtx.Desc{
@@ -216,7 +305,6 @@ pub fn init(mem: common.MemoryAllocators, pack: *goosepack.Pack) void {
     }
 
     // 3d shader
-    var shd_3d: sg.Shader = undefined;
     {
         var shd_desc = sg.ShaderDesc{};
         shd_desc.vs.source =
@@ -314,13 +402,8 @@ pub fn init(mem: common.MemoryAllocators, pack: *goosepack.Pack) void {
             .name = "color",
             .type = .FLOAT4,
         };
-        shd_desc.fs.images[0] = .{
-            .used = true,
-            .image_type = .CUBE
-        };
-        shd_desc.fs.samplers[0] = .{
-            .used = true
-        };
+        shd_desc.fs.images[0] = .{ .used = true, .image_type = .CUBE };
+        shd_desc.fs.samplers[0] = .{ .used = true };
         shd_desc.fs.image_sampler_pairs[0] = .{
             .used = true,
             .image_slot = 0,
@@ -340,7 +423,7 @@ pub fn init(mem: common.MemoryAllocators, pack: *goosepack.Pack) void {
             .load_action = .LOAD,
         };
 
-        offscreen_3d.color = sg.makeImage(.{ 
+        offscreen_3d.color = sg.makeImage(.{
             .render_target = true,
             .width = 800,
             .height = 600,
@@ -348,7 +431,7 @@ pub fn init(mem: common.MemoryAllocators, pack: *goosepack.Pack) void {
             .sample_count = 1,
         });
 
-        offscreen_3d.depth = sg.makeImage(.{ 
+        offscreen_3d.depth = sg.makeImage(.{
             .render_target = true,
             .width = 800,
             .height = 600,
@@ -364,7 +447,7 @@ pub fn init(mem: common.MemoryAllocators, pack: *goosepack.Pack) void {
         var pip_desc = sg.PipelineDesc{
             .index_type = .UINT16,
             .shader = shd_3d,
-            .cull_mode = .BACK,
+            .cull_mode = .FRONT,
             .sample_count = 1,
             .depth = .{
                 .pixel_format = .DEPTH,
@@ -393,7 +476,7 @@ pub fn init(mem: common.MemoryAllocators, pack: *goosepack.Pack) void {
 
         offscreen_2d.clear_pass_action.colors[0] = .{
             .load_action = .CLEAR,
-            .clear_value = .{.r=0,.g=0,.b=0,.a=0},
+            .clear_value = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
         };
 
         offscreen_2d.color = sg.makeImage(.{
@@ -628,7 +711,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     sg.applyBindings(offscreen_cubemap.bind);
                     const scale = 80000.0;
                     const uniforms = Uniforms{
-                        .mvp = m4.transpose(m4.mul(vp, m4.modelWithRotations(.{},.{.x=scale,.y=scale,.z=scale},.{.x=std.math.pi/2.0,.y=0.0,.z=0}))),
+                        .mvp = m4.transpose(m4.mul(vp, m4.modelWithRotations(.{}, .{ .x = scale, .y = scale, .z = scale }, .{ .x = std.math.pi / 2.0, .y = 0.0, .z = 0 }))),
                         .color = v4{
                             .x = @as(f32, @floatFromInt(255)) / 255.0,
                             .y = @as(f32, @floatFromInt(255)) / 255.0,
@@ -685,10 +768,10 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 {
                     //const offset = v2{ .x = r.size.x / 2, .y = r.size.y / 2 };
                     const size = .{
-                        .x = scaled_fontsize*@as(f32, @floatFromInt(text.len))/@as(f32, @floatFromInt(width)),
+                        .x = scaled_fontsize * @as(f32, @floatFromInt(text.len)) / @as(f32, @floatFromInt(width)),
                         .y = scaled_fontsize / @as(f32, @floatFromInt(height)),
                     };
-                    const model = m4.model2d(v2.add(text.pos, .{.x=size.x/2.0,.y=size.y/2.0}), size);
+                    const model = m4.model2d(v2.add(text.pos, .{ .x = size.x / 2.0, .y = size.y / 2.0 }), size);
                     const uniforms = Uniforms{
                         .mvp = m4.transpose(m4.mul(vp, model)),
                         .color = v4{
@@ -752,43 +835,43 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 //    castToRaylibColor(header.color)
                 //);
             },
-            .Mesh => {
-                const m = b.pop(primitive.Mesh);
-                _ = m;
-
-                //var bind = sg.Bindings{};
-                //bind.vertex_buffers[0] = sg.makeBuffer(.{
-                //    .data = sg.asRange(m.verts),
-                //});
-
-                //const model = m4.model(.{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 });
-                //var uniforms = Uniforms{
-                //    .mvp = m4.transpose(m4.mul(vp, model)),
-                //    .color = v4{ .x = 255.0, .y = 255.0, .z = 255.0, .w = 255.0 },
-                //};
-
-                //// TODO(anjo): We're always going to miss the last edge, we have to list
-                //// the first vertex at the end to get around this...
-                ////
-                //// we can probably use a geometry shader
-                ////  https://learnopengl.com/Advanced-OpenGL/Geometry-Shader
-                ////sg.applyPipeline(pip_mesh_line);
-                ////sg.applyBindings(bind);
-                ////sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                ////sg.draw(0, @intCast(m.verts.len), 1);
-
-                //uniforms.color.x = @as(f32, @floatFromInt(header.color.r)) / 255.0;
-                //uniforms.color.y = @as(f32, @floatFromInt(header.color.g)) / 255.0;
-                //uniforms.color.z = @as(f32, @floatFromInt(header.color.b)) / 255.0;
-                //uniforms.color.w = @as(f32, @floatFromInt(header.color.a)) / 255.0;
-
-                //sg.applyPipeline(pip_mesh);
-                //sg.applyBindings(bind);
-                //sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                //sg.draw(0, @intCast(m.verts.len), 1);
-
-                //sg.destroyBuffer(bind.vertex_buffers[0]);
-            },
+            // .Mesh => {
+            //     const m = b.pop(primitive.Mesh);
+            //     _ = m;
+            //
+            //     //var bind = sg.Bindings{};
+            //     //bind.vertex_buffers[0] = sg.makeBuffer(.{
+            //     //    .data = sg.asRange(m.verts),
+            //     //});
+            //
+            //     //const model = m4.model(.{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 });
+            //     //var uniforms = Uniforms{
+            //     //    .mvp = m4.transpose(m4.mul(vp, model)),
+            //     //    .color = v4{ .x = 255.0, .y = 255.0, .z = 255.0, .w = 255.0 },
+            //     //};
+            //
+            //     //// TODO(anjo): We're always going to miss the last edge, we have to list
+            //     //// the first vertex at the end to get around this...
+            //     ////
+            //     //// we can probably use a geometry shader
+            //     ////  https://learnopengl.com/Advanced-OpenGL/Geometry-Shader
+            //     ////sg.applyPipeline(pip_mesh_line);
+            //     ////sg.applyBindings(bind);
+            //     ////sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+            //     ////sg.draw(0, @intCast(m.verts.len), 1);
+            //
+            //     //uniforms.color.x = @as(f32, @floatFromInt(header.color.r)) / 255.0;
+            //     //uniforms.color.y = @as(f32, @floatFromInt(header.color.g)) / 255.0;
+            //     //uniforms.color.z = @as(f32, @floatFromInt(header.color.b)) / 255.0;
+            //     //uniforms.color.w = @as(f32, @floatFromInt(header.color.a)) / 255.0;
+            //
+            //     //sg.applyPipeline(pip_mesh);
+            //     //sg.applyBindings(bind);
+            //     //sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+            //     //sg.draw(0, @intCast(m.verts.len), 1);
+            //
+            //     //sg.destroyBuffer(bind.vertex_buffers[0]);
+            // },
             .Rectangle => {
                 const r = b.pop(primitive.Rectangle);
                 const offset = v2{ .x = r.size.x / 2, .y = r.size.y / 2 };
@@ -806,6 +889,69 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 sg.applyBindings(rectangle_bind);
                 sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
                 sg.draw(0, rectangle_indices.len, 1);
+            },
+            .Mesh => {
+                const cmd = b.pop(primitive.Mesh);
+
+                const node_entry_info = goosepack.lookupEntry(pack, cmd.name);
+                const node = goosepack.getResource(pack, node_entry_info.index).model_node;
+                const model_res = goosepack.lookup(pack, node.model_name).model;
+
+                if (cmd.draw_children and node_entry_info.entry.children != null) {
+                    var stack = std.ArrayList(struct {
+                        info: goosepack.EntryInfo,
+                        parent_transform: m4,
+                    }).initCapacity(mem.frame, 16) catch unreachable;
+                    stack.appendAssumeCapacity(.{ .info = node_entry_info, .parent_transform = cmd.model });
+                    while (stack.popOrNull()) |item| {
+                        const mesh_node = goosepack.getResource(pack, item.info.index).model_node;
+                        const mesh = model_res.meshes[mesh_node.mesh_index];
+                        const transform = m4.mul(item.parent_transform, mesh_node.transform);
+                        for (mesh.primitives, 0..) |p, prim_index| {
+                            const bind = bindForMesh(model_res, mesh_node.mesh_index, @intCast(prim_index));
+                            const mat = model_res.materials[p.material_index];
+                            sg.applyPipeline(offscreen_3d.pip);
+                            sg.applyBindings(bind);
+                            const uniforms = Uniforms{
+                                .mvp = m4.transpose(m4.mul(vp, transform)),
+                                .color = v4{
+                                    .x = mat.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                                    .y = mat.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                                    .z = mat.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                                    .w = mat.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                                },
+                            };
+                            sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                            sg.draw(0, @intCast(p.indices.size / 2), 1);
+                        }
+
+                        if (item.info.entry.children) |children| {
+                            for (children) |c| {
+                                const entry = pack.entries.?.items[c];
+                                stack.appendAssumeCapacity(.{ .info = .{ .entry = entry, .index = c }, .parent_transform = transform });
+                            }
+                        }
+                    }
+                } else {
+                    const mesh = model_res.meshes[node.mesh_index];
+                    for (mesh.primitives, 0..) |p, prim_index| {
+                        const bind = bindForMesh(model_res, node.mesh_index, @intCast(prim_index));
+                        const mat = model_res.materials[p.material_index];
+                        sg.applyPipeline(offscreen_3d.pip);
+                        sg.applyBindings(bind);
+                        const uniforms = Uniforms{
+                            .mvp = m4.transpose(m4.mul(vp, m4.mul(cmd.model, node.transform))),
+                            .color = v4{
+                                .x = mat.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                                .y = mat.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                                .z = mat.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                                .w = mat.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                            },
+                        };
+                        sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                        sg.draw(0, @intCast(p.indices.size / 2), 1);
+                    }
+                }
             },
             .Cube => {
                 const cube = b.pop(primitive.Cube);
@@ -825,25 +971,45 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
                     sg.draw(0, cube_indices.len, 1);
                 }
+
+                // {
+                //     sg.applyPipeline(offscreen_3d.pip);
+                //     sg.applyBindings(bind_cube_model);
+                //     const uniforms = Uniforms{
+                //         //.mvp = m4.transpose(m4.mul(vp, m4.model(.{.x=0,.y=0,.z=10}, .{.x=10,.y=10,.z=10}))),
+                //         //.mvp = m4.transpose(m4.mul(vp, cube.model)),
+                //         .mvp = m4.transpose(m4.mul(vp, m4.mul(cube.model, m4.model(.{ .x = 0, .y = 0, .z = 0 }, .{ .x = 0.5, .y = 0.5, .z = 0.5 })))),
+                //
+                //         .color = v4{
+                //             .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                //             .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                //             .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                //             .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                //         },
+                //     };
+                //     sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                //     sg.draw(0, @intCast(cube_model.indices.?.len / 2), 1);
+                // }
             },
             .Plane => {
                 const p = b.pop(primitive.Plane);
-                {
-                    sg.applyPipeline(offscreen_3d.pip);
-                    sg.applyBindings(cube_bind);
-                    const uniforms = Uniforms{
-                        .mvp = m4.transpose(m4.mul(vp, p.model)),
-                        .color = v4{
-                            .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                            .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                            .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                            .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                        },
-                    };
+                _ = p;
+                //{
+                //    sg.applyPipeline(offscreen_3d.pip);
+                //    sg.applyBindings(cube_bind);
+                //    const uniforms = Uniforms{
+                //        .mvp = m4.transpose(m4.mul(vp, p.model)),
+                //        .color = v4{
+                //            .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                //            .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                //            .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                //            .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                //        },
+                //    };
 
-                    sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                    sg.draw(0, cube_indices.len, 1);
-                }
+                //    sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                //    sg.draw(0, cube_indices.len, 1);
+                //}
             },
             .Vector => {
                 const vector = b.pop(primitive.Vector);

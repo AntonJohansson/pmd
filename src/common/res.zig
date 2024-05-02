@@ -2,6 +2,8 @@ const std = @import("std");
 
 const common = @import("common.zig");
 const profile = common.profile;
+const primitive = common.primitive;
+const math = common.math;
 
 const logging = common.logging;
 var log: logging.Log = .{
@@ -60,8 +62,8 @@ pub const Cubemap = struct {
     channels: u32 = 0,
 
     pub fn faceSlice(cm: *const Cubemap, face: usize) []u8 {
-        const bytes = cm.width*cm.height*cm.channels;
-        return cm.bytes[face*bytes..(face+1)*bytes];
+        const bytes = cm.width * cm.height * cm.channels;
+        return cm.bytes[face * bytes .. (face + 1) * bytes];
     }
 };
 
@@ -88,14 +90,14 @@ const SoundInfo = struct {
 
 const sound_info_map = blk: {
     var map: [@typeInfo(SoundType).Enum.fields.len]SoundInfo = undefined;
-    map[@intFromEnum(.death)]         = .{.path=dir_audio ++ "kill.ogg",      .volume=0.7};
-    map[@intFromEnum(.slide)]         = .{.path=dir_audio ++ "slide.ogg",     .volume=0.7};
-    map[@intFromEnum(.sniper)]        = .{.path=dir_audio ++ "sniper.ogg",    .volume=0.7};
-    map[@intFromEnum(.weapon_switch)] = .{.path=dir_audio ++ "switch.ogg",    .volume=0.2};
-    map[@intFromEnum(.step)]          = .{.path=dir_audio ++ "step.ogg",      .volume=0.7};
-    map[@intFromEnum(.pip)]           = .{.path=dir_audio ++ "pip.ogg",       .volume=0.7};
-    map[@intFromEnum(.explosion)]     = .{.path=dir_audio ++ "explosion.ogg", .volume=0.7};
-    map[@intFromEnum(.doink)]         = .{.path=dir_audio ++ "doink.ogg",     .volume=0.7};
+    map[@intFromEnum(.death)] = .{ .path = dir_audio ++ "kill.ogg", .volume = 0.7 };
+    map[@intFromEnum(.slide)] = .{ .path = dir_audio ++ "slide.ogg", .volume = 0.7 };
+    map[@intFromEnum(.sniper)] = .{ .path = dir_audio ++ "sniper.ogg", .volume = 0.7 };
+    map[@intFromEnum(.weapon_switch)] = .{ .path = dir_audio ++ "switch.ogg", .volume = 0.2 };
+    map[@intFromEnum(.step)] = .{ .path = dir_audio ++ "step.ogg", .volume = 0.7 };
+    map[@intFromEnum(.pip)] = .{ .path = dir_audio ++ "pip.ogg", .volume = 0.7 };
+    map[@intFromEnum(.explosion)] = .{ .path = dir_audio ++ "explosion.ogg", .volume = 0.7 };
+    map[@intFromEnum(.doink)] = .{ .path = dir_audio ++ "doink.ogg", .volume = 0.7 };
     break :blk map;
 };
 
@@ -111,8 +113,65 @@ pub fn loadAudio(st: SoundType) !void {
     std.debug.assert(err == 0);
 
     const vorbis_info = c.stb_vorbis_get_info(vorbis);
-    const num_samples: usize = @as(c_uint, @intCast(vorbis_info.channels))*c.stb_vorbis_stream_length_in_samples(vorbis);
+    const num_samples: usize = @as(c_uint, @intCast(vorbis_info.channels)) * c.stb_vorbis_stream_length_in_samples(vorbis);
     info.samples = try mem.persistent.alloc(f32, num_samples);
     const samples_per_channel = c.stb_vorbis_get_samples_float_interleaved(vorbis, vorbis_info.channels, &info.samples[0], @intCast(num_samples));
-    std.debug.assert(samples_per_channel*2 == num_samples);
+    std.debug.assert(samples_per_channel * 2 == num_samples);
 }
+
+//
+// Model
+//
+
+pub const VertexAttribute = enum(u8) {
+    position = 0,
+    normal = 1,
+    texcoord = 2,
+    color0 = 3,
+};
+const SLOT_tex = 0;
+const SLOT_smp = 0;
+const SLOT_vs_params = 0;
+
+pub const bt_position: u8 = 1;
+pub const bt_normal: u8 = 2;
+pub const bt_texcoords: u8 = 4;
+pub const bt_indices: u8 = 8;
+
+pub const ModelNode = struct {
+    model_name: []const u8 = undefined,
+    mesh_index: u32 = 0,
+    transform: math.m4 = undefined,
+};
+
+pub const MaterialIndex = u16;
+
+pub const Mesh = struct {
+    primitives: []MeshPrimitive = undefined,
+};
+
+pub const MeshPrimitive = struct {
+    buffer_types: u8 = 0,
+    pos: BufferView = undefined,
+    normals: BufferView = undefined,
+    texcoords: BufferView = undefined,
+    indices: BufferView = undefined,
+    material_index: MaterialIndex,
+};
+
+pub const Model = struct {
+    binary_data: []const u8 = undefined,
+    meshes: []Mesh = undefined,
+    materials: []Material = undefined,
+    nodes: []u32 = undefined,
+};
+
+pub const BufferView = struct {
+    offset: u32,
+    size: u32,
+};
+
+pub const Material = struct {
+    // metallic
+    base_color: math.v4 = .{},
+};
