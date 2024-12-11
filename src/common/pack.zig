@@ -15,6 +15,12 @@ pub const Header = struct {
     entry_table_offset: u32 = 0,
 };
 
+// @debug
+pub const EntrySrc = struct {
+    path: []const u8,
+    mtime: u64 = 0,
+};
+
 pub const Entry = struct {
     type: ResourceType,
     offset: u32,
@@ -22,13 +28,17 @@ pub const Entry = struct {
     name: []const u8,
     children: ?[]u32 = null,
     parent: ?u32 = null,
+
+    srcs: []EntrySrc,
 };
 
 pub const Resource = union {
     text: res.Text,
+    shader: res.Shader,
     image: res.Image,
     cubemap: res.Cubemap,
     audio: res.Audio,
+    font: res.Font,
     model: res.Model,
     model_node: res.ModelNode,
 };
@@ -39,6 +49,7 @@ pub const ResourceType = enum(u8) {
     cubemap,
     texture,
     shader,
+    font,
     model,
     model_node,
     model_binary,
@@ -84,7 +95,7 @@ pub fn load(pack: *Pack, bytes: []u8) !void {
     }
 
     if (pack.header.entry_table_count > 0) {
-        var entries = try pack.entries.?.addManyAsSlice(pack.header.entry_table_count);
+        const entries = try pack.entries.?.addManyAsSlice(pack.header.entry_table_count);
         try pack.resource_dirty.?.appendNTimes(false, pack.header.entry_table_count);
         offset = pack.header.entry_table_offset;
         for (entries) |*e| {
@@ -107,17 +118,20 @@ pub fn saveToMemory(pack: *Pack) !StringBuilder {
                 e.offset = @intCast(builder.getOffset());
                 switch (e.type) {
                     .text => try memoryWriteType(&builder, resource.text),
+                    .shader => try memoryWriteType(&builder, resource.shader),
                     .texture => try memoryWriteType(&builder, resource.image),
                     .cubemap => try memoryWriteType(&builder, resource.cubemap),
                     .audio => try memoryWriteType(&builder, resource.audio),
+                    .font => try memoryWriteType(&builder, resource.font),
                     .model => try memoryWriteType(&builder, resource.model),
                     .model_node => try memoryWriteType(&builder, resource.model_node),
-                    .shader => unreachable,
                     else => unreachable,
                 }
                 e.size = @as(u32, @intCast(builder.getOffset())) - e.offset;
             } else if (pack.bytes) |bytes| {
+                const offset: u32 = @intCast(builder.getOffset());
                 try builder.writeBytes(bytes[e.offset..(e.offset + e.size)]);
+                e.offset = offset;
             } else {
                 unreachable;
             }
@@ -154,6 +168,10 @@ pub fn getResource(pack: *Pack, id: usize) Resource {
             resource = Resource{ .text = .{} };
             memoryReadType(res.Text, pack.bytes.?, &offset, &resource.text);
         },
+        .shader => {
+            resource = Resource{ .shader = .{} };
+            memoryReadType(res.Shader, pack.bytes.?, &offset, &resource.shader);
+        },
         .texture => {
             resource = Resource{ .image = .{} };
             memoryReadType(res.Image, pack.bytes.?, &offset, &resource.image);
@@ -165,6 +183,10 @@ pub fn getResource(pack: *Pack, id: usize) Resource {
         .audio => {
             resource = Resource{ .audio = .{} };
             memoryReadType(res.Audio, pack.bytes.?, &offset, &resource.audio);
+        },
+        .font => {
+            resource = Resource{ .font = .{} };
+            memoryReadType(res.Font, pack.bytes.?, &offset, &resource.font);
         },
         .model_node => {
             resource = Resource{ .model_node = .{} };
@@ -184,30 +206,75 @@ pub const EntryInfo = struct {
     entry: Entry,
 };
 
-pub fn lookupEntry(pack: *Pack, name: []const u8) EntryInfo {
+pub fn lookupEntry(pack: *Pack, name: []const u8) ?EntryInfo {
     // TODO: Use stringmap lookup
     for (pack.entries.?.items, 0..) |e, i| {
         if (std.mem.eql(u8, e.name, name)) {
             return .{ .index = i, .entry = e };
         }
     }
-
-    unreachable;
+    return null;
 }
 
-pub fn lookup(pack: *Pack, name: []const u8) Resource {
-    return getResource(pack, lookupEntry(pack, name).index);
+pub fn lookup(pack: *Pack, name: []const u8) ?Resource {
+    const ei = lookupEntry(pack, name) orelse return null;
+    return getResource(pack, ei.index);
 }
 
-pub fn addResource(pack: *Pack, path: []const u8, res_type: ResourceType, resource: Resource, parent: ?u32, children: ?[]u32) !void {
+pub fn addResource(pack: *Pack, srcs: []EntrySrc, name: []const u8, res_type: ResourceType, resource: Resource, parent: ?u32, children: ?[]u32) !void {
+    const index = pack.entries.?.items.len;
     const entry = try pack.entries.?.addOne();
     entry.offset = @intCast(pack.resources.?.items.len);
-    try pack.resource_dirty.?.append(true);
+
+    // TODO: nasty
+    try pack.resource_dirty.?.ensureTotalCapacity(index + 1);
+    const start = pack.resource_dirty.?.items.len;
+    pack.resource_dirty.?.expandToCapacity();
+    for (start..pack.resource_dirty.?.capacity) |i| {
+        pack.resource_dirty.?.items[i] = false;
+    }
+    pack.resource_dirty.?.items[index] = true;
+
     entry.type = res_type;
-    entry.name = path;
+    entry.name = name;
     entry.parent = parent;
     entry.children = children;
+
+    entry.srcs = srcs;
+    for (entry.srcs) |*s| {
+        s.mtime = try getFileMTime(s.path);
+    }
+
     try pack.resources.?.append(resource);
+}
+
+pub fn deleteEntry(pack: *Pack, entry: Entry) void {
+    var i: usize = 0;
+    while (i < pack.entries.?.items.len) {
+        const e = pack.entries.?.items[i];
+        if (std.mem.eql(u8, e.name, entry.name)) {
+            _ = pack.entries.?.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+pub fn getFileMTime(path: []const u8) !u64 {
+    const f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    const stat = try f.stat();
+    return @intCast(@divTrunc(stat.mtime, 1000000));
+}
+
+pub fn hasEntryBeenModified(entry: Entry) bool {
+    for (entry.srcs) |s| {
+        const new_mtime = getFileMTime(s.path) catch return false;
+        if (new_mtime != s.mtime) {
+            return true;
+        }
+    }
+    return false;
 }
 
 //
@@ -330,7 +397,7 @@ const StringBuilder = struct {
             const remaining = bytes.len - start_offset;
             try self.addSegmentBySize(remaining);
             const last = self.getLastSegment() orelse unreachable;
-            @memcpy(last.data, bytes[start_offset..]);
+            @memcpy(last.data[0..remaining], bytes[start_offset..]);
             last.used = remaining;
         }
     }
@@ -338,7 +405,7 @@ const StringBuilder = struct {
     fn writeInt(self: *StringBuilder, comptime T: type, value: T) !void {
         const size = @divFloor(@typeInfo(T).Int.bits + 7, 8);
         const bytes = try self.getMemory(size);
-        std.mem.writeIntLittle(T, @ptrCast(bytes.ptr), value);
+        std.mem.writeInt(T, @ptrCast(bytes.ptr), value, .little);
     }
 
     fn writeFloat(self: *StringBuilder, comptime T: type, value: T) !void {
@@ -416,32 +483,30 @@ fn memoryReadType(comptime T: type, bytes: []u8, offset: *usize, value: anytype)
     const ti = @typeInfo(T);
     switch (ti) {
         .Int => {
-            var b: *[@sizeOf(T)]u8 = @ptrCast(bytes.ptr + offset.*);
-            value.* = std.mem.readIntLittle(T, b);
+            const b: *[@sizeOf(T)]u8 = @ptrCast(bytes.ptr + offset.*);
+            value.* = std.mem.readInt(T, b, .little);
             offset.* += memorySizeOfIntType(T);
         },
         .Enum => |e| {
-            var b: *[@sizeOf(T)]u8 = @ptrCast(bytes.ptr + offset.*);
-            const i = std.mem.readIntLittle(e.tag_type, b);
+            const b: *[@sizeOf(T)]u8 = @ptrCast(bytes.ptr + offset.*);
+            const i = std.mem.readInt(e.tag_type, b, .little);
             value.* = @enumFromInt(i);
             offset.* += memorySizeOfIntType(e.tag_type);
         },
         .Float => |f| {
             const IntT = std.meta.Int(.unsigned, f.bits);
-            var b: *[@sizeOf(IntT)]u8 = @ptrCast(bytes.ptr + offset.*);
-            value.* = @as(T, @bitCast(std.mem.readIntLittle(IntT, b)));
-            std.log.info("float: {x}", .{@as(IntT, @bitCast(std.mem.readIntLittle(IntT, b)))});
+            const b: *[@sizeOf(IntT)]u8 = @ptrCast(bytes.ptr + offset.*);
+            value.* = @as(T, @bitCast(std.mem.readInt(IntT, b, .little)));
             offset.* += memorySizeOfIntType(IntT);
         },
         .Pointer => |ptr| {
             std.debug.assert(ptr.size == .Slice);
 
-            var b: *[@sizeOf(u64)]u8 = @ptrCast(bytes.ptr + offset.*);
-            const len = std.mem.readIntLittle(u64, b);
+            const b: *[@sizeOf(u64)]u8 = @ptrCast(bytes.ptr + offset.*);
+            const len = std.mem.readInt(u64, b, .little);
             offset.* += memorySizeOfIntType(u64);
 
             if (@typeInfo(ptr.child) == .Int or @typeInfo(ptr.child) == .Float) {
-                std.log.info("read align {} {} -> {}", .{ T, offset.*, alignIntTo(offset.*, @alignOf(ptr.child)) });
                 offset.* = alignIntTo(offset.*, @alignOf(ptr.child));
                 const src_ptr: [*]align(@alignOf(ptr.child)) u8 = @alignCast(@ptrCast(bytes[offset.*..]));
                 value.* = @as([*]ptr.child, @ptrCast(src_ptr))[0..len];
@@ -454,14 +519,19 @@ fn memoryReadType(comptime T: type, bytes: []u8, offset: *usize, value: anytype)
                 value.* = slice;
             }
         },
+        .Array => |arr| {
+            for (value) |*v| {
+                memoryReadType(arr.child, bytes, offset, v);
+            }
+        },
         .Struct => |s| {
             inline for (s.fields) |field| {
                 memoryReadType(field.type, bytes, offset, &@field(value, field.name));
             }
         },
         .Optional => |o| {
-            var b: *[@sizeOf(u8)]u8 = @ptrCast(bytes.ptr + offset.*);
-            const nonnull = std.mem.readIntLittle(u8, b);
+            const b: *[@sizeOf(u8)]u8 = @ptrCast(bytes.ptr + offset.*);
+            const nonnull = std.mem.readInt(u8, b, .little);
             offset.* += memorySizeOfIntType(u8);
             if (nonnull != 0) {
                 memoryReadType(o.child, bytes, offset, value);
@@ -493,13 +563,17 @@ fn memoryWriteType(builder: *StringBuilder, value: anytype) !void {
             if (@typeInfo(ptr.child) == .Int or @typeInfo(ptr.child) == .Float) {
                 const num_bytes = @sizeOf(ptr.child) * value.len;
                 const byte_slice: [*]const u8 = @ptrCast(value.ptr);
-                std.log.info("write align {} {} -> {}", .{ base_type, builder.getOffset(), alignIntTo(builder.getOffset(), @alignOf(ptr.child)) });
                 try builder.alignTo(@alignOf(ptr.child));
                 try builder.writeBytes(byte_slice[0..num_bytes]);
             } else {
                 for (value) |v| {
                     try memoryWriteType(builder, v);
                 }
+            }
+        },
+        .Array => {
+            for (value) |v| {
+                try memoryWriteType(builder, v);
             }
         },
         .Struct => |s| {
@@ -529,7 +603,7 @@ const TS = struct {
 };
 pub fn tttt() !void {
     var builder = StringBuilder.init(persistent);
-    var ts = TS{};
+    const ts = TS{};
     try memoryWriteType(&builder, ts);
     const bytes = try builder.dumpToBuffer();
     var ts2 = TS{};

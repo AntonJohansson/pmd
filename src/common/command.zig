@@ -15,8 +15,12 @@ fn cldrawnet() void {
     config.vars.draw_net = !config.vars.draw_net;
 }
 
-fn clbind(i: i32) void {
+pub fn clbind(i: i32) void {
     std.log.info("wow {}", .{i});
+}
+
+pub fn clconnect(ip_port_str: []const u8) void {
+    std.log.info("want to connect to {s}\n", .{ip_port_str});
 }
 
 //fn clmode2d() void {
@@ -60,37 +64,29 @@ fn clbind(i: i32) void {
 //fn clbloomAniso8()    void { setBloomMode(raylib.TEXTURE_FILTER_ANISOTROPIC_8X); }
 //fn clbloomAniso16()   void { setBloomMode(raylib.TEXTURE_FILTER_ANISOTROPIC_16X); }
 
-fn dodo(comptime func_name: []const u8, comptime func: anytype, it: *std.mem.TokenIterator(u8)) ?std.meta.ArgsTuple(@TypeOf(func)) {
+fn dodo(comptime func_name: []const u8, comptime func: anytype, it: *std.mem.TokenIterator(u8, .any)) ?std.meta.ArgsTuple(@TypeOf(func)) {
     var tuple: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
-    const args = @typeInfo(@TypeOf(func)).Fn.args;
-    inline for (args, 0..) |arg,i| {
+    const args = @typeInfo(@TypeOf(func)).Fn.params;
+    inline for (args, 0..) |arg, i| {
         comptime var buf: [128]u8 = undefined;
-        comptime var name = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+        const name = comptime std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
         if (it.next()) |str| {
-            switch (arg.arg_type.?) {
-                u8,
-                i8,
-                u16,
-                i16,
-                u32,
-                i32,
-                u64,
-                i64 => |t| {
+            switch (arg.type.?) {
+                u8, i8, u16, i16, u32, i32, u64, i64 => |t| {
                     @field(tuple, name) = std.fmt.parseInt(t, str, 0) catch {
-                        std.log.err("failed parsing {s}, expected type {}", .{str, t});
+                        std.log.err("failed parsing {s}, expected type {}", .{ str, t });
                         return null;
                     };
                 },
-                f32,
-                f64 => |t| {
+                f32, f64 => |t| {
                     @field(tuple, name) = std.fmt.parseFloat(t, str) catch {
-                        std.log.err("failed parsing {s}, expected type {}", .{str, t});
+                        std.log.err("failed parsing {s}, expected type {}", .{ str, t });
                         return null;
                     };
                 },
                 []const u8 => @field(tuple, name) = str,
                 else => {
-                    @compileError("Command " ++ func_name ++ " has invalid argument type " ++ @typeName(arg.arg_type.?));
+                    @compileError("Command " ++ func_name ++ " has invalid argument type " ++ @typeName(arg.type.?));
                 },
             }
         } else {
@@ -100,7 +96,7 @@ fn dodo(comptime func_name: []const u8, comptime func: anytype, it: *std.mem.Tok
     }
 
     if (it.rest().len > 0) {
-        std.log.err("Too many arguments supplied, signature {}, {s} superfluous", .{@TypeOf(func), it.rest()});
+        std.log.err("Too many arguments supplied, signature {}, {s} superfluous", .{ @TypeOf(func), it.rest() });
         return null;
     }
 
@@ -132,33 +128,25 @@ pub fn dodododododododo(commandline: []const u8) void {
                             } else if (std.mem.eql(u8, str, "false")) {
                                 @field(config.vars, field.name) = false;
                             } else {
-                                std.log.err("failed parsing {s}, expected type {}", .{str, t});
+                                std.log.err("failed parsing {s}, expected type {}", .{ str, t });
                                 return;
                             }
                         },
-                        u8,
-                        i8,
-                        u16,
-                        i16,
-                        u32,
-                        i32,
-                        u64,
-                        i64 => |t| {
+                        u8, i8, u16, i16, u32, i32, u64, i64 => |t| {
                             @field(config.vars, field.name) = std.fmt.parseInt(t, str, 0) catch {
-                                std.log.err("failed parsing {s}, expected type {}", .{str, t});
+                                std.log.err("failed parsing {s}, expected type {}", .{ str, t });
                                 return;
                             };
                         },
-                        f32,
-                        f64 => |t| {
+                        f32, f64 => |t| {
                             @field(config.vars, field.name) = std.fmt.parseFloat(t, str) catch {
-                                std.log.err("failed parsing {s}, expected type {}", .{str, t});
+                                std.log.err("failed parsing {s}, expected type {}", .{ str, t });
                                 return;
                             };
                         },
                         []const u8 => @field(config.vars, field.name) = str,
                         else => {
-                            std.log.err("{s} has unsupported type {} for set command", .{varname, T});
+                            std.log.err("{s} has unsupported type {} for set command", .{ varname, T });
                         },
                     }
                 } else {
@@ -167,7 +155,6 @@ pub fn dodododododododo(commandline: []const u8) void {
                 }
             }
         }
-
     } else {
         // Here we dispatch to cl*() functions if the command == * and arguments
         // are valid.
@@ -177,7 +164,7 @@ pub fn dodododododododo(commandline: []const u8) void {
             const ti = @typeInfo(T);
             if (ti == .Fn and decl.name.len > "cl".len and decl.name[0] == 'c' and decl.name[1] == 'l' and std.mem.eql(u8, command, decl.name["cl".len..])) {
                 if (dodo(decl.name, f, &it)) |args| {
-                    @call(.{}, f, args);
+                    @call(.auto, f, args);
                 }
             }
         }

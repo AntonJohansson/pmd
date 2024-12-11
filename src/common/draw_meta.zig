@@ -4,23 +4,23 @@ const primitive = @import("primitive.zig");
 pub const PrimitiveKind = blk: {
     const ti = @typeInfo(primitive);
     std.debug.assert(ti == .Struct);
-    std.debug.assert(ti.Struct.fields.len < 1 << 8*@sizeOf(u8));
+    std.debug.assert(ti.Struct.fields.len < 1 << 8 * @sizeOf(u8));
 
-    comptime var num_decls = ti.Struct.decls.len;
+    const num_decls = ti.Struct.decls.len;
 
     var enum_count = 0;
-    var enum_fields: [num_decls] std.builtin.Type.EnumField = undefined;
+    var enum_fields: [num_decls]std.builtin.Type.EnumField = undefined;
 
-    inline for (ti.Struct.decls) |d| {
-        enum_fields[enum_count] = .{.name = d.name, .value = enum_count};
+    for (ti.Struct.decls) |d| {
+        enum_fields[enum_count] = .{ .name = d.name, .value = enum_count };
         enum_count += 1;
     }
 
-    break :blk @Type(std.builtin.Type {
-        .Enum = std.builtin.Type.Enum {
+    break :blk @Type(std.builtin.Type{
+        .Enum = std.builtin.Type.Enum{
             .tag_type = u8,
             .fields = &enum_fields,
-            .decls = &[_]std.builtin.Type.Declaration {},
+            .decls = &[_]std.builtin.Type.Declaration{},
             .is_exhaustive = true,
         },
     });
@@ -29,13 +29,13 @@ pub const PrimitiveKind = blk: {
 pub fn mapPrimitiveToKind(comptime T: type) PrimitiveKind {
     comptime var type_name = @typeName(T);
     comptime var index = 0;
-    inline for (type_name, 0..) |c,i| {
+    inline for (type_name, 0..) |c, i| {
         if (c == '.') {
             index = i;
             break;
         }
     }
-    comptime var name = type_name[index+1..];
+    const name = type_name[index + 1 ..];
     inline for (@typeInfo(PrimitiveKind).Enum.fields) |f| {
         if (std.mem.eql(u8, f.name, name)) {
             return @enumFromInt(f.value);
@@ -47,8 +47,7 @@ pub fn mapPrimitiveToKind(comptime T: type) PrimitiveKind {
 }
 
 pub fn mapKindToPrimitive(comptime kind: PrimitiveKind) type {
-    comptime var T: type = @field(primitive, @tagName(kind));
-    return T;
+    return @field(primitive, @tagName(kind));
 }
 
 pub fn getMessageSize(kind: PrimitiveKind) usize {

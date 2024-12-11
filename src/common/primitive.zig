@@ -3,6 +3,15 @@ const v2 = math.v2;
 const v3 = math.v3;
 const m4 = math.m4;
 
+pub const VoxelTransform = struct {
+    pos: v3,
+};
+
+pub const VoxelChunk = struct {
+    dim: u8 = 16,
+    voxels: []u1,
+};
+
 pub const Color = struct {
     r: u8 = 0,
     g: u8 = 0,
@@ -16,6 +25,8 @@ pub const Text = struct {
     len: usize,
     size: f32,
     cursor_index: ?usize = null,
+    bg: math.v4,
+    fg: math.v4,
 };
 
 pub const Line = struct {
@@ -35,6 +46,11 @@ pub const Rectangle = struct {
 
 pub const Cube = struct {
     model: m4,
+};
+
+pub const CubeOutline = struct {
+    model: m4,
+    thickness: f32 = 0.05,
 };
 
 pub const Mesh = struct {

@@ -1,7 +1,7 @@
 #version 330
-in vec2 fragTexCoord;
-out vec4 finalColor;
-uniform sampler2D texture0;
+in vec2 v_texcoords;
+out vec4 frag_color;
+uniform sampler2D tex;
 
 // post-process pipeline
 //
@@ -74,7 +74,7 @@ vec3 aces(vec3 color) {
 }
 
 void main() {
-    vec3 color = texture(texture0, vec2(fragTexCoord.x, 1.0-fragTexCoord.y)).rgb;
+    vec3 color = texture(tex, vec2(v_texcoords.x, 1.0-v_texcoords.y)).rgb;
 
     float exposure = 1.0;
     color *= exposure;
@@ -97,5 +97,5 @@ void main() {
     float gamma = 2.2;
     color = vec3(pow(color.r, gamma), pow(color.g, gamma), pow(color.b, gamma));
 
-    finalColor = vec4(color, 1.0);
+    frag_color = vec4(color, 1.0);
 }

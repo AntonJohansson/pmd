@@ -44,3 +44,31 @@ First gameplay test:
 
 
 - [ ] Cooldowns going in different directiosn
+
+- General
+  - [ ] Map editor
+  - [ ] Window system
+  - [ ] Ingame console
+  - [ ] Save config to disk
+  - [ ] Rebindable keys
+  - [ ] Profile
+    - [ ] cache misses
+    - [ ] tlb misses
+    - [ ] page faults
+    - [ ] timing
+    - [ ] memory usage
+      - [ ] total process
+      - [ ] frame
+      - [ ] persitent
+  - [ ] 3d animations
+  - [ ] Collision detection
+  - pack
+    - [ ] save to disk of files
+    - [ ] handle modifications of single files without recompiling entire pack
+    - [ ] auto-detect files for recomp. in debug mode
+
+- Gameplay ideas
+  - [ ] CS clone, buy weapons etc
+  - [ ] fight over and control "factories" for weapons
+  - [ ] VIP
+

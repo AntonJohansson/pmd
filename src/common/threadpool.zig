@@ -2,7 +2,7 @@ const std = @import("std");
 const bb = @import("bytebuffer.zig");
 
 pub const Work = struct {
-    func: *const fn(*anyopaque)void,
+    func: *const fn (*anyopaque) void,
     user_ptr: *anyopaque,
     m: *std.Thread.Mutex = undefined,
     c: *std.Thread.Condition = undefined,
@@ -10,12 +10,11 @@ pub const Work = struct {
 };
 
 pub const Future = struct {
-    pub fn wait() void {
-    }
+    pub fn wait() void {}
 };
 
-var should_run = std.atomic.Atomic(bool).init(true);
-var should_wait = std.atomic.Atomic(u32).init(0);
+var should_run = std.atomic.Value(bool).init(true);
+var should_wait = std.atomic.Value(u32).init(0);
 
 var threads: []std.Thread = undefined;
 
@@ -33,7 +32,7 @@ fn worker() void {
         std.Thread.Futex.wait(&should_wait, 0);
         //std.log.info("thread {}: wake", .{id});
 
-        if (!should_run.load(.Acquire))
+        if (!should_run.load(.acquire))
             break;
 
         //std.log.info("thread {}: checking for work", .{id});
@@ -67,7 +66,7 @@ pub fn start(alloc: std.mem.Allocator) !void {
 }
 
 pub fn join() void {
-    should_run.store(false, .Release);
+    should_run.store(false, .release);
     std.Thread.Futex.wake(&should_wait, @intCast(threads.len));
 
     for (threads) |*t| {
@@ -104,5 +103,4 @@ pub fn enqueue(work: []Work) void {
     //std.log.info("All work done", .{});
 }
 
-pub fn sync() void {
-}
+pub fn sync() void {}

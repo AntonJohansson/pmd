@@ -11,7 +11,6 @@ fn osPath(path: *[]const u8) void {
 }
 
 pub fn CodeModule(comptime function_table_type: type) type {
-
     return struct {
         lib: std.DynLib = undefined,
         dir: []const u8,
@@ -24,22 +23,22 @@ pub fn CodeModule(comptime function_table_type: type) type {
         const Self = @This();
         pub fn init(allocator: std.mem.Allocator, dir: []const u8, name: []const u8) !Self {
             const prefix = switch (builtin.os.tag) {
-                .linux, .freebsd, .openbsd    => "lib",
-                .windows                      => "",
+                .linux, .freebsd, .openbsd => "lib",
+                .windows => "",
                 .macos, .tvos, .watchos, .ios => "",
                 else => return,
             };
             const ext = switch (builtin.os.tag) {
-                .linux, .freebsd, .openbsd    => ".so",
-                .windows                      => ".dll",
+                .linux, .freebsd, .openbsd => ".so",
+                .windows => ".dll",
                 .macos, .tvos, .watchos, .ios => ".dylib",
                 else => return,
             };
-            const libname         = try std.mem.concat(allocator, u8, &[_][]const u8{prefix, name, ext});
-            const libname_running = try std.mem.concat(allocator, u8, &[_][]const u8{prefix, name, ".running", ext});
+            const libname = try std.mem.concat(allocator, u8, &[_][]const u8{ prefix, name, ext });
+            const libname_running = try std.mem.concat(allocator, u8, &[_][]const u8{ prefix, name, ".running", ext });
 
-            const libpath_running = try std.fs.path.join(allocator, &[_][]const u8{dir, libname_running});
-            return Self {
+            const libpath_running = try std.fs.path.join(allocator, &[_][]const u8{ dir, libname_running });
+            return Self{
                 .dir = dir,
                 .path_running = libpath_running,
                 .name = libname,
@@ -54,8 +53,8 @@ pub fn CodeModule(comptime function_table_type: type) type {
             self.lib = try std.DynLib.open(self.path_running);
             inline for (@typeInfo(@TypeOf(self.function_table)).Struct.fields) |f| {
                 // Allocate space for a null-terminated string
-                var name: [:0]u8 = @ptrCast(try allocator.alloc(u8, f.name.len+1));
-                std.mem.copy(u8, name, f.name);
+                var name: [:0]u8 = @ptrCast(try allocator.alloc(u8, f.name.len + 1));
+                @memcpy(name[0..f.name.len], f.name);
                 name[f.name.len] = 0;
 
                 @field(self.function_table, f.name) = self.lib.lookup(f.type, name) orelse {

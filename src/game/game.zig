@@ -48,8 +48,8 @@ const widget_size_plane_xz = v3{ .x = widget_plane_length, .y = widget_plane_thi
 const global_plane_size = v2{ .x = 100.0, .y = 100.0 };
 const ground_plane_size = v2{ .x = 10000.0, .y = 10000.0 };
 
-const textheight = 1.0 / 30.0;
-const fontsize = textheight;
+const fontsize = 1.0 / 30.0;
+const window_fontsize = 1.0 / 60.0;
 
 const grid_size = 32;
 const tile_size = 32.0;
@@ -136,7 +136,7 @@ fn updateWidget(widget: *common.WidgetModel, input: *const Input, start: v3, dir
                     // rotate
                     const l1 = v3.sub(widget.original_interact_pos, r);
                     const l2 = v3.sub(p, r);
-                    const angle = std.math.atan2(f32, v3.dot(v3.cross(l1, l2), widget.move_normal.?), v3.dot(l1, l2));
+                    const angle = std.math.atan2(v3.dot(v3.cross(l1, l2), widget.move_normal.?), v3.dot(l1, l2));
 
                     model = widget.original_model;
                     const rot = m4.modelRot(model);
@@ -390,8 +390,7 @@ fn dumpTypeToDisk(writer: anytype, value: anytype) !void {
             try writer.writeByte('\n');
         },
         .Float => {
-            try std.fmt.formatFloatDecimal(value, .{}, writer);
-            try writer.writeByte('\n');
+            try writer.print("{}\n", .{value});
         },
         .Struct => |s| {
             try writer.writeAll("struct:\n");
@@ -459,6 +458,39 @@ fn readEntitiesFromDisk(memory: *common.Memory) !void {
         try readTypeFromDisk(&it, &entity);
         memory.entities.appendAssumeCapacity(entity);
     }
+}
+
+fn pushWindow(memory: *Memory, title: []const u8, x: f32, y: f32) bool {
+    for (memory.windows.?.items, 0..) |*win, i| {
+        if (std.mem.eql(u8, win.title, title)) {
+            win.children = std.ArrayList(common.WindowItem).init(memory.mem.frame);
+            memory.current_window = i;
+            return true;
+        }
+    }
+
+    memory.windows.?.append(.{
+        .title = title,
+        .x = x,
+        .y = y,
+        .w = 0.20,
+        .h = 0.20,
+        .cursor_x = 0,
+        .cursor_y = 1,
+        .children = std.ArrayList(common.WindowItem).init(memory.mem.frame),
+    }) catch unreachable;
+
+    memory.current_window = memory.windows.?.items.len - 1;
+    return true;
+}
+
+fn pushText(memory: *Memory, text: []const u8) void {
+    const index = memory.current_window.?;
+    memory.windows.?.items[index].children.append(.{
+        .text = .{
+            .str = text,
+        },
+    }) catch unreachable;
 }
 
 export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
@@ -549,17 +581,72 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
         }
     }
 
-    if (input.isset(.Save))
+    if (input.isset(.Save)) {
         dumpEntitiesToDisk(memory.entities.slice()) catch {};
-    if (input.isset(.Load))
+    }
+    if (input.isset(.Load)) {
         readEntitiesFromDisk(memory) catch {};
+    }
+
+    if (memory.windows != null) {
+        if (pushWindow(memory, "wow", 0.5, 0.5)) {
+            pushText(memory, "haha");
+            pushText(memory, "abcarstratrastarst");
+            pushText(memory, "haha");
+            pushText(memory, "haha");
+            pushText(memory, "haha");
+            pushText(memory, "haha");
+            pushText(memory, "haha");
+            pushText(memory, "haha");
+            //const index = memory.current_window.?;
+            //memory.windows.?.items[index].children.append(.{
+            //    .text = .{
+            //        .str = memory.console_input.slice(),
+            //    },
+            //}) catch unreachable;
+        }
+    }
 
     // ?
     if (input.isset(.InMenu)) {
+        // update cursor position
         memory.cursor_pos.x += input.cursor_delta.x;
         memory.cursor_pos.y -= input.cursor_delta.y;
         memory.cursor_pos.x = std.math.clamp(memory.cursor_pos.x, 0, 1);
         memory.cursor_pos.y = std.math.clamp(memory.cursor_pos.y, 0, 1);
+
+        // check window collisions
+        if (memory.windows != null) {
+            for (memory.windows.?.items) |*win| {
+                if (memory.cursor_pos.x >= win.x and
+                    memory.cursor_pos.y >= win.y + win.h - top_bar_height and
+                    memory.cursor_pos.x <= win.x + win.w and
+                    memory.cursor_pos.y <= win.y + win.h)
+                {
+                    win.hover = true;
+                } else {
+                    win.hover = false;
+                }
+
+                if (input.isset(.Interact)) {
+                    if (win.moving) {
+                        win.moving = false;
+                    } else if (win.hover) {
+                        memory.window_moving_offset = v2.sub(.{ .x = win.x, .y = win.y }, memory.cursor_pos);
+                        win.moving = true;
+                    }
+                }
+
+                if (win.moving) {
+                    win.x = memory.cursor_pos.x + memory.window_moving_offset.x;
+                    win.y = memory.cursor_pos.y + memory.window_moving_offset.y;
+                }
+            }
+        }
+
+        //for (memory.windows.?.items) |*win| {
+        //    if (win.moving) {}
+        //}
     }
 }
 
@@ -996,40 +1083,227 @@ fn hsvToRgb(h: f32, s: f32, v: f32) Color {
     };
 }
 
+//fn calculateWindowSizes(windows: *std.ArrayList(Window), index: usize) void {
+//    const window = &windows.items[index];
+//
+//    for (window.children.items) |j| {
+//        calculateWindowSizes(windows, j);
+//        //window.x = @min(window.x, window.x + windows.items[j].x);
+//        //window.y = @min(window.y, window.y + windows.items[j].y);
+//        window.w = @max(window.w, windows.items[j].w);
+//        window.h = @max(window.h, windows.items[j].h);
+//    }
+//}
+
+const top_bar_height = 0.01;
+fn drawWindow(b: *draw_api.CommandBuffer, windows: *std.ArrayList(common.Window), index: usize) void {
+    const window = &windows.items[index];
+
+    //var parent = if (window.parent) |p| &windows.items[p] else null;
+    //var w = if (parent) |p| p.w else 1;
+    //_ = w;
+    //var h = if (parent) |p| p.h else 1;
+    //_ = h;
+    //if (parent) |p| {
+    //    p.cursor_y -= window.h;
+    //}
+    //var x = if (parent) |p| p.x + p.cursor_x else 0;
+    //var y = if (parent) |p| p.y + p.cursor_y else 0;
+
+    // background
+    b.push(primitive.Rectangle{ .pos = .{
+        .x = window.x,
+        .y = window.y,
+    }, .size = .{
+        .x = window.w,
+        .y = window.h - top_bar_height,
+    } }, hsvToRgb(
+        window.color.x,
+        window.color.y,
+        window.color.z,
+    ));
+
+    const top_bar_color_factor: f32 = if (window.moving or window.hover) 0.8 else 1.5;
+
+    // top bar
+    b.push(primitive.Rectangle{ .pos = .{
+        .x = window.x,
+        .y = window.y + window.h - top_bar_height,
+    }, .size = .{
+        .x = window.w,
+        .y = top_bar_height,
+    } }, hsvToRgb(
+        window.color.x,
+        window.color.y,
+        window.color.z * top_bar_color_factor,
+    ));
+
+    window.cursor_x = 0;
+    window.cursor_y = 1;
+    for (window.children.items) |item| {
+        switch (item) {
+            .text => |t| {
+                var text = primitive.Text{
+                    .pos = .{
+                        .x = window.x + window.w * window.cursor_x,
+                        .y = window.y + window.h * window.cursor_y - top_bar_height - window_fontsize,
+                    },
+                    .str = undefined,
+                    .len = t.str.len,
+                    .size = window_fontsize,
+                    .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
+                    .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
+                };
+                @memset(&text.str, 0);
+                const dst: []u8 = &text.str;
+                @memcpy(dst[0..t.str.len], t.str);
+                b.push(text, hsvToRgb(t.color.x, t.color.y, t.color.z));
+
+                window.cursor_y -= window_fontsize / window.h;
+            },
+            else => {},
+        }
+    }
+}
+
+const dim = 16;
+var voxels: [dim][dim][dim]u1 = .{.{.{0} ** dim} ** dim} ** dim;
+var set = false;
+
 export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, player_id: common.EntityId, input: *const Input) void {
+    if (!set) {
+        for (0..dim) |z| {
+            for (0..dim) |y| {
+                for (0..dim) |x| {
+                    const halfdim = dim / 2.0;
+                    const d = v3{
+                        .x = @as(f32, @floatFromInt(x)) - halfdim,
+                        .y = @as(f32, @floatFromInt(y)) - halfdim,
+                        .z = @as(f32, @floatFromInt(z)) - halfdim,
+                    };
+                    if (v3.len(d) <= halfdim) {
+                        voxels[x][y][z] = 1;
+                    }
+                }
+            }
+        }
+        set = true;
+    }
+
     const player = common.findPlayerById(memory.players.slice(), player_id) orelse return;
-    if (player.state == .dead)
+    if (player.state == .dead) {
         return;
+    }
     const camera = player.camera;
 
     b.push(camera, .{});
 
-    // Draw map(?)
-    var prng = std.rand.DefaultPrng.init(0);
-    const rand = prng.random();
-    {
-        var i: usize = 0;
-        while (i < grid_size) : (i += 1) {
-            var j: usize = 0;
-            while (j < grid_size) : (j += 1) {
-                b.push(primitive.Cube{
-                    .model = m4.modelWithRotations(
-                        .{
-                            .x = tile_size * @as(f32, @floatFromInt(i)) - tile_size * @as(f32, @floatFromInt(grid_size)) / 2 + tile_size / 2.0,
-                            .y = tile_size * @as(f32, @floatFromInt(j)) - tile_size * @as(f32, @floatFromInt(grid_size)) / 2 + tile_size / 2.0,
-                            .z = (tile_base_height + tile_max_height * rand.float(f32)) / 2.0,
+    const selected_index: usize = 0;
+
+    var num_nonemtpy_voxels: usize = 0;
+    const nonempty_voxels = memory.mem.frame.alloc(primitive.VoxelTransform, dim * dim * dim) catch unreachable;
+
+    for (0..dim) |z| {
+        for (0..dim) |y| {
+            for (0..dim) |x| {
+                if (voxels[x][y][z] > 0) {
+                    nonempty_voxels[num_nonemtpy_voxels] = .{
+                        .pos = .{
+                            .x = dim * @as(f32, @floatFromInt(x)),
+                            .y = dim * @as(f32, @floatFromInt(y)),
+                            .z = dim * @as(f32, @floatFromInt(z)),
                         },
-                        .{
-                            .x = tile_size,
-                            .y = tile_size,
-                            .z = tile_base_height + tile_max_height * rand.float(f32),
-                        },
-                        .{ .x = 0, .y = 0, .z = 0 },
-                    ),
-                }, hsvToRgb(80.0 + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0)));
+                    };
+                    num_nonemtpy_voxels += 1;
+
+                    b.push(primitive.Cube{
+                        .model = m4.modelWithRotations(
+                            .{
+                                .x = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(x)),
+                                .y = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(y)),
+                                .z = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(z)),
+                            },
+                            .{ .x = tile_size, .y = tile_size, .z = tile_size },
+                            .{ .x = 0, .y = 0, .z = 0 },
+                        ),
+                    }, hsvToRgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+                } else {
+                    //b.push(primitive.CubeOutline{ .model = m4.modelWithRotations(
+                    //    .{
+                    //        .x = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(x)),
+                    //        .y = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(y)),
+                    //        .z = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(z)),
+                    //    },
+                    //    .{ .x = tile_size, .y = tile_size, .z = tile_size },
+                    //    .{ .x = 0, .y = 0, .z = 0 },
+                    //), .thickness = 0.02 }, hsvToRgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+                }
             }
         }
     }
+
+    b.push(primitive.Cube{
+        .model = m4.modelWithRotations(
+            .{
+                .x = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(selected_index)),
+                .y = tile_size * @as(f32, @floatFromInt(dim)) / 2.0,
+                .z = tile_size * @as(f32, @floatFromInt(dim)) / 2.0,
+            },
+            .{ .x = 0.05, .y = tile_size * dim, .z = tile_size * dim },
+            .{ .x = 0, .y = 0, .z = 0 },
+        ),
+    }, hsvToRgb(40.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+
+    if (intersect.planeModelLine(math.m4.model(.{ .x = 0, .y = 0, .z = tile_size / 2.0 }, .{ .x = 1, .y = 1, .z = 1 }), .{ .x = 1000000.0, .y = 1000000.0 }, player.camera.pos, player.camera.dir)) |res| {
+        if (res.pos.x > 0 and res.pos.y > 0 and res.pos.z > 0) {
+            const i: usize = @intFromFloat(@trunc(res.pos.x / tile_size));
+            const j: usize = @intFromFloat(@trunc(res.pos.y / tile_size));
+            const k: usize = @intFromFloat(@trunc(res.pos.z / tile_size));
+            if (i < dim and j < dim and k < dim) {
+                if (input.isset(.Interact)) {
+                    voxels[i][j][k] = ~voxels[i][j][k];
+                }
+                var p: v3 = .{};
+                p.x = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(i));
+                p.y = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(j));
+                p.z = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(k));
+                b.push(primitive.CubeOutline{
+                    .model = m4.modelWithRotations(
+                        p,
+                        .{ .x = tile_size, .y = tile_size, .z = tile_size },
+                        .{ .x = 0, .y = 0, .z = 0 },
+                    ),
+                }, hsvToRgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+            }
+        }
+    }
+
+    // Draw map(?)
+    var prng = std.rand.DefaultPrng.init(0);
+    const rand = prng.random();
+    //{
+    //    var i: usize = 0;
+    //    while (i < grid_size) : (i += 1) {
+    //        var j: usize = 0;
+    //        while (j < grid_size) : (j += 1) {
+    //            b.push(primitive.Cube{
+    //                .model = m4.modelWithRotations(
+    //                    .{
+    //                        .x = tile_size * @as(f32, @floatFromInt(i)) - tile_size * @as(f32, @floatFromInt(grid_size)) / 2 + tile_size / 2.0,
+    //                        .y = tile_size * @as(f32, @floatFromInt(j)) - tile_size * @as(f32, @floatFromInt(grid_size)) / 2 + tile_size / 2.0,
+    //                        .z = (tile_base_height + tile_max_height * rand.float(f32)) / 2.0,
+    //                    },
+    //                    .{
+    //                        .x = tile_size,
+    //                        .y = tile_size,
+    //                        .z = tile_base_height + tile_max_height * rand.float(f32),
+    //                    },
+    //                    .{ .x = 0, .y = 0, .z = 0 },
+    //                ),
+    //            }, hsvToRgb(80.0 + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0)));
+    //        }
+    //    }
+    //}
 
     // pick
     {
@@ -1050,6 +1324,14 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         const d = v3.normalize(v3.sub(.{ .x = far.x, .y = far.y, .z = far.z }, .{ .x = near.x, .y = near.y, .z = near.z }));
         const p = v3.add(camera.pos, v3.scale(15.0, d));
         _ = p;
+
+        //b.push(primitive.Cube{
+        //    .model = m4.modelWithRotations(
+        //        p,
+        //        .{ .x = 20, .y = 20, .z = 20 },
+        //        .{ .x = 0, .y = 0, .z = 0 },
+        //    ),
+        //}, hsvToRgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
     }
 
     for (memory.entities.constSlice()) |e| {
@@ -1117,12 +1399,21 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
     }
 
     b.push(primitive.Mesh{
-        .model = m4.modelWithRotations(.{ .x = 0, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
+        .model = m4.modelWithRotations(.{ .x = 20, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
             .x = 0,
             .y = 0,
             .z = @as(f32, @floatFromInt(memory.time)) / 1e9,
         }),
-        .name = "res/models/cube2.glb/Suzanne",
+        .name = "res/models/weapons/granat",
+        .draw_children = true,
+    }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
+
+    b.push(primitive.Cube{
+        .model = m4.modelWithRotations(.{ .x = -20, .y = 500 * @sin(0.1 * @as(f32, @floatFromInt(memory.time)) / 1e9), .z = 40 }, .{ .x = 10, .y = 10, .z = 10 }, .{
+            .x = 0,
+            .y = 0,
+            .z = 0,
+        }),
     }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
 
     for (memory.players.slice()) |p| {
@@ -1190,37 +1481,11 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                         const aim_dir = if (zoom_fire) p.camera.dir else p.aim_dir;
                         const model_sniper = m4.modelFromXDir(v3.add(p.camera.pos, offset), .{ .x = 1, .y = 1, .z = 1 }, aim_dir);
 
-                        // barrel
-                        b.push(primitive.Cube{
-                            .model = m4.mul(
-                                model_sniper,
-                                m4.modelWithRotations(.{ .x = 0, .y = 0, .z = 0 }, .{ .x = vars.sniper_len, .y = vars.sniper_w, .z = vars.sniper_w }, .{ .x = 0, .y = 0, .z = 0 }),
-                            ),
-                        }, playerRandomColor(p.id, rand));
-
-                        // stock
-                        b.push(primitive.Cube{
-                            .model = m4.mul(
-                                model_sniper,
-                                m4.modelWithRotations(.{
-                                    .x = vars.sniper_stock_off_x,
-                                    .y = vars.sniper_stock_off_y,
-                                    .z = vars.sniper_stock_off_z,
-                                }, .{ .x = vars.sniper_stock_len, .y = vars.sniper_stock_w, .z = vars.sniper_stock_h }, .{ .x = 0, .y = 0, .z = 0 }),
-                            ),
-                        }, playerRandomColor(p.id, rand));
-
-                        // scope
-                        b.push(primitive.Cube{
-                            .model = m4.mul(
-                                model_sniper,
-                                m4.modelWithRotations(.{
-                                    .x = vars.sniper_scope_off_x,
-                                    .y = vars.sniper_scope_off_y,
-                                    .z = vars.sniper_scope_off_z,
-                                }, .{ .x = vars.sniper_scope_len, .y = vars.sniper_scope_w, .z = vars.sniper_scope_h }, .{ .x = 0, .y = 0, .z = 0 }),
-                            ),
-                        }, playerRandomColor(p.id, rand));
+                        b.push(primitive.Mesh{
+                            .model = model_sniper,
+                            .name = "res/models/weapons/sniper",
+                            .draw_children = true,
+                        }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
                     }
                 },
                 .pistol => {
@@ -1240,37 +1505,11 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                     const aim_dir = if (zoom_fire) p.camera.dir else p.aim_dir;
                     const model_pistol = m4.modelFromXDir(v3.add(p.camera.pos, offset), .{ .x = 1, .y = 1, .z = 1 }, aim_dir);
 
-                    // barrel
-                    b.push(primitive.Cube{
-                        .model = m4.mul(
-                            model_pistol,
-                            m4.modelWithRotations(.{ .x = 0, .y = 0, .z = 0 }, .{ .x = vars.pistol_len, .y = vars.pistol_w, .z = vars.pistol_w }, .{ .x = 0, .y = 0, .z = 0 }),
-                        ),
-                    }, playerRandomColor(p.id, rand));
-
-                    // handle
-                    b.push(primitive.Cube{
-                        .model = m4.mul(
-                            model_pistol,
-                            m4.modelWithRotations(.{
-                                .x = vars.pistol_handle_off_x,
-                                .y = vars.pistol_handle_off_y,
-                                .z = vars.pistol_handle_off_z,
-                            }, .{ .x = vars.pistol_handle_w, .y = vars.pistol_handle_w, .z = vars.pistol_handle_len }, .{ .x = 0, .y = 0, .z = 0 }),
-                        ),
-                    }, playerRandomColor(p.id, rand));
-
-                    // scope
-                    b.push(primitive.Cube{
-                        .model = m4.mul(
-                            model_pistol,
-                            m4.modelWithRotations(.{
-                                .x = vars.pistol_len / 2.0 - vars.pistol_scope_len / 2.0,
-                                .y = 0.0,
-                                .z = vars.pistol_w / 2.0 + vars.pistol_scope_h / 2.0,
-                            }, .{ .x = vars.pistol_scope_len, .y = vars.pistol_scope_w, .z = vars.pistol_scope_h }, .{ .x = 0, .y = 0, .z = 0 }),
-                        ),
-                    }, playerRandomColor(p.id, rand));
+                    b.push(primitive.Mesh{
+                        .model = model_pistol,
+                        .name = "res/models/weapons/pistol",
+                        .draw_children = true,
+                    }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
                 },
                 .nade => {},
             }
@@ -1305,6 +1544,16 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
     //            15, 0.75, 0.5);
     //    }
 
+    {
+        for (memory.windows.?.items, 0..) |win, i| {
+            _ = i;
+            if (win.parent != null)
+                continue;
+            //calculateWindowSizes(&windows, i);
+            //drawWindow(b, &memory.windows.?, i);
+        }
+    }
+
     if (input.isset(.Console)) {
         //    if (!mouse_enabled) {
         //        mouse_enabled = true;
@@ -1313,7 +1562,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         const console_height = 1.0 / 3.0;
         b.push(primitive.Rectangle{ .pos = .{
             .x = 0,
-            .y = 1 - (console_height - textheight),
+            .y = 1 - (console_height - fontsize),
         }, .size = .{
             .x = 1,
             .y = console_height,
@@ -1323,7 +1572,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             .y = 1 - console_height,
         }, .size = .{
             .x = 1,
-            .y = textheight,
+            .y = fontsize,
         } }, hsvToRgb(200, 0.5, 0.1));
 
         {
@@ -1335,15 +1584,18 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                 .str = undefined,
                 .len = memory.console_input.len,
                 .size = fontsize,
+                .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
+                .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
             };
             @memset(&text.str, 0);
-            std.mem.copy(u8, &text.str, memory.console_input.slice());
+            const dst: []u8 = &text.str;
+            @memcpy(dst[0..memory.console_input.slice().len], memory.console_input.slice());
             b.push(text, hsvToRgb(200, 0.75, 0.75));
         }
     }
 
     {
-        var y: f32 = 1.0 - fontsize;
+        const y: f32 = 1.0 - fontsize;
         var text = primitive.Text{
             .pos = .{
                 .x = 0,
@@ -1352,6 +1604,8 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             .str = undefined,
             .len = 0,
             .size = fontsize,
+            .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
+            .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
         };
         @memset(&text.str, 0);
 
@@ -1698,7 +1952,7 @@ fn drawProfileData(memory: *Memory, b: *draw_api.CommandBuffer) void {
         worklist.appendAssumeCapacity(.{ .entry = s });
     }
 
-    var y: f32 = 1.0 - fontsize;
+    const y: f32 = 1.0 - fontsize;
 
     var text = primitive.Text{
         .pos = .{
@@ -1708,6 +1962,8 @@ fn drawProfileData(memory: *Memory, b: *draw_api.CommandBuffer) void {
         .str = undefined,
         .len = 0,
         .size = fontsize,
+        .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
+        .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
     };
 
     while (worklist.len > 0) {

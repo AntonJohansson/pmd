@@ -1,13 +1,13 @@
 const std = @import("std");
-const sokol = @import("third_party/sokol-zig/build.zig");
+//const sokol = @import("third_party/sokol-zig/build.zig");
 
-pub fn build(b: *std.build.Builder) !void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const sokol_build = sokol.buildSokol(b, target, optimize, .{.backend=.gl}, "third_party/sokol-zig/");
-    const sokol_module = b.addModule("sokol", .{
-        .source_file = .{.path = "third_party/sokol-zig/src/sokol/sokol.zig"},
+    const sokol_dep = b.dependency("sokol-zig", .{
+        .target = target,
+        .optimize = optimize,
     });
 
     //
@@ -15,17 +15,18 @@ pub fn build(b: *std.build.Builder) !void {
     //
 
     const common = b.createModule(.{
-        .source_file = .{.path = "src/common/common.zig"},
-        .dependencies = &.{.{.name="sokol",.module=sokol_module}},
+        .root_source_file = b.path("src/common/common.zig"),
+        //.dependencies = &.{.{ .name = "sokol", .module = sokol_module }},
     });
+    common.addCSourceFile(.{ .file = b.path("src/common/profile_linux.c"), .flags = &.{ "-Wall", "-Wextra", "-Werror", "-I/usr/include" } });
 
     //
     // net
     //
 
     const net = b.createModule(.{
-        .source_file = .{.path = "src/net/net.zig"},
-        .dependencies = &.{.{.name="common",.module=common}},
+        .root_source_file = b.path("src/net/net.zig"),
+        .imports = &.{.{ .name = "common", .module = common }},
     });
 
     //
@@ -34,15 +35,15 @@ pub fn build(b: *std.build.Builder) !void {
 
     const libgame = b.addSharedLibrary(.{
         .name = "game",
-        .root_source_file = .{ .path = "src/game/game.zig" },
+        .root_source_file = b.path("src/game/game.zig"),
         .target = target,
         .optimize = optimize,
     });
     // TODO: Remove when renderer is moved to separate library
-    libgame.addModule("sokol", sokol_module);
-    libgame.addModule("common", common);
-    libgame.addModule("net", net);
-    libgame.linkLibrary(sokol_build);
+    //libgame.addModule("sokol", sokol_module);
+    libgame.root_module.addImport("common", common);
+    libgame.root_module.addImport("net", net);
+    //libgame.linkLibrary(sokol_build);
     _ = b.installArtifact(libgame);
 
     //
@@ -53,34 +54,30 @@ pub fn build(b: *std.build.Builder) !void {
 
     const client = b.addExecutable(.{
         .name = "client",
-        .root_source_file = .{ .path = "src/client/client.zig" },
+        .root_source_file = b.path("src/client/client.zig"),
         .target = target,
         .optimize = optimize,
     });
-    client.addCSourceFile(.{
-        .file = .{
-            .path = "src/client/stb.c"
-        },
-        .flags = &.{
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-        }});
-    client.addIncludePath(std.build.LazyPath.relative("src/client"));
+    client.addCSourceFile(.{ .file = b.path("src/client/stb.c"), .flags = &.{
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    } });
+    client.addIncludePath(b.path("src/client"));
     client.linkLibC();
-    client.addModule("sokol", sokol_module);
-    client.addModule("common", common);
-    client.addModule("net", net);
-    client.linkLibrary(sokol_build);
+    client.root_module.addImport("sokol", sokol_dep.module("sokol"));
+    client.root_module.addImport("common", common);
+    client.root_module.addImport("net", net);
+    //client.linkLibrary(sokol_build);
     b.installArtifact(client);
 
     // Use mach-glfw
-    const glfw_dep = b.dependency("mach_glfw", .{
-        .target = client.target,
-        .optimize = client.optimize,
+    const glfw_dep = b.dependency("mach-glfw", .{
+        .target = target,
+        .optimize = optimize,
     });
-    client.addModule("mach-glfw", glfw_dep.module("mach-glfw"));
-    @import("mach_glfw").link(glfw_dep.builder, client);
+    client.root_module.addImport("mach-glfw", glfw_dep.module("mach-glfw"));
+    //@import("mach_glfw").link(glfw_dep.builder, client);
 
     const run_client_cmd = b.addRunArtifact(client);
     run_client_cmd.step.dependOn(b.getInstallStep());
@@ -96,12 +93,12 @@ pub fn build(b: *std.build.Builder) !void {
 
     const server = b.addExecutable(.{
         .name = "server",
-        .root_source_file = .{ .path = "src/server/server.zig" },
+        .root_source_file = b.path("src/server/server.zig"),
         .target = target,
         .optimize = optimize,
     });
-    server.addModule("common", common);
-    server.addModule("net", net);
+    server.root_module.addImport("common", common);
+    server.root_module.addImport("net", net);
     server.linkLibC();
     b.installArtifact(server);
 
@@ -122,22 +119,18 @@ pub fn build(b: *std.build.Builder) !void {
 
     const pack = b.addExecutable(.{
         .name = "pack",
-        .root_source_file = .{ .path = "src/tools/pack.zig" },
+        .root_source_file = b.path("src/tools/pack.zig"),
         .target = target,
         .optimize = optimize,
     });
-    pack.addCSourceFile(.{
-        .file = .{
-            .path = "src/tools/stb.c"
-        },
-        .flags = &.{
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-    }});
-    pack.addModule("common", common);
-    pack.addModule("sokol", sokol_module);
-    pack.addIncludePath(std.build.LazyPath.relative("src/tools"));
+    pack.addCSourceFile(.{ .file = b.path("src/tools/stb.c"), .flags = &.{
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    } });
+    pack.root_module.addImport("common", common);
+    pack.root_module.addImport("sokol", sokol_dep.module("sokol"));
+    pack.addIncludePath(b.path("src/tools"));
     pack.linkLibC();
     b.installArtifact(pack);
 
@@ -148,5 +141,4 @@ pub fn build(b: *std.build.Builder) !void {
     }
     const run_pack_step = b.step("run-pack", "Run pack");
     run_pack_step.dependOn(&run_pack_cmd.step);
-
 }

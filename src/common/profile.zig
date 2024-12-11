@@ -1,195 +1,129 @@
 const std = @import("std");
 
-var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-const gpa = gpa_state.allocator();
-var arena_state = std.heap.ArenaAllocator.init(gpa);
-const arena = arena_state.allocator();
-
-var name_map = std.StringHashMap(*Entry).init(gpa);
-var roots: std.BoundedArray(*Entry, 128) = .{};
-var entries_being_tracked: std.BoundedArray(*Entry, 128) = .{};
-
-pub fn start(name: []const u8) void {
-    const entry = name_map.get(name) orelse blk: {
-        const new_entry = arena.create(Entry) catch unreachable;
-        new_entry.* = .{};
-        name_map.put(name, new_entry) catch unreachable;
-
-        if (entries_being_tracked.len > 0) {
-            const parent = entries_being_tracked.get(entries_being_tracked.len-1);
-            parent.children.appendAssumeCapacity(new_entry);
-        } else {
-            roots.appendAssumeCapacity(new_entry);
-        }
-
-        break :blk new_entry;
-    };
-
-    entry.name = name;
-
-    if (entries_being_tracked.len == 0) {
-        entry.is_root = true;
-    }
-
-    entry.startTime();
-    entries_being_tracked.appendAssumeCapacity(entry);
-}
-
-pub fn end() void {
-    std.debug.assert(entries_being_tracked.len != 0);
-    const entry = entries_being_tracked.pop();
-    entry.endTime();
-}
-
-fn cmpEntry(_: void, lhs: *Entry, rhs: *Entry) bool {
-    return lhs.mean_std().avg < rhs.mean_std().avg;
-}
-
-pub fn sort() void {
-    var worklist: std.BoundedArray(*Entry, 64) = .{};
-
-    std.sort.pdq(*Entry, roots.slice(), {}, cmpEntry);
-
-    for (roots.slice()) |e| {
-        worklist.appendAssumeCapacity(e);
-    }
-
-    while (worklist.len > 0) {
-        const e = worklist.pop();
-
-        std.sort.pdq(*Entry, e.children.slice(), {}, cmpEntry);
-
-        for (e.children.slice()) |c| {
-            worklist.appendAssumeCapacity(c);
-        }
-    }
-}
-
-pub fn dump() void {
-    var worklist: std.BoundedArray(struct {
-        entry: *Entry= undefined,
-        depth: u32 = 0,
-    } , 64) = .{};
-
-    for (roots.slice()) |s| {
-        worklist.appendAssumeCapacity(.{.entry=s});
-    }
-
-    const depth_width = 2;
-    var name_buf: [16]u8 = undefined;
-
-    while (worklist.len > 0) {
-        const work = worklist.pop();
-
-        const ns_per_us = 1000;
-        const result = work.entry.mean_std();
-        {
-            @memset(&name_buf, ' ');
-            @memcpy(name_buf[depth_width*work.depth..(depth_width*work.depth+work.entry.name.len)], work.entry.name);
-
-            std.log.info("{s}|{:8}", .{
-                name_buf,
-                result.avg/ns_per_us,
-            });
-        }
-
-        for (work.entry.children.slice()) |c| {
-            worklist.appendAssumeCapacity(.{
-                .entry = c,
-                .depth = work.depth+1,
-            });
-        }
-    }
-}
-
-const Result = struct {
-    avg: u64,
-    std: u64,
-    min: u64,
-    max: u64,
+const Block = struct {
+    label: []const u8,
+    old_tsc_elapsed_inclusive: u64,
+    old_pagefault_count_inclusive: u64,
+    old_cachemiss_count_inclusive: u64,
+    start_tsc: u64,
+    start_pagefault_count: u64,
+    start_cachemiss_count: u64,
+    parent_id: usize,
+    anchor_id: usize,
 };
 
-fn CircularBuffer(comptime T: type, comptime max_len: usize) type {
-    return struct {
-        data: [max_len]T = undefined,
-        top: usize = 0,
-        size: usize = 0,
+const Anchor = struct {
+    label: []const u8,
+    tsc_elapsed_exclusive: u64 = 0,
+    tsc_elapsed_inclusive: u64 = 0,
+    pagefault_count_exclusive: u64 = 0,
+    pagefault_count_inclusive: u64 = 0,
+    cachemiss_count_exclusive: u64 = 0,
+    cachemiss_count_inclusive: u64 = 0,
+    hitcount: u64 = 0,
+    processed_bytecount: u64 = 0,
+};
 
-        pub fn push(self: *@This(), element: T) void {
-            self.data[self.top] = element;
-            self.top = (self.top + 1) % self.data.len;
-            if (self.size < self.data.len)
-                self.size += 1;
-        }
+var map: std.AutoArrayHashMap(usize, Anchor) = undefined;
+var cachemiss_fd: i32 = 0;
+var global_parent_id: usize = 0;
 
-        pub fn peek(self: *@This()) T {
-            return self.data[self.top];
-        }
-
-        pub fn peekRelative(self: *@This(), offset: i64) T {
-            const index: usize = @intCast(@mod(@as(i64, @intCast(self.top)) + @as(i64, @intCast(self.data.len)) + offset, @as(i64, @intCast(self.data.len))));
-            return self.data[index];
-        }
-
-        pub fn slice(self: *@This()) []T {
-            return self.data[0..self.size];
-        }
-    };
+pub fn init(allocator: std.mem.Allocator) void {
+    map = std.AutoArrayHashMap(usize, Block).init(allocator);
+    cachemiss_fd = init_cachemiss_fd();
 }
 
-const Entry = struct {
-    name: []const u8 = undefined,
-    samples: CircularBuffer(u64, 256) = .{},
-    start_time: std.time.Instant = undefined,
-    is_root: bool = false,
+fn get_anchor(id: usize) *Anchor {
+    const res = map.getOrPut(id) catch unreachable;
+    return res.value_ptr;
+}
 
-    children: std.BoundedArray(*Entry, 16) = .{},
+pub fn block_begin(comptime name: []const u8, bytecount: u64) *Block {
+    const id = @returnAddress();
 
-    const Self = @This();
+    const anchor = get_anchor(id);
 
-    pub fn startTime(self: *Self) void {
-        self.start_time = std.time.Instant.now() catch unreachable;
-    }
+    anchor.processed_bytecount += bytecount;
 
-    pub fn endTime(self: *Self) void {
-        const end_time = std.time.Instant.now() catch unreachable;
-        self.samples.push(end_time.since(self.start_time));
-    }
+    const b = Block{
+        .label = name,
+        .old_tsc_elapsed_inclusive = anchor.tsc_elapsed_inclusive,
+        .old_pagefault_count_inclusive = anchor.pagefault_elapsed_inclusive,
+        .old_cachemiss_count_inclusive = anchor.cachemiss_elapsed_inclusive,
+        .start_pagefault_count = read_pagefault_count(),
+        .start_cachemiss_count = read_cachemiss_count(),
+        .start_tsc = read_tsc(),
+        .parent_id = global_parent_id,
+        .anchor_id = id,
+    };
 
-    pub fn mean_std(self: *Self) Result {
-        var avg: u64 = 0;
-        for (self.samples.slice()) |s| {
-            avg += s;
-        }
-        avg /= self.samples.size;
+    global_parent_id = id;
 
-        var variance: u64 = 0;
-        var min: u64 = std.math.maxInt(u64);
-        var max: u64 = std.math.minInt(u64);
-        if (self.samples.size > 1) {
-            for (self.samples.data) |s| {
-                const d = @as(i64, @intCast(s)) - @as(i64, @intCast(avg));
-                const mul = @mulWithOverflow(d,d);
-                // Skip on overflow
-                if (mul[1] == 1)
-                    continue;
-                variance = @addWithOverflow(variance, @as(@TypeOf(variance), @intCast(mul[0])))[0];
+    return b;
+}
 
-                if (s < min)
-                    min = s;
-                if (s > max)
-                    max = s;
-            }
-            variance /= self.samples.size-1;
-        }
+pub fn block_end(b: *Block) void {
+    const elapsed_tsc = read_tsc() - b.start_tsc;
+    const elapsed_pagefault = read_pagefault_count() - b.start_pagefault_count;
+    const elapsed_cachemiss = read_cachemiss_count() - b.start_cachemiss_count;
 
-        const std_float = std.math.sqrt(@as(f64, @floatFromInt(variance)));
+    const anchor = get_anchor(b.anchor_id);
+    const parent = get_anchor(b.parent_id);
 
-        return Result {
-            .avg = avg,
-            .std = @intFromFloat(std_float),
-            .min = min,
-            .max = max,
-        };
-    }
-};
+    parent.tsc_elapsed_exclusive -= elapsed_tsc;
+    anchor.tsc_elapsed_exclusive += elapsed_tsc;
+    parent.tsc_elapsed_inclusive = b.old_tsc_elapsed_inclusive + elapsed_tsc;
+
+    parent.pagefault_elapsed_exclusive -= elapsed_pagefault;
+    anchor.pagefault_elapsed_exclusive += elapsed_pagefault;
+    anchor.pagefault_elapsed_inclusive = b.old_pagefault_elapsed_inclusive + elapsed_pagefault;
+
+    parent.cachemiss_elapsed_exclusive -= elapsed_cachemiss;
+    anchor.cachemiss_elapsed_exclusive += elapsed_cachemiss;
+    anchor.cachemiss_elapsed_inclusive = b.old_cachemiss_elapsed_inclusive + elapsed_cachemiss;
+
+    anchor.hitcount += 1;
+    anchor.label = b.label;
+}
+
+fn read_pagefault_count() u64 {
+    var usage: std.os.linux.rusage = undefined;
+    _ = std.os.linux.getrusage(std.os.linux.rusage.SELF, &usage);
+    return @intCast(usage.minflt + usage.majflt);
+}
+
+fn init_cachemiss_fd() i32 {
+    var attr = std.os.linux.perf_event_attr{
+        .type = std.os.linux.PERF.TYPE.HW_CACHE,
+        .size = @sizeOf(std.os.linux.perf_event_attr),
+        .config = @intFromEnum(std.os.linux.PERF.COUNT.HW.CACHE.L1D) |
+            (@intFromEnum(std.os.linux.PERF.COUNT.HW.CACHE.OP.READ) << 8) |
+            (@intFromEnum(std.os.linux.PERF.COUNT.HW.CACHE.RESULT.MISS) << 16),
+        .flags = .{
+            .disabled = true,
+            .exclude_kernel = true,
+            .exclude_hv = true,
+        },
+    };
+    const fd = std.posix.perf_event_open(&attr, 0, -1, -1, 0) catch unreachable;
+    std.debug.assert(fd != -1);
+
+    _ = std.os.linux.ioctl(fd, std.os.linux.PERF.EVENT_IOC.RESET, 0);
+    _ = std.os.linux.ioctl(fd, std.os.linux.PERF.EVENT_IOC.ENABLE, 0);
+
+    return fd;
+}
+
+fn read_tsc() u64 {
+    var tsc: u32 = 0;
+    asm ("rdtsc"
+        : [tsc] "={eax}" (tsc),
+    );
+    return tsc;
+}
+
+fn read_cachemiss_count() u64 {
+    var count: usize = 0;
+    _ = std.os.linux.read(fd, @ptrCast(&count), @sizeOf(usize));
+    return count;
+}

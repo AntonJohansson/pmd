@@ -3,7 +3,6 @@ const std = @import("std");
 const common = @import("common");
 const meta = common.draw_meta;
 const draw_api = common.draw_api;
-const profile = common.profile;
 const primitive = common.primitive;
 const Color = primitive.Color;
 const config = common.config;
@@ -17,7 +16,6 @@ const m4 = math.m4;
 const sokol = @import("sokol");
 const sg = sokol.gfx;
 const slog = sokol.log;
-const sdtx = sokol.debugtext;
 
 const res = common.res;
 const goosepack = common.goosepack;
@@ -41,7 +39,6 @@ pub const Pipeline = enum {
 //}
 
 const Offscreen3d = struct {
-    pass_action: sg.PassAction = .{},
     pass: sg.Pass = .{},
     pip: sg.Pipeline = .{},
     bind: sg.Bindings = .{},
@@ -50,8 +47,6 @@ const Offscreen3d = struct {
 };
 
 const Offscreen2d = struct {
-    clear_pass_action: sg.PassAction = .{},
-    load_pass_action: sg.PassAction = .{},
     pass: sg.Pass = .{},
     pip: sg.Pipeline = .{},
     bind: sg.Bindings = .{},
@@ -59,18 +54,33 @@ const Offscreen2d = struct {
 };
 
 const OffscreenCubemap = struct {
-    pass_action: sg.PassAction = .{},
     pass: sg.Pass = .{},
     pip: sg.Pipeline = .{},
     bind: sg.Bindings = .{},
 };
 
 const Display = struct {
-    pass_action: sg.PassAction = .{},
+    pass: sg.Pass = .{},
     pip: sg.Pipeline = .{},
     bind: sg.Bindings = .{},
 };
 
+const Postprocess = struct {
+    pass: sg.Pass = .{},
+    pip: sg.Pipeline = .{},
+    bind: sg.Bindings = .{},
+};
+
+const TextPipeline = struct {
+    pass: sg.Pass = .{},
+    pip: sg.Pipeline = .{},
+    bind: sg.Bindings = .{},
+    atlas: sg.Image = undefined,
+    chars: []res.FontChar = undefined,
+};
+
+var text_pipeline: TextPipeline = .{};
+var postprocess: Postprocess = .{};
 var display: Display = .{};
 var offscreen_3d: Offscreen3d = .{};
 var offscreen_2d: Offscreen2d = .{};
@@ -83,7 +93,6 @@ var pip_triangle_strip = sg.Pipeline{};
 var circle_bind = sg.Bindings{};
 var rectangle_bind = sg.Bindings{};
 var cube_bind = sg.Bindings{};
-var pass_action_2d = sg.PassAction{};
 
 var pipelines: std.BoundedArray(sg.Pipeline, 16) = .{};
 var shd_3d: sg.Shader = undefined;
@@ -112,6 +121,12 @@ fn buildBindForMesh(model: res.Model, mesh_index: u32, prim_index: u32) sg.Bindi
             .data = sg.asRange(buf),
         });
     }
+    if ((prim.buffer_types & res.bt_normals) != 0) {
+        const buf = sliceFromBufferView(model, prim.normals);
+        bind.vertex_buffers[1] = sg.makeBuffer(.{
+            .data = sg.asRange(buf),
+        });
+    }
     if ((prim.buffer_types & res.bt_indices) != 0) {
         const buf = sliceFromBufferView(model, prim.indices);
         bind.index_buffer = sg.makeBuffer(.{
@@ -132,12 +147,15 @@ fn bindForMesh(model: res.Model, mesh_index: u32, prim_index: u32) sg.Bindings {
     return bind;
 }
 
+// TODO: ?
 fn buildPipelineForModel(model: res.Model) *sg.Pipeline {
     _ = model;
-    var pass_desc = sg.PassDesc{};
-    pass_desc.color_attachments[0].image = offscreen_3d.color;
-    pass_desc.depth_stencil_attachment.image = offscreen_3d.depth;
-    offscreen_3d.pass = sg.makePass(pass_desc);
+    var attachments_desc = sg.AttachmentsDesc{};
+    attachments_desc.colors[0].image = offscreen_3d.color;
+    attachments_desc.depth_stencil.image = offscreen_3d.depth;
+    offscreen_3d.pass.attachments = sg.makeAttachments(attachments_desc);
+    //offscreen_3d.pass.swapchain.width =
+    //offscreen_3d.pass.swapchain.height =
 
     var desc = sg.PipelineDesc{
         .index_type = .UINT16,
@@ -166,9 +184,32 @@ fn buildPipelineForModel(model: res.Model) *sg.Pipeline {
     return pip;
 }
 
-const Uniforms = struct {
+const Uniforms3d = struct {
+    mvp: m4,
+    model: m4,
+    color: v4,
+    light_pos: v3 = .{},
+    light_color: v3 = .{},
+    camera_pos: v3 = .{},
+};
+
+const Uniforms2d = struct {
     mvp: m4,
     color: v4,
+};
+
+const AtlasUniform = struct {
+    off: v2,
+    scale: v2,
+    vs_off: v2,
+    vs_scale: v2,
+    fg: v4,
+    bg: v4,
+};
+
+const TextUniform = struct {
+    off: v2,
+    scale: v2,
 };
 
 const circle_vertices = blk: {
@@ -205,22 +246,71 @@ const textured_rectangle_vertices = [_]f32{
 const textured_rectangle_indices = [_]u16{ 0, 1, 2, 0, 2, 3 };
 
 const cube_vertices = [_]f32{
-    0.5, -0.5, 0.5, // 0 front top left
-    0.5, 0.5, 0.5, // 1 front top right
-    0.5, 0.5, -0.5, // 2 front bottom right
-    0.5, -0.5, -0.5, // 3 front bottom left
-    -0.5, -0.5, 0.5, // 4 back top left
-    -0.5, 0.5, 0.5, // 5 back top right
-    -0.5, 0.5, -0.5, // 6 back bottom right
-    -0.5, -0.5, -0.5, // 7 back bottom left
+    0.5, -0.5, 0.5, //   0   x front top left
+    0.5, -0.5, 0.5, //   1  -y front top left
+    0.5, -0.5, 0.5, //   2   z front top left
+    0.5, 0.5, 0.5, //    3   x front top right
+    0.5, 0.5, 0.5, //    4   y front top right
+    0.5, 0.5, 0.5, //    5   z front top right
+    0.5, 0.5, -0.5, //   6   x front bottom right
+    0.5, 0.5, -0.5, //   7   y front bottom right
+    0.5, 0.5, -0.5, //   8  -z front bottom right
+    0.5, -0.5, -0.5, //  9   x front bottom left
+    0.5, -0.5, -0.5, //  10 -y front bottom left
+    0.5, -0.5, -0.5, //  11 -z front bottom left
+    -0.5, -0.5, 0.5, //  12 -x back top left
+    -0.5, -0.5, 0.5, //  13 -y back top left
+    -0.5, -0.5, 0.5, //  14  z back top left
+    -0.5, 0.5, 0.5, //   15 -x back top right
+    -0.5, 0.5, 0.5, //   16  y back top right
+    -0.5, 0.5, 0.5, //   17  z back top right
+    -0.5, 0.5, -0.5, //  18 -x back bottom right
+    -0.5, 0.5, -0.5, //  19  y back bottom right
+    -0.5, 0.5, -0.5, //  20 -z back bottom right
+    -0.5, -0.5, -0.5, // 21 -x back bottom left
+    -0.5, -0.5, -0.5, // 22 -y back bottom left
+    -0.5, -0.5, -0.5, // 23 -z back bottom left
+};
+const cube_normals = [_]f32{
+    1,  0,  0,
+    0,  -1, 0,
+    0,  0,  1,
+
+    1,  0,  0,
+    0,  1,  0,
+    0,  0,  1,
+
+    1,  0,  0,
+    0,  1,  0,
+    0,  0,  -1,
+
+    1,  0,  0,
+    0,  -1, 0,
+    0,  0,  -1,
+
+    -1, 0,  0,
+    0,  -1, 0,
+    0,  0,  1,
+
+    -1, 0,  0,
+    0,  1,  0,
+    0,  0,  1,
+
+    -1, 0,  0,
+    0,  1,  0,
+    0,  0,  -1,
+
+    -1, 0,  0,
+    0,  -1, 0,
+    0,  0,  -1,
 };
 const cube_indices = [_]u16{
-    0, 1, 2, 0, 2, 3, // front face
-    5, 4, 7, 5, 7, 6, // back face
-    1, 5, 6, 1, 6, 2, // right face
-    4, 0, 3, 4, 3, 7, // left face
-    4, 5, 1, 4, 1, 0, // top face
-    3, 2, 6, 3, 6, 7, // bottom face
+    0, 6, 3, 0, 9, 6, // front face
+    15, 21, 12, 15, 18, 21, // back face
+    4, 19, 16, 4, 7, 19, // right face
+    13, 10, 1, 13, 22, 10, // left face
+    14, 5, 17, 14, 2, 5, // top face
+    11, 20, 8, 11, 23, 20, // bottom face
 };
 
 var cube_model: res.Model = undefined;
@@ -228,9 +318,8 @@ var pip_cube_model = sg.Pipeline{};
 var bind_cube_model = sg.Bindings{};
 var pack: *goosepack.Pack = undefined;
 var mem: common.MemoryAllocators = undefined;
+var font: res.Font = undefined;
 
-//var cc_shader: raylib.Shader = undefined;
-//var font: raylib.Font = undefined;
 pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
     mem = _mem;
 
@@ -239,17 +328,6 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
     });
 
     pack = _pack;
-
-    // Setup debug text
-    var sdtx_desc = sdtx.Desc{
-        .context = .{
-            .color_format = .RGBA8,
-            .depth_format = .NONE,
-        },
-        .logger = .{ .func = slog.func },
-    };
-    sdtx_desc.fonts[0] = sdtx.fontKc853();
-    sdtx.setup(sdtx_desc);
 
     // Setup bindings
     circle_bind.vertex_buffers[0] = sg.makeBuffer(.{
@@ -267,6 +345,9 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
     cube_bind.vertex_buffers[0] = sg.makeBuffer(.{
         .data = sg.asRange(&cube_vertices),
     });
+    cube_bind.vertex_buffers[1] = sg.makeBuffer(.{
+        .data = sg.asRange(&cube_normals),
+    });
     cube_bind.index_buffer = sg.makeBuffer(.{
         .type = .INDEXBUFFER,
         .data = sg.asRange(&cube_indices),
@@ -280,6 +361,7 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
             \\ #version 330
             \\ layout(location=0) in vec2 position;
             \\ uniform mat4 mvp;
+            \\ uniform mat4 model;
             \\ void main() {
             \\   gl_Position = mvp*vec4(position, 0, 1);
             \\ }
@@ -292,7 +374,7 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
             \\   frag_color = color;
             \\ }
         ;
-        shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms);
+        shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms2d);
         shd_desc.vs.uniform_blocks[0].uniforms[0] = .{
             .name = "mvp",
             .type = .MAT4,
@@ -307,32 +389,129 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
     // 3d shader
     {
         var shd_desc = sg.ShaderDesc{};
-        shd_desc.vs.source =
-            \\ #version 330
-            \\ layout(location=0) in vec3 position;
-            \\ uniform mat4 mvp;
-            \\ void main() {
-            \\   gl_Position = mvp * vec4(position, 1);
-            \\ }
-        ;
-        shd_desc.fs.source =
-            \\ #version 330
-            \\ uniform vec4 color;
-            \\ out vec4 frag_color;
-            \\ void main() {
-            \\   frag_color = color;
-            \\ }
-        ;
-        shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms);
+        const res_shader = goosepack.lookup(pack, "res/default").?.shader;
+        const vs = res_shader.vs_bytes;
+        const fs = res_shader.fs_bytes;
+        shd_desc.vs.source = @ptrCast(vs);
+        shd_desc.fs.source = @ptrCast(fs);
+        shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms3d);
         shd_desc.vs.uniform_blocks[0].uniforms[0] = .{
             .name = "mvp",
             .type = .MAT4,
         };
         shd_desc.vs.uniform_blocks[0].uniforms[1] = .{
+            .name = "model",
+            .type = .MAT4,
+        };
+        shd_desc.vs.uniform_blocks[0].uniforms[2] = .{
             .name = "color",
             .type = .FLOAT4,
         };
+        shd_desc.vs.uniform_blocks[0].uniforms[3] = .{
+            .name = "light_pos",
+            .type = .FLOAT3,
+        };
+        shd_desc.vs.uniform_blocks[0].uniforms[4] = .{
+            .name = "light_color",
+            .type = .FLOAT3,
+        };
+        shd_desc.vs.uniform_blocks[0].uniforms[5] = .{
+            .name = "camera_pos",
+            .type = .FLOAT3,
+        };
+        std.log.info("f {}\n", .{fs[fs.len - 1]});
+        std.log.info("v {}\n", .{vs[vs.len - 1]});
         shd_3d = sg.makeShader(shd_desc);
+        std.log.info("arstarsta\n", .{});
+    }
+
+    // Postprocess shader
+    var shd_pp: sg.Shader = undefined;
+    {
+        var shd_desc = sg.ShaderDesc{};
+
+        const res_shader = goosepack.lookup(pack, "res/cc").?.shader;
+        const vs = res_shader.vs_bytes;
+        const fs = res_shader.fs_bytes;
+        shd_desc.vs.source = @ptrCast(vs);
+        shd_desc.fs.source = @ptrCast(fs);
+
+        shd_desc.fs.images[0] = .{ .used = true };
+        shd_desc.fs.samplers[0] = .{ .used = true };
+        shd_desc.fs.image_sampler_pairs[0] = .{
+            .used = true,
+            .image_slot = 0,
+            .sampler_slot = 0,
+            .glsl_name = "tex",
+        };
+        shd_pp = sg.makeShader(shd_desc);
+    }
+
+    var shd_text: sg.Shader = undefined;
+    {
+        var shd_desc = sg.ShaderDesc{};
+        shd_desc.vs.source =
+            \\ #version 330
+            \\ layout(location=0) in vec2 position;
+            \\ layout(location=1) in vec2 texcoords;
+            \\ out vec2 v_texcoords;
+            \\ uniform vec2 vs_off;
+            \\ uniform vec2 vs_scale;
+            \\ void main() {
+            \\   v_texcoords = texcoords;
+            \\   gl_Position = vec4(vs_scale*0.5*(position+vec2(1,1)) + vs_off, 0, 1);
+            \\ }
+        ;
+        shd_desc.fs.source =
+            \\ #version 330
+            \\ in vec2 v_texcoords;
+            \\ out vec4 frag_color;
+            \\ uniform sampler2D tex;
+            \\ uniform vec2 off;
+            \\ uniform vec2 scale;
+            \\ uniform vec4 fg;
+            \\ uniform vec4 bg;
+            \\ void main() {
+            \\   float c = texture(tex, scale*v_texcoords + off).r;
+            \\   frag_color = vec4(0,0,0,0) + fg*c;
+            \\ }
+        ;
+
+        shd_desc.fs.uniform_blocks[0].size = @sizeOf(AtlasUniform);
+        shd_desc.fs.uniform_blocks[0].uniforms[0] = .{
+            .name = "off",
+            .type = .FLOAT2,
+        };
+        shd_desc.fs.uniform_blocks[0].uniforms[1] = .{
+            .name = "scale",
+            .type = .FLOAT2,
+        };
+        shd_desc.fs.uniform_blocks[0].uniforms[2] = .{
+            .name = "vs_off",
+            .type = .FLOAT2,
+        };
+        shd_desc.fs.uniform_blocks[0].uniforms[3] = .{
+            .name = "vs_scale",
+            .type = .FLOAT2,
+        };
+        shd_desc.fs.uniform_blocks[0].uniforms[4] = .{
+            .name = "fg",
+            .type = .FLOAT4,
+        };
+        shd_desc.fs.uniform_blocks[0].uniforms[5] = .{
+            .name = "bg",
+            .type = .FLOAT4,
+        };
+
+        shd_desc.fs.images[0] = .{ .used = true };
+        shd_desc.fs.samplers[0] = .{ .used = true };
+        shd_desc.fs.image_sampler_pairs[0] = .{
+            .used = true,
+            .image_slot = 0,
+            .sampler_slot = 0,
+            .glsl_name = "tex",
+        };
+        shd_text = sg.makeShader(shd_desc);
     }
 
     // Display shader
@@ -358,6 +537,7 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
             \\   frag_color = texture(tex, vec2(v_texcoords.x, 1.0-v_texcoords.y));
             \\ }
         ;
+
         shd_desc.fs.images[0] = .{ .used = true };
         shd_desc.fs.samplers[0] = .{ .used = true };
         shd_desc.fs.image_sampler_pairs[0] = .{
@@ -378,6 +558,7 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
             \\ layout(location=0) in vec3 position;
             \\ out vec3 v_texcoords;
             \\ uniform mat4 mvp;
+            \\ uniform mat4 model;
             \\ void main() {
             \\   v_texcoords = normalize(position);
             \\   gl_Position = mvp*vec4(position, 1);
@@ -393,7 +574,7 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
             \\   frag_color = color*texture(cube, v_texcoords);
             \\ }
         ;
-        shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms);
+        shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms2d);
         shd_desc.vs.uniform_blocks[0].uniforms[0] = .{
             .name = "mvp",
             .type = .MAT4,
@@ -419,7 +600,7 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
 
     // Offscreen 3d
     {
-        offscreen_3d.pass_action.colors[0] = .{
+        offscreen_3d.pass.action.colors[0] = .{
             .load_action = .LOAD,
         };
 
@@ -439,10 +620,10 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
             .sample_count = 1,
         });
 
-        var pass_desc = sg.PassDesc{};
-        pass_desc.color_attachments[0].image = offscreen_3d.color;
-        pass_desc.depth_stencil_attachment.image = offscreen_3d.depth;
-        offscreen_3d.pass = sg.makePass(pass_desc);
+        var attachments_desc = sg.AttachmentsDesc{};
+        attachments_desc.colors[0].image = offscreen_3d.color;
+        attachments_desc.depth_stencil.image = offscreen_3d.depth;
+        offscreen_3d.pass.attachments = sg.makeAttachments(attachments_desc);
 
         var pip_desc = sg.PipelineDesc{
             .index_type = .UINT16,
@@ -465,17 +646,15 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
             .pixel_format = .RGBA8,
         };
         pip_desc.layout.attrs[0].format = .FLOAT3;
+        pip_desc.layout.attrs[1].format = .FLOAT3;
+        pip_desc.layout.attrs[1].buffer_index = 1;
         offscreen_3d.pip = sg.makePipeline(pip_desc);
     }
 
     // Offscreen 2d
     {
-        offscreen_2d.load_pass_action.colors[0] = .{
+        offscreen_2d.pass.action.colors[0] = .{
             .load_action = .LOAD,
-        };
-
-        offscreen_2d.clear_pass_action.colors[0] = .{
-            .load_action = .CLEAR,
             .clear_value = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
         };
 
@@ -487,14 +666,15 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
             .sample_count = 1,
         });
 
-        var pass_desc = sg.PassDesc{};
-        pass_desc.color_attachments[0].image = offscreen_2d.color;
-        offscreen_2d.pass = sg.makePass(pass_desc);
+        var attachments_desc = sg.AttachmentsDesc{};
+        attachments_desc.colors[0].image = offscreen_2d.color;
+        offscreen_2d.pass.attachments = sg.makeAttachments(attachments_desc);
 
         var pip_desc = sg.PipelineDesc{
             .index_type = .UINT16,
             .shader = shd_2d,
             .sample_count = 1,
+            .color_count = 1,
             .depth = .{
                 .pixel_format = .NONE,
             },
@@ -512,22 +692,82 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
         offscreen_2d.pip = sg.makePipeline(pip_desc);
     }
 
-    // Cubemap
+    // Text shader
     {
-        offscreen_cubemap.pass_action.colors[0] = .{
+        text_pipeline.pass.action.colors[0] = .{
             .load_action = .LOAD,
         };
 
-        var pass_desc = sg.PassDesc{};
-        pass_desc.color_attachments[0].image = offscreen_3d.color;
-        pass_desc.depth_stencil_attachment.image = offscreen_3d.depth;
-        offscreen_cubemap.pass = sg.makePass(pass_desc);
+        font = goosepack.lookup(pack, "res/fonts/MononokiNerdFontMono-Regular").?.font;
+        var data = sg.ImageData{};
+        data.subimage[0][0] = .{ .ptr = font.pixels.ptr, .size = font.pixels.len };
+        text_pipeline.atlas = sg.makeImage(.{
+            .width = font.width,
+            .height = font.height,
+            .data = data,
+            .pixel_format = .R8,
+            .sample_count = 1,
+        });
+        text_pipeline.chars = font.chars;
+
+        var pip_desc = sg.PipelineDesc{
+            .index_type = .UINT16,
+            .shader = shd_text,
+            .color_count = 1,
+            .sample_count = 1,
+            .depth = .{
+                .pixel_format = .NONE,
+            },
+        };
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+                .src_factor_alpha = .SRC_ALPHA,
+                .dst_factor_alpha = .DST_ALPHA,
+                .op_alpha = .ADD,
+                .op_rgb = .ADD,
+            },
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT2;
+        pip_desc.layout.attrs[1].format = .FLOAT2;
+        text_pipeline.pip = sg.makePipeline(pip_desc);
+
+        const smp = sg.makeSampler(.{
+            .min_filter = .LINEAR,
+            .mag_filter = .LINEAR,
+            .wrap_u = .REPEAT,
+            .wrap_v = .REPEAT,
+        });
+
+        text_pipeline.bind.vertex_buffers[0] = sg.makeBuffer(.{
+            .data = sg.asRange(&textured_rectangle_vertices),
+        });
+        text_pipeline.bind.index_buffer = sg.makeBuffer(.{
+            .type = .INDEXBUFFER,
+            .data = sg.asRange(&textured_rectangle_indices),
+        });
+        text_pipeline.bind.fs.samplers[0] = smp;
+    }
+
+    // Cubemap
+    {
+        offscreen_cubemap.pass.action.colors[0] = .{
+            .load_action = .LOAD,
+        };
+
+        var attachments_desc = sg.AttachmentsDesc{};
+        attachments_desc.colors[0].image = offscreen_3d.color;
+        attachments_desc.depth_stencil.image = offscreen_3d.depth;
+        offscreen_cubemap.pass.attachments = sg.makeAttachments(attachments_desc);
 
         var pip_desc = sg.PipelineDesc{
             .index_type = .UINT16,
             .shader = shd_cm,
-            .cull_mode = .FRONT,
+            .cull_mode = .BACK,
             .sample_count = 1,
+            .color_count = 1,
             .depth = .{
                 .pixel_format = .DEPTH,
                 .compare = .LESS_EQUAL,
@@ -554,12 +794,7 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
             .data = sg.asRange(&cube_indices),
         });
 
-        profile.start("cubemap");
-        const cubemap = goosepack.lookup(pack, "res/cm").cubemap;
-        profile.end();
-
-        profile.sort();
-        profile.dump();
+        const cubemap = goosepack.lookup(pack, "res/cm").?.cubemap;
 
         var img_desc = sg.ImageDesc{
             .type = .CUBE,
@@ -580,11 +815,63 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
         offscreen_cubemap.bind.fs.samplers[0] = smp;
     }
 
-    // Display
+    // Postprocess
     {
-        display.pass_action.colors[0] = .{
+        postprocess.pass.action.colors[0] = .{
             .load_action = .LOAD,
         };
+        postprocess.pass.swapchain.width = 800;
+        postprocess.pass.swapchain.height = 600;
+
+        //var attachments_desc = sg.AttachmentsDesc{};
+        //attachments_desc.colors[0].image = offscreen_3d.color;
+        ////attachments_desc.depth_stencil.image = offscreen_3d.depth;
+        //postprocess.pass.attachments = sg.makeAttachments(attachments_desc);
+
+        var pip_desc = sg.PipelineDesc{
+            .index_type = .UINT16,
+            .shader = shd_pp,
+            .cull_mode = .BACK,
+            .depth = .{
+                .compare = .LESS_EQUAL,
+                .write_enabled = true,
+            },
+        };
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            },
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT2;
+        pip_desc.layout.attrs[1].format = .FLOAT2;
+        postprocess.pip = sg.makePipeline(pip_desc);
+
+        const smp = sg.makeSampler(.{
+            .min_filter = .LINEAR,
+            .mag_filter = .LINEAR,
+            .wrap_u = .REPEAT,
+            .wrap_v = .REPEAT,
+        });
+
+        postprocess.bind.vertex_buffers[0] = sg.makeBuffer(.{
+            .data = sg.asRange(&textured_rectangle_vertices),
+        });
+        postprocess.bind.index_buffer = sg.makeBuffer(.{
+            .type = .INDEXBUFFER,
+            .data = sg.asRange(&textured_rectangle_indices),
+        });
+        postprocess.bind.fs.samplers[0] = smp;
+    }
+
+    // Display
+    {
+        display.pass.action.colors[0] = .{
+            .load_action = .LOAD,
+        };
+        display.pass.swapchain.width = 800;
+        display.pass.swapchain.height = 600;
 
         var pip_desc = sg.PipelineDesc{
             .index_type = .UINT16,
@@ -683,7 +970,12 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
     const num_missing_views = views_per_col * views_per_row - num_views;
     const need_view_stretch = num_missing_views > 0;
 
-    sg.beginPass(offscreen_2d.pass, offscreen_2d.clear_pass_action);
+    var camera_pos: v3 = .{};
+    const light_pos: v3 = .{ .x = 0, .y = 0, .z = 80 };
+    const light_color: v3 = .{ .x = 1, .y = 1, .z = 1 };
+
+    offscreen_2d.pass.action.colors[0].load_action = .CLEAR;
+    sg.beginPass(offscreen_2d.pass);
     sg.endPass();
 
     while (b.bytes.hasData()) {
@@ -693,6 +985,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
             .Camera3d => {
                 const camera = b.pop(primitive.Camera3d);
                 vp = m4.mul(camera.proj, camera.view);
+                camera_pos = camera.pos;
 
                 // index = j*height + i
                 const row_index = @divFloor(index_3d, views_per_row);
@@ -705,13 +998,14 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
 
                 // Draw cubemap
                 {
-                    sg.beginPass(offscreen_cubemap.pass, offscreen_cubemap.pass_action);
+                    sg.beginPass(offscreen_cubemap.pass);
                     sg.applyViewport(view_width * @as(i32, @intCast(col_index)), view_height * @as(i32, @intCast(row_index)), view_width, view_height, true);
                     sg.applyPipeline(offscreen_cubemap.pip);
                     sg.applyBindings(offscreen_cubemap.bind);
                     const scale = 80000.0;
-                    const uniforms = Uniforms{
-                        .mvp = m4.transpose(m4.mul(vp, m4.modelWithRotations(.{}, .{ .x = scale, .y = scale, .z = scale }, .{ .x = std.math.pi / 2.0, .y = 0.0, .z = 0 }))),
+                    const model = m4.modelWithRotations(.{}, .{ .x = scale, .y = scale, .z = scale }, .{ .x = std.math.pi / 2.0, .y = 0.0, .z = 0 });
+                    const uniforms = Uniforms2d{
+                        .mvp = m4.transpose(m4.mul(vp, model)),
                         .color = v4{
                             .x = @as(f32, @floatFromInt(255)) / 255.0,
                             .y = @as(f32, @floatFromInt(255)) / 255.0,
@@ -724,7 +1018,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     sg.endPass();
                 }
 
-                sg.beginPass(offscreen_3d.pass, offscreen_3d.pass_action);
+                sg.beginPass(offscreen_3d.pass);
                 sg.applyViewport(view_width * @as(i32, @intCast(col_index)), view_height * @as(i32, @intCast(row_index)), view_width, view_height, true);
             },
             .End3d => {
@@ -738,7 +1032,8 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
 
                 vp = world_to_view;
 
-                sg.beginPass(offscreen_2d.pass, offscreen_2d.load_pass_action);
+                offscreen_2d.pass.action.colors[0].load_action = .LOAD;
+                sg.beginPass(offscreen_2d.pass);
 
                 // index = j*height + i
                 const row_index = @divFloor(index_2d, views_per_row);
@@ -749,81 +1044,47 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 }
                 sg.applyViewport(view_width * @as(i32, @intCast(col_index)), view_height * @as(i32, @intCast(row_index)), view_width, view_height, true);
                 index_2d += 1;
-
-                sg.applyPipeline(offscreen_2d.pip);
             },
             .End2d => {
-                sdtx.draw();
                 sg.endPass();
             },
             .Text => {
                 const text = b.pop(primitive.Text);
 
-                const fontsize = 8.0;
-                const scale = @as(f32, @floatFromInt(height)) * text.size / fontsize;
-                const scaled_fontsize = fontsize * scale;
-                const x: f32 = @as(f32, @floatFromInt(width)) * text.pos.x / scaled_fontsize;
-                const y: f32 = @as(f32, @floatFromInt(height)) * (1.0 - (text.pos.y + text.size)) / scaled_fontsize;
+                const x: f32 = 2.0 * text.pos.x - 1.0;
+                const y: f32 = 2.0 * text.pos.y - 1.0;
 
-                {
-                    //const offset = v2{ .x = r.size.x / 2, .y = r.size.y / 2 };
-                    const size = .{
-                        .x = scaled_fontsize * @as(f32, @floatFromInt(text.len)) / @as(f32, @floatFromInt(width)),
-                        .y = scaled_fontsize / @as(f32, @floatFromInt(height)),
-                    };
-                    const model = m4.model2d(v2.add(text.pos, .{ .x = size.x / 2.0, .y = size.y / 2.0 }), size);
-                    const uniforms = Uniforms{
-                        .mvp = m4.transpose(m4.mul(vp, model)),
-                        .color = v4{
-                            .x = @as(f32, @floatFromInt(96)) / 255.0,
-                            .y = @as(f32, @floatFromInt(0)) / 255.0,
-                            .z = @as(f32, @floatFromInt(0)) / 255.0,
-                            .w = @as(f32, @floatFromInt(96)) / 255.0,
-                        },
-                    };
+                text_pipeline.bind.fs.images[0] = text_pipeline.atlas;
+                sg.applyPipeline(text_pipeline.pip);
+                sg.applyBindings(text_pipeline.bind);
 
-                    sg.applyBindings(rectangle_bind);
-                    sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                    sg.draw(0, rectangle_indices.len, 1);
+                const scale: f32 = 2.0 * text.size / (@as(f32, @floatFromInt(font.size)) / @as(f32, @floatFromInt(height)));
+                const atlas_w: f32 = @floatFromInt(font.width);
+                const atlas_h: f32 = @floatFromInt(font.height);
+
+                var xoff: f32 = 0.0;
+                for (text.str[0..text.len]) |c| {
+                    const off = c - 32;
+                    const char = text_pipeline.chars[off];
+
+                    const sx = @as(f32, @floatFromInt(char.x1 - char.x0)) / atlas_w;
+                    const sy = @as(f32, @floatFromInt(char.y1 - char.y0)) / atlas_h;
+                    const vsx = (char.xoff2 - char.xoff) / atlas_w;
+                    const vsy = (char.yoff2 - char.yoff) / atlas_h;
+
+                    const uniforms = AtlasUniform{
+                        .off = .{ .x = @as(f32, @floatFromInt(char.x0)) / atlas_w, .y = @as(f32, @floatFromInt(char.y0)) / atlas_h },
+                        .scale = .{ .x = sx, .y = sy },
+                        .vs_off = .{ .x = x + xoff + scale * char.xoff / atlas_w, .y = y - scale * char.yoff / atlas_h - scale * vsy },
+                        .vs_scale = .{ .x = scale * vsx, .y = scale * vsy },
+                        .fg = text.fg,
+                        .bg = text.bg,
+                    };
+                    sg.applyUniforms(.FS, 0, sg.asRange(&uniforms));
+
+                    sg.draw(0, textured_rectangle_indices.len, 1);
+                    xoff += scale * char.xadvance / atlas_w;
                 }
-
-                sdtx.canvas(@as(f32, @floatFromInt(width)) / scale, @as(f32, @floatFromInt(height)) / scale);
-                sdtx.origin(0.0, 0.0);
-                sdtx.font(0);
-                sdtx.pos(x, y);
-                sdtx.color4b(header.color.r, header.color.b, header.color.g, header.color.a);
-                sdtx.puts(&text.str);
-
-                //
-                // below is for working with unicode where we have to do more work
-                // to figure out the width of text.
-                //
-                //const spacing = text.size / @as(f32, @floatFromInt(font.baseSize));
-                //raylib.DrawTextEx(font, &text.str,
-                //    castToRaylibVector2(text.pos),
-                //    text.size,
-                //    spacing,
-                //    castToRaylibColor(header.color));
-
-                //if (text.cursor_index) |cursor_index| {
-                //    var offset_x: f32 = 0;
-
-                //    const scale_factor = text.size/@as(f32, @floatFromInt(font.baseSize));
-
-                //    for (text.str[0..cursor_index]) |codepoint| {
-                //        const glyph_index: usize = @intCast(raylib.GetGlyphIndex(font, codepoint));
-                //        if (font.glyphs[glyph_index].advanceX != 0) {
-                //            offset_x += @as(f32, @floatFromInt(font.glyphs[glyph_index].advanceX));
-                //        } else {
-                //            offset_x += (font.recs[glyph_index].width + @as(f32, @floatFromInt(font.glyphs[glyph_index].offsetX)));
-                //        }
-                //    }
-                //    offset_x *= scale_factor;
-                //    const total_spacing = if (cursor_index > 1) cursor_index - 1 else 0;
-                //    offset_x += @as(f32, @floatFromInt(total_spacing)) * spacing;
-
-                //    raylib.DrawRectangle(@intFromFloat(text.pos.x + offset_x), @intFromFloat(text.pos.y), @intFromFloat(text.size/10), @intFromFloat(text.size), raylib.RED);
-                //}
             },
             .Line => {
                 const line = b.pop(primitive.Line);
@@ -876,7 +1137,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 const r = b.pop(primitive.Rectangle);
                 const offset = v2{ .x = r.size.x / 2, .y = r.size.y / 2 };
                 const model = m4.model2d(v2.add(r.pos, offset), r.size);
-                const uniforms = Uniforms{
+                const uniforms = Uniforms2d{
                     .mvp = m4.transpose(m4.mul(vp, model)),
                     .color = v4{
                         .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
@@ -886,6 +1147,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     },
                 };
 
+                sg.applyPipeline(offscreen_2d.pip);
                 sg.applyBindings(rectangle_bind);
                 sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
                 sg.draw(0, rectangle_indices.len, 1);
@@ -894,35 +1156,46 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 const cmd = b.pop(primitive.Mesh);
 
                 const node_entry_info = goosepack.lookupEntry(pack, cmd.name);
-                const node = goosepack.getResource(pack, node_entry_info.index).model_node;
-                const model_res = goosepack.lookup(pack, node.model_name).model;
+                const node = goosepack.getResource(pack, node_entry_info.?.index).model_node;
+                const res_model = goosepack.lookup(pack, node.model_name) orelse {
+                    std.log.info("Failed to lookup {s}\n", .{node.model_name});
+                    unreachable;
+                };
+                const model = res_model.model;
 
-                if (cmd.draw_children and node_entry_info.entry.children != null) {
+                if (cmd.draw_children and node_entry_info.?.entry.children != null) {
                     var stack = std.ArrayList(struct {
                         info: goosepack.EntryInfo,
                         parent_transform: m4,
-                    }).initCapacity(mem.frame, 16) catch unreachable;
-                    stack.appendAssumeCapacity(.{ .info = node_entry_info, .parent_transform = cmd.model });
+                    }).initCapacity(mem.frame, 128) catch unreachable;
+                    stack.appendAssumeCapacity(.{ .info = node_entry_info.?, .parent_transform = cmd.model });
                     while (stack.popOrNull()) |item| {
                         const mesh_node = goosepack.getResource(pack, item.info.index).model_node;
-                        const mesh = model_res.meshes[mesh_node.mesh_index];
+
                         const transform = m4.mul(item.parent_transform, mesh_node.transform);
-                        for (mesh.primitives, 0..) |p, prim_index| {
-                            const bind = bindForMesh(model_res, mesh_node.mesh_index, @intCast(prim_index));
-                            const mat = model_res.materials[p.material_index];
-                            sg.applyPipeline(offscreen_3d.pip);
-                            sg.applyBindings(bind);
-                            const uniforms = Uniforms{
-                                .mvp = m4.transpose(m4.mul(vp, transform)),
-                                .color = v4{
-                                    .x = mat.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                                    .y = mat.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                                    .z = mat.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                                    .w = mat.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                                },
-                            };
-                            sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                            sg.draw(0, @intCast(p.indices.size / 2), 1);
+                        if (mesh_node.mesh_index) |mesh_index| {
+                            const mesh = model.meshes[mesh_index];
+                            for (mesh.primitives, 0..) |p, prim_index| {
+                                const bind = bindForMesh(model, mesh_index, @intCast(prim_index));
+                                const mat = model.materials[p.material_index];
+                                sg.applyPipeline(offscreen_3d.pip);
+                                sg.applyBindings(bind);
+                                const uniforms = Uniforms3d{
+                                    .mvp = m4.transpose(m4.mul(vp, transform)),
+                                    .model = m4.transpose(transform),
+                                    .color = v4{
+                                        .x = mat.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                                        .y = mat.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                                        .z = mat.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                                        .w = mat.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                                    },
+                                    .light_pos = light_pos,
+                                    .light_color = light_color,
+                                    .camera_pos = camera_pos,
+                                };
+                                sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                                sg.draw(0, @intCast(p.indices.size / 2), 1);
+                            }
                         }
 
                         if (item.info.entry.children) |children| {
@@ -933,23 +1206,30 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                         }
                     }
                 } else {
-                    const mesh = model_res.meshes[node.mesh_index];
-                    for (mesh.primitives, 0..) |p, prim_index| {
-                        const bind = bindForMesh(model_res, node.mesh_index, @intCast(prim_index));
-                        const mat = model_res.materials[p.material_index];
-                        sg.applyPipeline(offscreen_3d.pip);
-                        sg.applyBindings(bind);
-                        const uniforms = Uniforms{
-                            .mvp = m4.transpose(m4.mul(vp, m4.mul(cmd.model, node.transform))),
-                            .color = v4{
-                                .x = mat.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                                .y = mat.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                                .z = mat.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                                .w = mat.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                            },
-                        };
-                        sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                        sg.draw(0, @intCast(p.indices.size / 2), 1);
+                    if (node.mesh_index) |mesh_index| {
+                        const mesh = model.meshes[mesh_index];
+                        for (mesh.primitives, 0..) |p, prim_index| {
+                            const bind = bindForMesh(model, mesh_index, @intCast(prim_index));
+                            const mat = model.materials[p.material_index];
+                            sg.applyPipeline(offscreen_3d.pip);
+                            sg.applyBindings(bind);
+                            const transform = m4.mul(cmd.model, node.transform);
+                            const uniforms = Uniforms3d{
+                                .mvp = m4.transpose(m4.mul(vp, transform)),
+                                .model = m4.transpose(transform),
+                                .color = v4{
+                                    .x = mat.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                                    .y = mat.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                                    .z = mat.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                                    .w = mat.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                                },
+                                .light_pos = light_pos,
+                                .light_color = light_color,
+                                .camera_pos = camera_pos,
+                            };
+                            sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                            sg.draw(0, @intCast(p.indices.size / 2), 1);
+                        }
                     }
                 }
             },
@@ -959,14 +1239,18 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 {
                     sg.applyPipeline(offscreen_3d.pip);
                     sg.applyBindings(cube_bind);
-                    const uniforms = Uniforms{
+                    const uniforms = Uniforms3d{
                         .mvp = m4.transpose(m4.mul(vp, cube.model)),
+                        .model = m4.transpose(cube.model),
                         .color = v4{
                             .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
                             .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
                             .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
                             .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
                         },
+                        .light_pos = light_pos,
+                        .light_color = light_color,
+                        .camera_pos = camera_pos,
                     };
                     sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
                     sg.draw(0, cube_indices.len, 1);
@@ -990,6 +1274,54 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 //     sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
                 //     sg.draw(0, @intCast(cube_model.indices.?.len / 2), 1);
                 // }
+            },
+            .CubeOutline => {
+                const cube = b.pop(primitive.CubeOutline);
+
+                const pos = [4]v3{
+                    .{ .x = 0.5, .y = 0.5, .z = 0 },
+                    .{ .x = 0.5, .y = -0.5, .z = 0 },
+                    .{ .x = -0.5, .y = 0.5, .z = 0 },
+                    .{ .x = -0.5, .y = -0.5, .z = 0 },
+                };
+                const scale = v3{ .x = cube.thickness, .y = cube.thickness, .z = 1 };
+                const inds = [3][3]u8{
+                    .{ 0, 1, 2 },
+                    .{ 0, 2, 1 },
+                    .{ 2, 0, 1 },
+                };
+                for (0..12) |i| {
+                    const group = @divTrunc(i, 4);
+                    const index = i % 4;
+                    const ss = v3{
+                        .x = @as([3]f32, @bitCast(scale))[inds[group][0]],
+                        .y = @as([3]f32, @bitCast(scale))[inds[group][1]],
+                        .z = @as([3]f32, @bitCast(scale))[inds[group][2]],
+                    };
+                    const pp = v3{
+                        .x = @as([3]f32, @bitCast(pos[index]))[inds[group][0]],
+                        .y = @as([3]f32, @bitCast(pos[index]))[inds[group][1]],
+                        .z = @as([3]f32, @bitCast(pos[index]))[inds[group][2]],
+                    };
+                    const m = math.m4.model(pp, ss);
+                    sg.applyPipeline(offscreen_3d.pip);
+                    sg.applyBindings(cube_bind);
+                    const uniforms = Uniforms3d{
+                        .mvp = m4.transpose(m4.mul(vp, m4.mul(cube.model, m))),
+                        .model = m4.transpose(cube.model),
+                        .color = v4{
+                            .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                            .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                            .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                            .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                        },
+                        .light_pos = light_pos,
+                        .light_color = light_color,
+                        .camera_pos = camera_pos,
+                    };
+                    sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                    sg.draw(0, cube_indices.len, 1);
+                }
             },
             .Plane => {
                 const p = b.pop(primitive.Plane);
@@ -1057,21 +1389,23 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 //sg.applyPipeline(pip_2d);
             },
             .Color => {},
+            .VoxelChunk => {},
+            .VoxelTransform => {},
         }
     }
 
     {
-        display.bind.fs.images[0] = offscreen_3d.color;
-        sg.beginDefaultPass(display.pass_action, @intCast(width), @intCast(height));
-        sg.applyPipeline(display.pip);
-        sg.applyBindings(display.bind);
+        postprocess.bind.fs.images[0] = offscreen_3d.color;
+        sg.beginPass(postprocess.pass);
+        sg.applyPipeline(postprocess.pip);
+        sg.applyBindings(postprocess.bind);
         sg.draw(0, textured_rectangle_indices.len, 1);
         sg.endPass();
     }
 
     {
         display.bind.fs.images[0] = offscreen_2d.color;
-        sg.beginDefaultPass(display.pass_action, @intCast(width), @intCast(height));
+        sg.beginPass(display.pass);
         sg.applyPipeline(display.pip);
         sg.applyBindings(display.bind);
         sg.draw(0, textured_rectangle_indices.len, 1);

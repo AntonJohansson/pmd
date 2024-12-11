@@ -74,9 +74,9 @@ pub fn main() !void {
     defer module.close();
 
     const host = net.bind(9053) orelse return;
-    defer std.os.closeSocket(host.fd);
+    defer std.posix.close(host.fd);
 
-    var new_connections: std.BoundedArray(NewConnectionData, 4) = .{};
+    const new_connections: std.BoundedArray(NewConnectionData, 4) = .{};
 
     const fps = 165;
     const desired_frame_time = std.time.ns_per_s / fps;
@@ -84,7 +84,7 @@ pub fn main() !void {
 
     var tick: u64 = 0;
     //const dt: f32 = 1.0/@intToFloat(f32, fps);
-    var running = true;
+    const running = true;
 
     const crand = std.crypto.random;
     var prng = std.rand.DefaultPrng.init(crand.int(u64));
@@ -125,7 +125,7 @@ pub fn main() !void {
                     .peer_connected => |e| {
                         log.info("Peer {} connected", .{e.peer_index});
                         peers[e.peer_index].clear();
-                        net.pushMessage(e.peer_index, packet.Joined {
+                        net.pushMessage(e.peer_index, packet.Joined{
                             .tick = tick,
                         });
                     },
@@ -136,7 +136,7 @@ pub fn main() !void {
                             if (index != null)
                                 _ = memory.players.swapRemove(index.?);
                             // TODO: reliable
-                            net.pushMessageToAllPeers(packet.PeerDisconnected {
+                            net.pushMessageToAllPeers(packet.PeerDisconnected{
                                 .id = id,
                             });
                         }
@@ -144,12 +144,11 @@ pub fn main() !void {
                     },
                     .message_received => |e| {
                         switch (e.kind) {
-                            .Pong => {
-                            },
+                            .Pong => {},
                             .Command => {
                                 const message: *align(1) packet.Command = @ptrCast(e.data);
                                 std.log.info("Running command: {s}", .{message.data[0..message.len]});
-                                command.dodododododododo( message.data[0..message.len]);
+                                command.dodododododododo(message.data[0..message.len]);
 
                                 net.pushMessageToAllOtherPeers(e.peer_index, message.*);
                             },
@@ -227,7 +226,7 @@ pub fn main() !void {
                                 break;
                             },
                         }
-                    }
+                    },
                 }
             }
 
@@ -237,7 +236,7 @@ pub fn main() !void {
                 if (!e.flags.updated_server)
                     continue;
                 e.flags.updated_server = false;
-                net.pushMessageToAllPeers(packet.EntityUpdate {
+                net.pushMessageToAllPeers(packet.EntityUpdate{
                     .entity = e.*,
                 });
             }
@@ -250,7 +249,7 @@ pub fn main() !void {
             memory.new_spawns.resize(0) catch unreachable;
 
             if (memory.new_damage.len > 0) {
-                var p = packet.NewDamage {};
+                var p = packet.NewDamage{};
                 @memcpy(p.new_damage[0..memory.new_damage.len], memory.new_damage.constSlice());
                 p.num_damage = memory.new_damage.len;
                 memory.new_damage.resize(0) catch unreachable;
@@ -258,7 +257,7 @@ pub fn main() !void {
             }
 
             if (memory.new_sounds.len > 0) {
-                var p = packet.NewSounds {};
+                var p = packet.NewSounds{};
                 @memcpy(p.new_sounds[0..memory.new_sounds.len], memory.new_sounds.constSlice());
                 p.num_sounds = memory.new_sounds.len;
                 memory.new_sounds.resize(0) catch unreachable;
@@ -270,7 +269,7 @@ pub fn main() !void {
                     memory.hitscans.appendAssumeCapacity(h);
                 }
 
-                var p = packet.NewHitscans {};
+                var p = packet.NewHitscans{};
                 @memcpy(p.new_hitscans[0..memory.new_hitscans.len], memory.new_hitscans.constSlice());
                 p.num_hitscans = memory.new_hitscans.len;
                 memory.new_hitscans.resize(0) catch unreachable;
@@ -282,7 +281,7 @@ pub fn main() !void {
                     memory.nades.appendAssumeCapacity(n);
                 }
 
-                var p = packet.NewNades {};
+                var p = packet.NewNades{};
                 @memcpy(p.new_nades[0..memory.new_nades.len], memory.new_nades.constSlice());
                 p.num_nades = memory.new_nades.len;
                 memory.new_nades.resize(0) catch unreachable;
@@ -294,7 +293,7 @@ pub fn main() !void {
                     memory.explosions.appendAssumeCapacity(e);
                 }
 
-                var p = packet.NewExplosions {};
+                var p = packet.NewExplosions{};
                 @memcpy(p.new_explosions[0..memory.new_explosions.len], memory.new_explosions.constSlice());
                 p.num_explosions = memory.new_explosions.len;
                 memory.explosions.resize(0) catch unreachable;
@@ -344,7 +343,7 @@ pub fn main() !void {
             // Here we shoehorn in some sleeping to not consume all the cpu resources
             {
                 const start_sleep = timer.read();
-                var time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(frame_time));
+                const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(frame_time));
                 if (time_left > std.time.us_per_s) {
                     // if we have at least 1us left, sleep
                     std.time.sleep(@intCast(time_left));
@@ -355,10 +354,9 @@ pub fn main() !void {
             }
 
             _ = arena_allocator.reset(.retain_capacity);
-
         }
 
-        if (actual_timer.read() >= 2*std.time.ns_per_s) {
+        if (actual_timer.read() >= 2 * std.time.ns_per_s) {
             actual_timer.reset();
 
             //if (print_perf) {

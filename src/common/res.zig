@@ -55,6 +55,31 @@ pub const Text = struct {
     bytes: []u8 = undefined,
 };
 
+pub const FontChar = struct {
+    x0: u16,
+    y0: u16,
+    x1: u16,
+    y1: u16,
+    xoff: f32,
+    yoff: f32,
+    xadvance: f32,
+    xoff2: f32,
+    yoff2: f32,
+};
+
+pub const Font = struct {
+    chars: []FontChar = undefined,
+    pixels: []u8 = undefined,
+    width: u16 = 0,
+    height: u16 = 0,
+    size: u8 = 0,
+};
+
+pub const Shader = struct {
+    vs_bytes: []u8 = undefined,
+    fs_bytes: []u8 = undefined,
+};
+
 pub const Cubemap = struct {
     bytes: []u8 = undefined,
     width: u32 = 0,
@@ -134,13 +159,13 @@ const SLOT_smp = 0;
 const SLOT_vs_params = 0;
 
 pub const bt_position: u8 = 1;
-pub const bt_normal: u8 = 2;
+pub const bt_normals: u8 = 2;
 pub const bt_texcoords: u8 = 4;
 pub const bt_indices: u8 = 8;
 
 pub const ModelNode = struct {
     model_name: []const u8 = undefined,
-    mesh_index: u32 = 0,
+    mesh_index: ?u32 = 0,
     transform: math.m4 = undefined,
 };
 

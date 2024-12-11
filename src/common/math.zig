@@ -25,8 +25,8 @@ pub const v2 = extern struct {
 
     pub fn sub(a: v2, b: v2) v2 {
         return v2{
-            .x = a.x + b.x,
-            .y = a.y + b.y,
+            .x = a.x - b.x,
+            .y = a.y - b.y,
         };
     }
 
@@ -661,7 +661,7 @@ pub const m4 = extern struct {
 
     pub fn modelFromXDir(translation: v3, s: v3, dir: v3) m4 {
         const pitch = -std.math.asin(dir.z);
-        const yaw = atan2(f32, dir.y, dir.x);
+        const yaw = atan2(dir.y, dir.x);
         return modelWithRotations(translation, s, .{
             .x = 0.0,
             .y = pitch,

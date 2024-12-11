@@ -8,12 +8,12 @@ pub const primitive = @import("primitive.zig");
 pub const code_module = @import("code_module.zig");
 pub const logging = @import("logging.zig");
 pub const command = @import("command.zig");
-pub const profile = @import("profile.zig");
 pub const draw_meta = @import("draw_meta.zig");
 pub const draw_api = @import("draw_api.zig");
 pub const threadpool = @import("threadpool.zig");
 pub const goosepack = @import("pack.zig");
 pub const res = @import("res.zig");
+pub const profile = @import("profile.zig");
 
 const v2 = math.v2;
 const v3 = math.v3;
@@ -115,7 +115,7 @@ pub const Weapon = extern struct {
     ammo: u8,
 };
 
-pub const sniper = Weapon {
+pub const sniper = Weapon{
     .type = .sniper,
     .total_cooldown = 1.0,
     .total_reload_cooldown = 1.0,
@@ -126,7 +126,7 @@ pub const sniper = Weapon {
     .ammo = 5,
 };
 
-pub const pistol = Weapon {
+pub const pistol = Weapon{
     .type = .pistol,
     .total_cooldown = 0.1,
     .total_reload_cooldown = 1.0,
@@ -137,7 +137,7 @@ pub const pistol = Weapon {
     .ammo = 10,
 };
 
-pub const nade = Weapon {
+pub const nade = Weapon{
     .type = .nade,
     .total_cooldown = 0.1,
     .total_reload_cooldown = 1.0,
@@ -191,7 +191,7 @@ pub const Player = extern struct {
     // Position, velocity, and orientation
     pos: v3,
     vel: v3,
-    dir: v3 = .{.x = 1, .y = 0, .z = 0},
+    dir: v3 = .{ .x = 1, .y = 0, .z = 0 },
     yaw: f32,
     pitch: f32,
 
@@ -200,7 +200,7 @@ pub const Player = extern struct {
     aim_start_pos: v3 = .{},
     aim_dir: v3 = .{},
 
-    weapons: [3]Weapon = .{sniper, pistol, nade},
+    weapons: [3]Weapon = .{ sniper, pistol, nade },
     weapon_current: u8 = 0,
     weapon_last: u8 = 1,
 
@@ -215,7 +215,7 @@ pub const Player = extern struct {
 };
 
 pub fn findIndexById(players: []Player, id: EntityId) ?usize {
-    for (players, 0..) |p,i| {
+    for (players, 0..) |p, i| {
         if (p.id == id)
             return i;
     }
@@ -250,13 +250,7 @@ pub fn graphAppend(g: *Graph, y: f32) void {
     g.top = (g.top + 1) % g.data.len;
 }
 
-pub const WidgetMoveType = enum {
-    move_axis,
-    move_plane,
-    rotate_x,
-    rotate_y,
-    rotate_z
-};
+pub const WidgetMoveType = enum { move_axis, move_plane, rotate_x, rotate_y, rotate_z };
 
 pub const WidgetModel = struct {
     model: *m4 = undefined,
@@ -283,7 +277,7 @@ pub const Entity = extern struct {
         //pad: std.meta.Int(.unsigned, @bitSizeOf(@This())),
     },
     plane: primitive.Plane = .{
-        .model =.{},
+        .model = .{},
     },
 };
 
@@ -322,26 +316,56 @@ pub const MemoryAllocators = struct {
     persistent: std.mem.Allocator = undefined,
 };
 
+pub const WindowItem = union(enum) {
+    text: struct {
+        str: []const u8,
+        color: v3 = .{ .x = 30, .y = 0.8, .z = 0.8 },
+    },
+    input_text: struct {
+        str: []const u8,
+        color: v3 = .{ .x = 30, .y = 0.8, .z = 0.8 },
+    },
+};
+
+pub const Window = struct {
+    title: []const u8,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    parent: ?u8 = null,
+    children: std.ArrayList(WindowItem),
+    cursor_x: f32 = 0,
+    cursor_y: f32 = 0,
+    moving: bool = false,
+    hover: bool = false,
+    color: v3 = .{ .x = 60, .y = 0.5, .z = 0.5 },
+};
+
 pub const Memory = struct {
     pack: goosepack.Pack = undefined,
     // game state
     players: std.BoundedArray(Player, max_players) = .{},
     entities: std.BoundedArray(Entity, 64) = .{},
 
-    // TODO: move to frame allocator
-    new_sounds:     std.BoundedArray(Sound, 64) = .{},
-    new_hitscans:   std.BoundedArray(Hitscan,   64) = .{},
-    new_nades:      std.BoundedArray(Nade,      64) = .{},
-    new_explosions: std.BoundedArray(Explosion, 64) = .{},
-    new_damage:     std.BoundedArray(Damage,    64) = .{},
+    windows: ?std.ArrayList(Window) = null,
+    current_window: ?usize = null,
+    window_moving_offset: v2 = .{},
 
-    sounds:     std.BoundedArray(Sound, 64) = .{},
-    hitscans:   std.BoundedArray(Hitscan,   64) = .{},
-    nades:      std.BoundedArray(Nade,      64) = .{},
+    // TODO: move to frame allocator
+    new_sounds: std.BoundedArray(Sound, 64) = .{},
+    new_hitscans: std.BoundedArray(Hitscan, 64) = .{},
+    new_nades: std.BoundedArray(Nade, 64) = .{},
+    new_explosions: std.BoundedArray(Explosion, 64) = .{},
+    new_damage: std.BoundedArray(Damage, 64) = .{},
+
+    sounds: std.BoundedArray(Sound, 64) = .{},
+    hitscans: std.BoundedArray(Hitscan, 64) = .{},
+    nades: std.BoundedArray(Nade, 64) = .{},
     explosions: std.BoundedArray(Explosion, 64) = .{},
 
     // camera2d
-    target: v2 = .{.x = 0.5, .y = 0.5},
+    target: v2 = .{ .x = 0.5, .y = 0.5 },
     zoom: f32 = 1,
 
     // debug

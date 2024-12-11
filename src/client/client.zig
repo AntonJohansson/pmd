@@ -17,6 +17,8 @@ const goosepack = common.goosepack;
 const draw_api = common.draw_api;
 const draw = @import("draw.zig");
 
+const cl = @import("command_meta.zig");
+
 const math = common.math;
 const v2 = math.v2;
 const v3 = math.v3;
@@ -277,6 +279,17 @@ const PlayingSound = struct {
     volume: f32 = 1.0,
 };
 
+var host: net.Host = .{};
+var server_index: ?net.PeerIndex = null;
+pub fn connect(ip: []const u8, port: u16) void {
+    const crand = std.crypto.random;
+    server_index = net.connect(&host, ip, port) orelse blk: {
+        log.err("Failed to connect to server {s}:{}", .{ ip, port });
+        break :blk null;
+    };
+    net.pushMessage(server_index.?, packet.ConnectionRequest{ .client_salt = crand.int(u64) });
+}
+
 pub fn main() !void {
     // Setup the allocators we'll be using
     // 1. GeneralPurposeAllocator for persitent data that will exist accross frames
@@ -286,20 +299,30 @@ pub fn main() !void {
     var fixed_allocator = std.heap.FixedBufferAllocator.init(try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, 128000 * std.mem.page_size));
     log.info("{}", .{fixed_allocator.buffer.len});
     defer std.heap.page_allocator.free(fixed_allocator.buffer);
-    memory.mem.frame = fixed_allocator.threadSafeAllocator();
+    //var fixed_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    memory.mem.frame = fixed_allocator.allocator();
     memory.mem.persistent = general_purpose_allocator.allocator();
+
+    common.profile.init(memory.mem.persistent);
+    for (0..5) |_| {
+        std.log.info("{}\n", .{common.profile.block("hel")});
+    }
 
     try common.threadpool.start(memory.mem.persistent);
 
     net.mem = memory.mem;
     res.mem = memory.mem;
 
+    memory.windows = std.ArrayList(common.Window).init(memory.mem.persistent);
+
     //
     // Load pack
     //
 
     const pack_in_memory: ?[]u8 = res.readFileToMemory(memory.mem.persistent, "res.gp") catch null;
-    defer {if (pack_in_memory) |bytes| memory.mem.persistent.free(bytes);}
+    defer {
+        if (pack_in_memory) |bytes| memory.mem.persistent.free(bytes);
+    }
     goosepack.setAllocators(memory.mem.frame, memory.mem.persistent);
     memory.pack = goosepack.init();
     if (pack_in_memory) |bytes| {
@@ -309,20 +332,12 @@ pub fn main() !void {
     //
     // Connect to server
     //
-    var host: net.Host = .{};
-    //const ip = "85.228.207.30";
-    const ip = "localhost";
-    const port = 9053;
-    const server_index = net.connect(&host, ip, port) orelse {
-        log.err("Failed to connect to server {s}:{}", .{ ip, port });
-        return;
-    };
-    defer std.os.close(host.fd);
+    //connect("127.0.0.1", 9053);
+    cl.run("connect 127.0.0.1 9053");
 
     //
     // Simulation state
     //
-    const crand = std.crypto.random;
 
     const fps = 165;
     const desired_frame_time = std.time.ns_per_s / fps;
@@ -333,7 +348,6 @@ pub fn main() !void {
     //
     // Network state
     //
-    net.pushMessage(server_index, packet.ConnectionRequest{ .client_salt = crand.int(u64) });
 
     //
     // GLFW init
@@ -442,7 +456,7 @@ pub fn main() !void {
     default_keyboard_input_map_editor.map_key(.Editor, .toggle, .x);
     default_keyboard_input_map_editor.map_key(.Save, .rising_edge, .o);
     default_keyboard_input_map_editor.map_key(.Load, .rising_edge, .p);
-    default_keyboard_input_map_editor.map_mouse_button(.Interact, .state, .left);
+    default_keyboard_input_map_editor.map_mouse_button(.Interact, .rising_edge, .left);
     default_keyboard_input_map_editor.map_mouse_button(.AltInteract, .rising_edge, .right);
 
     var default_gamepad_input_map_gameplay = InputMap{};
@@ -515,8 +529,9 @@ pub fn main() !void {
             //const frame_stat = memory.time_stats.get(.Frametime).startTime();
             memory.time += desired_frame_time;
 
-            if (window.shouldClose())
+            if (window.shouldClose()) {
                 running = false;
+            }
 
             {
                 if (try module.reloadIfChanged(memory.mem.persistent)) {
@@ -533,212 +548,212 @@ pub fn main() !void {
             // Read network
             //
             var events: []net.Event = undefined;
-            {
+            if (server_index) |si| {
                 memory.stat_data.start("net receive");
                 defer memory.stat_data.end();
 
-                events = net.receiveMessagesClient(&host, server_index);
-            }
+                events = net.receiveMessagesClient(&host, si);
 
-            //
-            // Process network data
-            //
-            memory.stat_data.start("net process");
-            for (events) |event| {
-                switch (event) {
-                    .peer_connected => {
-                        // Clear local players and players in game when joining a server
-                        for (local_players.slice()) |*lp| {
-                            lp.id = null;
-                        }
-                        memory.players.len = 0;
-                        log.info("connected", .{});
-                        connected = true;
-                    },
-                    .peer_disconnected => {
-                        log.info("connected", .{});
-                    },
-                    .message_received => |e| {
-                        switch (e.kind) {
-                            .Command => {
-                                const message: *align(1) packet.Command = @ptrCast(e.data);
+                //
+                // Process network data
+                //
+                memory.stat_data.start("net process");
+                for (events) |event| {
+                    switch (event) {
+                        .peer_connected => {
+                            // Clear local players and players in game when joining a server
+                            for (local_players.slice()) |*lp| {
+                                lp.id = null;
+                            }
+                            memory.players.len = 0;
+                            log.info("connected", .{});
+                            connected = true;
+                        },
+                        .peer_disconnected => {
+                            log.info("connected", .{});
+                        },
+                        .message_received => |e| {
+                            switch (e.kind) {
+                                .Command => {
+                                    const message: *align(1) packet.Command = @ptrCast(e.data);
 
-                                // Hardcode set command as we need to treat the value passed separately.
-                                //if (setall and peer_index != null) {
-                                //    var command_packet = packet.Command{
-                                //        .data = undefined,
-                                //        .len = commandline.len,
-                                //    };
-                                //    std.mem.copy(u8, &command_packet.data, commandline);
-                                //    net.pushMessage(peer_index.?, command_packet);
-                                //}
+                                    // Hardcode set command as we need to treat the value passed separately.
+                                    //if (setall and peer_index != null) {
+                                    //    var command_packet = packet.Command{
+                                    //        .data = undefined,
+                                    //        .len = commandline.len,
+                                    //    };
+                                    //    std.mem.copy(u8, &command_packet.data, commandline);
+                                    //    net.pushMessage(peer_index.?, command_packet);
+                                    //}
 
-                                log.info("Running command: {s}", .{message.data[0..message.len]});
-                                command.dodododododododo(message.data[0..message.len]);
-                            },
-                            .ConnectionTimeout => {
-                                const message: *align(1) packet.ConnectionTimeout = @ptrCast(e.data);
-                                _ = message;
-                                if (connected) {
-                                    connected = false;
-                                    running = false;
-                                    log.info("connection timeout", .{});
-                                }
-                            },
-                            .Joined => {
-                                const message: *align(1) packet.Joined = @ptrCast(e.data);
-                                tick = message.tick;
-                                log.info("Joined message", .{});
-                            },
-                            .PlayerJoinResponse => {
-                                const message: *align(1) packet.PlayerJoinResponse = @ptrCast(e.data);
-                                const player = try memory.players.addOne();
-                                player.id = message.id;
-
-                                var local_player_id: ?usize = null;
-                                for (local_players.slice(), 0..) |*lp, i| {
-                                    if (lp.id == null) {
-                                        local_player_id = i;
-                                        lp.id = player.id;
-                                        break;
+                                    log.info("Running command: {s}", .{message.data[0..message.len]});
+                                    command.dodododododododo(message.data[0..message.len]);
+                                },
+                                .ConnectionTimeout => {
+                                    const message: *align(1) packet.ConnectionTimeout = @ptrCast(e.data);
+                                    _ = message;
+                                    if (connected) {
+                                        connected = false;
+                                        running = false;
+                                        log.info("connection timeout", .{});
                                     }
-                                }
+                                },
+                                .Joined => {
+                                    const message: *align(1) packet.Joined = @ptrCast(e.data);
+                                    tick = message.tick;
+                                    log.info("Joined message", .{});
+                                },
+                                .PlayerJoinResponse => {
+                                    const message: *align(1) packet.PlayerJoinResponse = @ptrCast(e.data);
+                                    const player = try memory.players.addOne();
+                                    player.id = message.id;
 
-                                std.debug.assert(local_player_id != null);
-                                log.info("Player joined", .{});
-                                log.info("  local player id: {}", .{local_player_id.?});
-                                log.info("  game player id: {}", .{player.id});
-                            },
-                            .PeerJoined => {
-                                const message: *align(1) packet.PeerJoined = @ptrCast(e.data);
-                                const player = try memory.players.addOne();
-                                player.* = message.player;
-                                log.info("Player connected {}", .{player.id});
-                            },
-                            .PeerDisconnected => {
-                                const message: *align(1) packet.PeerDisconnected = @ptrCast(e.data);
-                                const index = common.findIndexById(memory.players.slice(), message.id);
-                                if (index != null)
-                                    _ = memory.players.swapRemove(index.?);
-                                log.info("Player {} disconnected", .{message.id});
-                            },
-                            .SpawnPlayer => {
-                                const message: *align(1) packet.SpawnPlayer = @ptrCast(e.data);
-                                const player = common.findPlayerById(&memory.players.buffer, message.player.id) orelse unreachable;
-                                player.* = message.player;
-                                log.info("Spawning", .{});
-                            },
-                            .PlayerUpdateAuth => {
-                                memory.stat_data.enabled = false;
-                                defer memory.stat_data.enabled = true;
-
-                                const message: *align(1) packet.PlayerUpdateAuth = @ptrCast(e.data);
-                                const local_player = findLocalPlayerById(local_players.slice(), message.player.id);
-                                if (local_player != null) {
-                                    const player = common.findPlayerById(&memory.players.buffer, message.player.id);
-
-                                    var auth_player = message.player;
-                                    var offset = @as(i64, @intCast(message.tick)) - @as(i64, @intCast(tick)) + 2;
-                                    var auth_memory = memory;
-                                    while (offset <= 0) : (offset += 1) {
-                                        const old_input = local_player.?.input_buffer.peekRelative(offset);
-                                        module.function_table.update(&config.vars, &auth_memory, &auth_player, &old_input, dt);
+                                    var local_player_id: ?usize = null;
+                                    for (local_players.slice(), 0..) |*lp, i| {
+                                        if (lp.id == null) {
+                                            local_player_id = i;
+                                            lp.id = player.id;
+                                            break;
+                                        }
                                     }
 
-                                    if (!v3.eql(auth_player.pos, player.?.pos)) {
-                                        log.info("  auth for tick {}:\n  {}\n  {}\n  {}", .{
-                                            message.tick,
-                                            message.player.pos,
-                                            auth_player.pos,
-                                            player.?.pos,
-                                        });
+                                    std.debug.assert(local_player_id != null);
+                                    log.info("Player joined", .{});
+                                    log.info("  local player id: {}", .{local_player_id.?});
+                                    log.info("  game player id: {}", .{player.id});
+                                },
+                                .PeerJoined => {
+                                    const message: *align(1) packet.PeerJoined = @ptrCast(e.data);
+                                    const player = try memory.players.addOne();
+                                    player.* = message.player;
+                                    log.info("Player connected {}", .{player.id});
+                                },
+                                .PeerDisconnected => {
+                                    const message: *align(1) packet.PeerDisconnected = @ptrCast(e.data);
+                                    const index = common.findIndexById(memory.players.slice(), message.id);
+                                    if (index != null)
+                                        _ = memory.players.swapRemove(index.?);
+                                    log.info("Player {} disconnected", .{message.id});
+                                },
+                                .SpawnPlayer => {
+                                    const message: *align(1) packet.SpawnPlayer = @ptrCast(e.data);
+                                    const player = common.findPlayerById(&memory.players.buffer, message.player.id) orelse unreachable;
+                                    player.* = message.player;
+                                    log.info("Spawning", .{});
+                                },
+                                .PlayerUpdateAuth => {
+                                    memory.stat_data.enabled = false;
+                                    defer memory.stat_data.enabled = true;
 
-                                        player.?.* = auth_player;
+                                    const message: *align(1) packet.PlayerUpdateAuth = @ptrCast(e.data);
+                                    const local_player = findLocalPlayerById(local_players.slice(), message.player.id);
+                                    if (local_player != null) {
+                                        const player = common.findPlayerById(&memory.players.buffer, message.player.id);
+
+                                        var auth_player = message.player;
+                                        var offset = @as(i64, @intCast(message.tick)) - @as(i64, @intCast(tick)) + 2;
+                                        var auth_memory = memory;
+                                        while (offset <= 0) : (offset += 1) {
+                                            const old_input = local_player.?.input_buffer.peekRelative(offset);
+                                            module.function_table.update(&config.vars, &auth_memory, &auth_player, &old_input, dt);
+                                        }
+
+                                        if (!v3.eql(auth_player.pos, player.?.pos)) {
+                                            log.info("  auth for tick {}:\n  {}\n  {}\n  {}", .{
+                                                message.tick,
+                                                message.player.pos,
+                                                auth_player.pos,
+                                                player.?.pos,
+                                            });
+
+                                            player.?.* = auth_player;
+                                        }
                                     }
-                                }
-                            },
-                            .ServerPlayerUpdate => {
-                                const message: *align(1) packet.ServerPlayerUpdate = @ptrCast(e.data);
-                                for (message.players[0..message.num_players]) |player| {
-                                    if (findLocalPlayerById(local_players.slice(), player.id) != null)
-                                        continue;
-                                    const current_player = common.findPlayerById(&memory.players.buffer, player.id) orelse try memory.players.addOne();
-                                    current_player.* = player;
-                                }
-                            },
-                            .NewSounds => {
-                                const message: *align(1) packet.NewSounds = @ptrCast(e.data);
-                                for (message.new_sounds[0..message.num_sounds]) |s| {
-                                    // TODO(anjo): we're hardcoding to skip death sounds here...
-                                    //
-                                    // check if the sound was triggered by us, and in that
-                                    // case ignore it as we've already added it when we
-                                    // updated locally
-                                    if (s.type != .death) {
+                                },
+                                .ServerPlayerUpdate => {
+                                    const message: *align(1) packet.ServerPlayerUpdate = @ptrCast(e.data);
+                                    for (message.players[0..message.num_players]) |player| {
+                                        if (findLocalPlayerById(local_players.slice(), player.id) != null)
+                                            continue;
+                                        const current_player = common.findPlayerById(&memory.players.buffer, player.id) orelse try memory.players.addOne();
+                                        current_player.* = player;
+                                    }
+                                },
+                                .NewSounds => {
+                                    const message: *align(1) packet.NewSounds = @ptrCast(e.data);
+                                    for (message.new_sounds[0..message.num_sounds]) |s| {
+                                        // TODO(anjo): we're hardcoding to skip death sounds here...
+                                        //
+                                        // check if the sound was triggered by us, and in that
+                                        // case ignore it as we've already added it when we
+                                        // updated locally
+                                        if (s.type != .death) {
+                                            var local = false;
+                                            for (local_players.constSlice()) |lp| {
+                                                if (lp.id == s.id_from) {
+                                                    local = true;
+                                                    break;
+                                                }
+                                            }
+                                            if (local)
+                                                continue;
+                                        }
+                                        memory.new_sounds.appendAssumeCapacity(s);
+                                    }
+                                },
+                                .NewHitscans => {
+                                    const message: *align(1) packet.NewHitscans = @ptrCast(e.data);
+                                    for (message.new_hitscans[0..message.num_hitscans]) |h| {
                                         var local = false;
                                         for (local_players.constSlice()) |lp| {
-                                            if (lp.id == s.id_from) {
+                                            if (lp.id == h.id_from) {
                                                 local = true;
                                                 break;
                                             }
                                         }
                                         if (local)
                                             continue;
+                                        memory.new_hitscans.appendAssumeCapacity(h);
                                     }
-                                    memory.new_sounds.appendAssumeCapacity(s);
-                                }
-                            },
-                            .NewHitscans => {
-                                const message: *align(1) packet.NewHitscans = @ptrCast(e.data);
-                                for (message.new_hitscans[0..message.num_hitscans]) |h| {
-                                    var local = false;
-                                    for (local_players.constSlice()) |lp| {
-                                        if (lp.id == h.id_from) {
-                                            local = true;
-                                            break;
-                                        }
+                                },
+                                .NewExplosions => {
+                                    const message: *align(1) packet.NewExplosions = @ptrCast(e.data);
+                                    appendSliceAssumeForceDstAlignment(1, common.Explosion, &memory.new_explosions, message.new_explosions[0..message.num_explosions]);
+                                },
+                                .NewNades => {
+                                    const message: *align(1) packet.NewNades = @ptrCast(e.data);
+                                    appendSliceAssumeForceDstAlignment(1, common.Nade, &memory.new_nades, message.new_nades[0..message.num_nades]);
+                                },
+                                .NewDamage => {
+                                    const message: *align(1) packet.NewDamage = @ptrCast(e.data);
+                                    appendSliceAssumeForceDstAlignment(1, common.Damage, &memory.new_damage, message.new_damage[0..message.num_damage]);
+                                },
+                                .Kill => {
+                                    const message: *align(1) packet.Kill = @ptrCast(e.data);
+                                    var entry = memory.killfeed.push();
+                                    entry.from = message.from;
+                                    entry.to = message.to;
+                                    entry.time_left = 2.0;
+                                },
+                                .EntityUpdate => {
+                                    const message: *align(1) packet.EntityUpdate = @ptrCast(e.data);
+                                    if (common.findEntityById(memory.entities.slice(), message.entity.id)) |entity| {
+                                        entity.* = message.entity;
+                                    } else {
+                                        memory.entities.appendAssumeCapacity(message.entity);
                                     }
-                                    if (local)
-                                        continue;
-                                    memory.new_hitscans.appendAssumeCapacity(h);
-                                }
-                            },
-                            .NewExplosions => {
-                                const message: *align(1) packet.NewExplosions = @ptrCast(e.data);
-                                appendSliceAssumeForceDstAlignment(1, common.Explosion, &memory.new_explosions, message.new_explosions[0..message.num_explosions]);
-                            },
-                            .NewNades => {
-                                const message: *align(1) packet.NewNades = @ptrCast(e.data);
-                                appendSliceAssumeForceDstAlignment(1, common.Nade, &memory.new_nades, message.new_nades[0..message.num_nades]);
-                            },
-                            .NewDamage => {
-                                const message: *align(1) packet.NewDamage = @ptrCast(e.data);
-                                appendSliceAssumeForceDstAlignment(1, common.Damage, &memory.new_damage, message.new_damage[0..message.num_damage]);
-                            },
-                            .Kill => {
-                                const message: *align(1) packet.Kill = @ptrCast(e.data);
-                                var entry = memory.killfeed.push();
-                                entry.from = message.from;
-                                entry.to = message.to;
-                                entry.time_left = 2.0;
-                            },
-                            .EntityUpdate => {
-                                const message: *align(1) packet.EntityUpdate = @ptrCast(e.data);
-                                if (common.findEntityById(memory.entities.slice(), message.entity.id)) |entity| {
-                                    entity.* = message.entity;
-                                } else {
-                                    memory.entities.appendAssumeCapacity(message.entity);
-                                }
-                            },
-                            else => {
-                                log.err("Unrecognized packet type: {}", .{e.kind});
-                                break;
-                            },
-                        }
-                    },
+                                },
+                                else => {
+                                    log.err("Unrecognized packet type: {}", .{e.kind});
+                                    break;
+                                },
+                            }
+                        },
+                    }
                 }
+                memory.stat_data.end();
             }
-            memory.stat_data.end();
 
             //
             // Handle client input
@@ -783,8 +798,10 @@ pub fn main() !void {
                                         lp.gameplay_input_map = &default_keyboard_input_map_gameplay;
                                         lp.editor_input_map = &default_keyboard_input_map_editor;
 
-                                        net.pushMessage(server_index, packet.PlayerJoinRequest{});
-                                        log.info("Sening join request", .{});
+                                        if (server_index) |index| {
+                                            net.pushMessage(index, packet.PlayerJoinRequest{});
+                                        }
+                                        log.info("Sending join request", .{});
 
                                         if (!connected) {
                                             const player = Player{
@@ -872,11 +889,16 @@ pub fn main() !void {
                             continue;
 
                         // Collect inputs if we're not in the console
-                        if (!lp.input.isset(.Console)) {
+                        {
                             const input_map = if (lp.input.isset(.Editor)) lp.editor_input_map.? else lp.gameplay_input_map.?;
 
                             memory.stat_data.start("gather input");
                             for (&input_map.map, 0..) |*state, i| {
+                                const input_name: InputName = @enumFromInt(i);
+                                if (lp.input.isset(.Console) and input_name != .Console and input_name != .Enter) {
+                                    continue;
+                                }
+
                                 const action: glfw.Action = switch (state.input_type) {
                                     InputType.key => |key| window.getKey(key),
                                     InputType.mouse_button => |mb| window.getMouseButton(mb),
@@ -905,7 +927,6 @@ pub fn main() !void {
                                     else => continue,
                                 };
 
-                                const input_name: InputName = @enumFromInt(i);
                                 switch (state.trigger) {
                                     .state => {
                                         const active = action == .press;
@@ -975,7 +996,7 @@ pub fn main() !void {
                         lp.input_buffer.push(lp.input);
 
                         if (connected) {
-                            net.pushMessage(server_index, packet.PlayerUpdate{
+                            net.pushMessage(server_index.?, packet.PlayerUpdate{
                                 .tick = tick,
                                 .id = lp.id.?,
                                 .input = lp.input,
@@ -1027,9 +1048,9 @@ pub fn main() !void {
                                 memory.console_input_index += 1;
                             }
 
-                            if (lp.input.isset(.Enter)) {
+                            if (lp.input.isset(.Enter) and memory.console_input.len > 0) {
                                 command.dodododododododo(memory.console_input.slice());
-                                log.info("Running command: {s}", .{memory.console_input.slice()});
+                                std.log.info("Running command: {s}", .{memory.console_input.slice()});
 
                                 memory.console_input_index = 0;
                                 memory.console_input.len = 0;
@@ -1100,10 +1121,10 @@ pub fn main() !void {
             //
             // Send network data
             //
-            {
+            if (server_index) |index| {
                 //const s = perf_stats.get(.SendNetData).startTime();
                 //defer s.endTime();
-                net.process(&host, server_index);
+                net.process(&host, index);
             }
 
             //
@@ -1177,7 +1198,7 @@ pub fn main() !void {
             // Here we shoehorn in some sleeping to not consume all the cpu resources
             {
                 const start_sleep = timer.read();
-                var time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(frame_time));
+                const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(frame_time));
                 if (time_left > std.time.us_per_s) {
                     // if we have at least 1us left, sleep
                     std.time.sleep(@intCast(time_left));
@@ -1187,10 +1208,12 @@ pub fn main() !void {
                 while (timer.read() - start_sleep < time_left) {}
             }
 
+            //_ = fixed_allocator.reset(.free_all);
             fixed_allocator.reset();
         }
     }
 
+    std.posix.close(host.fd);
     common.threadpool.join();
 }
 
