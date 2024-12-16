@@ -18,7 +18,6 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/common/common.zig"),
         //.dependencies = &.{.{ .name = "sokol", .module = sokol_module }},
     });
-    common.addCSourceFile(.{ .file = b.path("src/common/profile_linux.c"), .flags = &.{ "-Wall", "-Wextra", "-Werror", "-I/usr/include" } });
 
     //
     // net

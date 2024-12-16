@@ -958,8 +958,9 @@ pub fn deinit() void {
 pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u32) void {
     var vp: m4 = .{};
 
-    if (num_views == 0)
+    if (num_views == 0) {
         return;
+    }
 
     const views_per_col: u32 = @intFromFloat(@ceil(std.math.sqrt(@as(f32, @floatFromInt(num_views)))));
     const views_per_row: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(num_views)) / @as(f32, @floatFromInt(views_per_col))));

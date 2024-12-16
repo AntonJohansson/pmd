@@ -13,7 +13,8 @@ pub const draw_api = @import("draw_api.zig");
 pub const threadpool = @import("threadpool.zig");
 pub const goosepack = @import("pack.zig");
 pub const res = @import("res.zig");
-pub const profile = @import("profile.zig");
+pub const Profile = @import("profile.zig");
+pub const color = @import("color.zig");
 
 const v2 = math.v2;
 const v3 = math.v3;
@@ -388,6 +389,7 @@ pub const Memory = struct {
     mem: MemoryAllocators = .{},
 
     stat_data: stat.StatData = .{},
+    profile: Profile = .{},
 
     ray_model: ?m4 = null,
 

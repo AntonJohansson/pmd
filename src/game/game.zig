@@ -8,8 +8,10 @@ const common = @import("common");
 const Memory = common.Memory;
 const Player = common.Player;
 const Input = common.Input;
+const hsv_to_rgb = common.color.hsv_to_rgb;
 
 const intersect = @import("intersect.zig");
+const ui_profile = @import("debug/ui_profile.zig");
 
 const Graph = common.Graph;
 const graphAppend = common.graphAppend;
@@ -1069,20 +1071,6 @@ fn raycastAgainstEntities(memory: *Memory, pos: v3, dir: v3, skip_id: ?common.En
     }
 }
 
-fn f(h: f32, s: f32, v: f32, n: f32) f32 {
-    const k = @mod(n + h / 60.0, 6.0);
-    return v - v * s * @max(0.0, @min(@min(k, 4 - k), 1));
-}
-
-fn hsvToRgb(h: f32, s: f32, v: f32) Color {
-    return .{
-        .r = @intFromFloat(255.0 * f(h, s, v, 5.0)),
-        .g = @intFromFloat(255.0 * f(h, s, v, 3.0)),
-        .b = @intFromFloat(255.0 * f(h, s, v, 1.0)),
-        .a = 255,
-    };
-}
-
 //fn calculateWindowSizes(windows: *std.ArrayList(Window), index: usize) void {
 //    const window = &windows.items[index];
 //
@@ -1117,7 +1105,7 @@ fn drawWindow(b: *draw_api.CommandBuffer, windows: *std.ArrayList(common.Window)
     }, .size = .{
         .x = window.w,
         .y = window.h - top_bar_height,
-    } }, hsvToRgb(
+    } }, hsv_to_rgb(
         window.color.x,
         window.color.y,
         window.color.z,
@@ -1132,7 +1120,7 @@ fn drawWindow(b: *draw_api.CommandBuffer, windows: *std.ArrayList(common.Window)
     }, .size = .{
         .x = window.w,
         .y = top_bar_height,
-    } }, hsvToRgb(
+    } }, hsv_to_rgb(
         window.color.x,
         window.color.y,
         window.color.z * top_bar_color_factor,
@@ -1157,7 +1145,7 @@ fn drawWindow(b: *draw_api.CommandBuffer, windows: *std.ArrayList(common.Window)
                 @memset(&text.str, 0);
                 const dst: []u8 = &text.str;
                 @memcpy(dst[0..t.str.len], t.str);
-                b.push(text, hsvToRgb(t.color.x, t.color.y, t.color.z));
+                b.push(text, hsv_to_rgb(t.color.x, t.color.y, t.color.z));
 
                 window.cursor_y -= window_fontsize / window.h;
             },
@@ -1226,7 +1214,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                             .{ .x = tile_size, .y = tile_size, .z = tile_size },
                             .{ .x = 0, .y = 0, .z = 0 },
                         ),
-                    }, hsvToRgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+                    }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
                 } else {
                     //b.push(primitive.CubeOutline{ .model = m4.modelWithRotations(
                     //    .{
@@ -1236,7 +1224,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                     //    },
                     //    .{ .x = tile_size, .y = tile_size, .z = tile_size },
                     //    .{ .x = 0, .y = 0, .z = 0 },
-                    //), .thickness = 0.02 }, hsvToRgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+                    //), .thickness = 0.02 }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
                 }
             }
         }
@@ -1252,7 +1240,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             .{ .x = 0.05, .y = tile_size * dim, .z = tile_size * dim },
             .{ .x = 0, .y = 0, .z = 0 },
         ),
-    }, hsvToRgb(40.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+    }, hsv_to_rgb(40.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
 
     if (intersect.planeModelLine(math.m4.model(.{ .x = 0, .y = 0, .z = tile_size / 2.0 }, .{ .x = 1, .y = 1, .z = 1 }), .{ .x = 1000000.0, .y = 1000000.0 }, player.camera.pos, player.camera.dir)) |res| {
         if (res.pos.x > 0 and res.pos.y > 0 and res.pos.z > 0) {
@@ -1273,7 +1261,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                         .{ .x = tile_size, .y = tile_size, .z = tile_size },
                         .{ .x = 0, .y = 0, .z = 0 },
                     ),
-                }, hsvToRgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+                }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
             }
         }
     }
@@ -1300,7 +1288,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
     //                    },
     //                    .{ .x = 0, .y = 0, .z = 0 },
     //                ),
-    //            }, hsvToRgb(80.0 + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0)));
+    //            }, hsv_to_rgb(80.0 + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0)));
     //        }
     //    }
     //}
@@ -1331,15 +1319,16 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         //        .{ .x = 20, .y = 20, .z = 20 },
         //        .{ .x = 0, .y = 0, .z = 0 },
         //    ),
-        //}, hsvToRgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+        //}, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
     }
+
 
     for (memory.entities.constSlice()) |e| {
         var plane = e.plane;
         plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x, .y = global_plane_size.y, .z = 1 });
-        b.push(plane, hsvToRgb(10, 0.6, 0.7));
+        b.push(plane, hsv_to_rgb(10, 0.6, 0.7));
         plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x - 10, .y = global_plane_size.y - 10, .z = 2 });
-        b.push(plane, hsvToRgb(10, 0.6, 0.5));
+        b.push(plane, hsv_to_rgb(10, 0.6, 0.5));
     }
 
     if (input.isset(.Editor) and memory.selected_entity != null) {
@@ -1566,14 +1555,14 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         }, .size = .{
             .x = 1,
             .y = console_height,
-        } }, hsvToRgb(200, 0.5, 0.25));
+        } }, hsv_to_rgb(200, 0.5, 0.25));
         b.push(primitive.Rectangle{ .pos = .{
             .x = 0,
             .y = 1 - console_height,
         }, .size = .{
             .x = 1,
             .y = fontsize,
-        } }, hsvToRgb(200, 0.5, 0.1));
+        } }, hsv_to_rgb(200, 0.5, 0.1));
 
         {
             var text = primitive.Text{
@@ -1590,7 +1579,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             @memset(&text.str, 0);
             const dst: []u8 = &text.str;
             @memcpy(dst[0..memory.console_input.slice().len], memory.console_input.slice());
-            b.push(text, hsvToRgb(200, 0.75, 0.75));
+            b.push(text, hsv_to_rgb(200, 0.75, 0.75));
         }
     }
 
@@ -1609,35 +1598,15 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         };
         @memset(&text.str, 0);
 
-        {
-            //drawProfileData(memory, b);
-            //var x_offset: f32 = 5.0;
-            //if (vars.draw_fps) {
-
-            //for (&memory.time_stats.stat_data) |*stat| {
-            //    const result = stat.mean_std();
-            //    @memset(&text.str, 0);
-            //    const avg_fps = if (result.avg != 0.0) 1000000000 / result.avg else 0;
-            //    const str = std.fmt.bufPrint(&text.str, "fps: {:4}", .{
-            //        avg_fps,
-            //    }) catch unreachable;
-
-            //    text.len = str.len;
-            //    pushText(b, text, hsvToRgb(200, 0.75, 0.75));
-            //    text.pos.y -= fontsize;
-            //}
-            //}
-        }
-
         @memset(&text.str, 0);
         {
-            if (memory.stat_data.findId("frame")) |id| {
-                const result = memory.stat_data.entries.buffer[id].mean_std();
-                const str = std.fmt.bufPrint(&text.str, "fps: {d:5.0}", .{1000000000 / result.avg}) catch unreachable;
-                text.len = str.len;
-                text.pos.x = 0.0;
-                b.push(text, hsvToRgb(200, 0.75, 0.75));
-            }
+            //if (memory.stat_data.findId("frame")) |id| {
+            //    const result = memory.stat_data.entries.buffer[id].mean_std();
+            //    const str = std.fmt.bufPrint(&text.str, "fps: {d:5.0}", .{1000000000 / result.avg}) catch unreachable;
+            //    text.len = str.len;
+            //    text.pos.x = 0.0;
+            //    b.push(text, hsv_to_rgb(200, 0.75, 0.75));
+            //}
         }
 
         @memset(&text.str, 0);
@@ -1645,7 +1614,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             const str = std.fmt.bufPrint(&text.str, "speed: {d:5.0}", .{v3.len(memory.players.get(0).vel)}) catch unreachable;
             text.len = str.len;
             text.pos.x = 1.0 - 0.3;
-            b.push(text, hsvToRgb(200, 0.75, 0.75));
+            b.push(text, hsv_to_rgb(200, 0.75, 0.75));
         }
 
         // ammo
@@ -1656,7 +1625,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             text.len = str.len;
             text.pos.x = 1.0 - 3 * size + size + size / 4.0;
             text.pos.y = 0.05;
-            b.push(text, hsvToRgb(200, 0.75, 0.75));
+            b.push(text, hsv_to_rgb(200, 0.75, 0.75));
         }
 
         // killfeed
@@ -1689,7 +1658,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                     text.len = str.len;
                     text.pos.x = 1.0 - 3 * size + size + size / 4.0;
                     text.pos.y = 1.0 - (size - size / 4.0 + 1.5 * size * @as(f32, @floatFromInt(i)));
-                    b.push(text, hsvToRgb(200, 0.75, 0.75));
+                    b.push(text, hsv_to_rgb(200, 0.75, 0.75));
                 }
             }
         }
@@ -1707,7 +1676,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                 .x = cursor_size,
                 .y = cursor_size,
             },
-        }, hsvToRgb(350, 0.75, 0.75));
+        }, hsv_to_rgb(350, 0.75, 0.75));
     } else {
         const weapon = player.weapons[player.weapon_current];
         const zoom_fire = weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
@@ -1715,7 +1684,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         // Crosshair
         if (input.isset(.Editor)) {
             const cursor_thickness = 0.004;
-            const color = hsvToRgb(
+            const color = hsv_to_rgb(
                 (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
                 0.3,
                 0.9,
@@ -1734,7 +1703,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             const cursor_thickness = 0.004;
             const cursor_length = 0.01;
             const cursor_gap = 0.03;
-            const color = hsvToRgb(
+            const color = hsv_to_rgb(
                 (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
                 0.3,
                 0.9,
@@ -1784,7 +1753,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             const cursor_thickness = 0.0025;
             const gap = 0.75;
 
-            const color = hsvToRgb(
+            const color = hsv_to_rgb(
                 (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
                 0.8,
                 0.2,
@@ -1854,11 +1823,14 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             }, color);
         }
     }
+
+    ui_profile.draw(memory, b, input);
+
     b.push(primitive.End2d{}, .{});
 }
 
 fn playerColor(id: common.EntityId) Color {
-    return hsvToRgb(
+    return hsv_to_rgb(
         (360.0 / 8.0) * @as(f32, @floatFromInt(id % 8)),
         0.8,
         0.5,
@@ -1866,7 +1838,7 @@ fn playerColor(id: common.EntityId) Color {
 }
 
 fn playerRandomColor(id: common.EntityId, rand: std.rand.Random) Color {
-    return hsvToRgb((360.0 / 8.0) * @as(f32, @floatFromInt(id % 8)) + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0));
+    return hsv_to_rgb((360.0 / 8.0) * @as(f32, @floatFromInt(id % 8)) + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0));
 }
 
 fn drawCenteredLine(b: *draw_api.Buffer, start: v2, end: v2, thickness: f32, color: Color) void {
@@ -1884,7 +1856,7 @@ fn drawCenteredLine(b: *draw_api.Buffer, start: v2, end: v2, thickness: f32, col
 }
 
 fn drawGraph(b: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f32, s: f32, v: f32) void {
-    var bg = hsvToRgb(50.0, 0.75, 0.05);
+    var bg = hsv_to_rgb(50.0, 0.75, 0.05);
     bg.a = @intFromFloat(0.75 * 255.0);
     b.push(b, primitive.Rectangle{
         .pos = pos,
@@ -1912,7 +1884,7 @@ fn drawGraph(b: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f
         const last_index = (g.top + g.data.len - 1) % g.data.len;
         const dist = (g.data.len + last_index - i) % g.data.len;
 
-        const color = hsvToRgb(h, s, v - 0.4 * @as(f32, @floatFromInt(dist)) / @as(f32, @floatFromInt(g.data.len)));
+        const color = hsv_to_rgb(h, s, v - 0.4 * @as(f32, @floatFromInt(dist)) / @as(f32, @floatFromInt(g.data.len)));
         if (i > 0) {
             drawCenteredLine(b, v2{ .x = last_x, .y = last_y }, v2{ .x = x, .y = y }, 2.0, color);
         }
@@ -1978,7 +1950,7 @@ fn drawProfileData(memory: *Memory, b: *draw_api.CommandBuffer) void {
 
         text.len = str.len;
         text.pos.x = fontsize * @as(f32, @floatFromInt(work.depth));
-        b.push(text, hsvToRgb(200, 0.75, 0.75));
+        b.push(text, hsv_to_rgb(200, 0.75, 0.75));
         text.pos.y -= fontsize;
 
         for (work.entry.children.slice()) |i| {

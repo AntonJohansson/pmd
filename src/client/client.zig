@@ -303,10 +303,9 @@ pub fn main() !void {
     memory.mem.frame = fixed_allocator.allocator();
     memory.mem.persistent = general_purpose_allocator.allocator();
 
-    common.profile.init(memory.mem.persistent);
-    for (0..5) |_| {
-        std.log.info("{}\n", .{common.profile.block("hel")});
-    }
+    memory.profile.init(memory.mem.persistent);
+    defer memory.profile.deinit();
+    defer memory.profile.print();
 
     try common.threadpool.start(memory.mem.persistent);
 
@@ -515,14 +514,14 @@ pub fn main() !void {
 
     var running = true;
     while (running) {
+        memory.profile.begin_frame();
+        defer memory.profile.end_frame();
+
         frame_start_time = timer.read();
 
         log.info("---- Starting tick {}", .{tick});
 
         {
-            memory.stat_data.start("frame");
-            defer memory.stat_data.end();
-
             scroll_delta = 0.0;
             glfw.pollEvents();
 
@@ -549,15 +548,14 @@ pub fn main() !void {
             //
             var events: []net.Event = undefined;
             if (server_index) |si| {
-                memory.stat_data.start("net receive");
-                defer memory.stat_data.end();
-
+                const block_rescv = memory.profile.begin("net receive", 0);
                 events = net.receiveMessagesClient(&host, si);
+                memory.profile.end(block_rescv);
 
                 //
                 // Process network data
                 //
-                memory.stat_data.start("net process");
+                const block_process = memory.profile.begin("net process", 0);
                 for (events) |event| {
                     switch (event) {
                         .peer_connected => {
@@ -643,9 +641,6 @@ pub fn main() !void {
                                     log.info("Spawning", .{});
                                 },
                                 .PlayerUpdateAuth => {
-                                    memory.stat_data.enabled = false;
-                                    defer memory.stat_data.enabled = true;
-
                                     const message: *align(1) packet.PlayerUpdateAuth = @ptrCast(e.data);
                                     const local_player = findLocalPlayerById(local_players.slice(), message.player.id);
                                     if (local_player != null) {
@@ -752,8 +747,9 @@ pub fn main() !void {
                         },
                     }
                 }
-                memory.stat_data.end();
+                memory.profile.end(block_process);
             }
+
 
             //
             // Handle client input
@@ -768,305 +764,311 @@ pub fn main() !void {
                 //
 
                 {
-                    memory.stat_data.start("client update");
-                    defer memory.stat_data.end();
+                    {
+                        const block = memory.profile.begin("new player", 0);
+                        defer memory.profile.end(block);
+                        for (occupied_input_devices, 0..) |d, i| {
+                            if (d == .connected) {
+                                // @unlikely
 
-                    for (occupied_input_devices, 0..) |d, i| {
-                        if (d == .connected) {
-                            // @unlikely
+                                if (i == keyboard_input_device_id) {
+                                    // Check if mouse/keyboard input happened
+                                    const key_pressed = last_char > 0;
+                                    const pos = window.getCursorPos();
+                                    const mouse_moved = pos.xpos > 0 or pos.ypos > 0;
+                                    if (key_pressed or mouse_moved) {
+                                        occupied_input_devices[i] = .occupied;
+                                        log.info("Mouse/keyboard", .{});
 
-                            if (i == keyboard_input_device_id) {
-                                // Check if mouse/keyboard input happened
-                                const key_pressed = last_char > 0;
-                                const pos = window.getCursorPos();
-                                const mouse_moved = pos.xpos > 0 or pos.ypos > 0;
-                                if (key_pressed or mouse_moved) {
-                                    occupied_input_devices[i] = .occupied;
-                                    log.info("Mouse/keyboard", .{});
-
-                                    // add a player so we can play locally
-                                    // TODO: don't perform attempts to read/write net
-                                    // if we're not connected.
+                                        // add a player so we can play locally
+                                        // TODO: don't perform attempts to read/write net
+                                        // if we're not connected.
                                     {
-                                        const lp = local_players.addOneAssumeCapacity();
-                                        if (!connected) {
-                                            lp.id = common.newEntityId();
-                                        } else {
-                                            lp.id = null;
-                                        }
-                                        lp.input_device_id = i;
-                                        lp.gameplay_input_map = &default_keyboard_input_map_gameplay;
-                                        lp.editor_input_map = &default_keyboard_input_map_editor;
+                                            const lp = local_players.addOneAssumeCapacity();
+                                            if (!connected) {
+                                                lp.id = common.newEntityId();
+                                            } else {
+                                                lp.id = null;
+                                            }
+                                            lp.input_device_id = i;
+                                            lp.gameplay_input_map = &default_keyboard_input_map_gameplay;
+                                            lp.editor_input_map = &default_keyboard_input_map_editor;
 
-                                        if (server_index) |index| {
-                                            net.pushMessage(index, packet.PlayerJoinRequest{});
-                                        }
-                                        log.info("Sending join request", .{});
+                                            if (server_index) |index| {
+                                                net.pushMessage(index, packet.PlayerJoinRequest{});
+                                            }
+                                            log.info("Sending join request", .{});
 
-                                        if (!connected) {
-                                            const player = Player{
-                                                .id = lp.id.?,
-                                                .pos = v3{ .x = 0, .y = 0, .z = 10.0 },
-                                                .vel = v3{ .x = 0, .y = 0, .z = 0 },
-                                                .dir = v3{ .x = 1, .y = 0, .z = 0 },
-                                                .yaw = 0,
-                                                .pitch = 0,
-                                            };
-                                            memory.players.appendAssumeCapacity(player);
+                                            if (!connected) {
+                                                const player = Player{
+                                                    .id = lp.id.?,
+                                                    .pos = v3{ .x = 0, .y = 0, .z = 10.0 },
+                                                    .vel = v3{ .x = 0, .y = 0, .z = 0 },
+                                                    .dir = v3{ .x = 1, .y = 0, .z = 0 },
+                                                    .yaw = 0,
+                                                    .pitch = 0,
+                                                };
+                                                memory.players.appendAssumeCapacity(player);
 
-                                            memory.respawns.appendAssumeCapacity(.{
-                                                .id = lp.id.?,
-                                                .time_left = 0.0,
-                                            });
+                                                memory.respawns.appendAssumeCapacity(.{
+                                                    .id = lp.id.?,
+                                                    .time_left = 0.0,
+                                                });
+                                            }
                                         }
                                     }
-                                }
-                            } else {
-                                // Check for gamepad input
-                                const index = (i + max_num_gamepads - debug_gamepad_off) % max_num_gamepads;
-                                var gamepad_press = false;
-                                if (occupied_input_devices[i] == .occupied)
+                                } else {
+                                    // Check for gamepad input
+                                    const index = (i + max_num_gamepads - debug_gamepad_off) % max_num_gamepads;
+                                    var gamepad_press = false;
+                                    if (occupied_input_devices[i] == .occupied)
                                     continue;
-                                const joystick = glfw.Joystick{ .jid = @enumFromInt(index) };
-                                const present = glfw.Joystick.present(joystick);
-                                if (present) {
-                                    const gamepad = glfw.Joystick.getGamepadState(joystick) orelse {
-                                        continue;
-                                    };
-                                    for (gamepad.buttons) |b| {
-                                        const action = @as(glfw.Action, @enumFromInt(b));
-                                        if (action == .press) {
-                                            gamepad_press = true;
-                                            occupied_input_devices[i] = .occupied;
-                                            log.info("Gamepad {}", .{i});
+                                    const joystick = glfw.Joystick{ .jid = @enumFromInt(index) };
+                                    const present = glfw.Joystick.present(joystick);
+                                    if (present) {
+                                        const gamepad = glfw.Joystick.getGamepadState(joystick) orelse {
+                                            continue;
+                                        };
+                                        for (gamepad.buttons) |b| {
+                                            const action = @as(glfw.Action, @enumFromInt(b));
+                                            if (action == .press) {
+                                                gamepad_press = true;
+                                                occupied_input_devices[i] = .occupied;
+                                                log.info("Gamepad {}", .{i});
 
-                                            // add a player so we can play locally
-                                            // TODO: don't perform attempts to read/write net
-                                            // if we're not connected.
+                                                // add a player so we can play locally
+                                                // TODO: don't perform attempts to read/write net
+                                                // if we're not connected.
                                             {
-                                                const lp = local_players.addOneAssumeCapacity();
-                                                if (!connected) {
-                                                    lp.id = common.newEntityId();
-                                                } else {
-                                                    lp.id = null;
-                                                }
-                                                lp.input_device_id = i;
-                                                lp.gameplay_input_map = &default_gamepad_input_map_gameplay;
-                                                lp.editor_input_map = &default_gamepad_input_map_editor;
+                                                    const lp = local_players.addOneAssumeCapacity();
+                                                    if (!connected) {
+                                                        lp.id = common.newEntityId();
+                                                    } else {
+                                                        lp.id = null;
+                                                    }
+                                                    lp.input_device_id = i;
+                                                    lp.gameplay_input_map = &default_gamepad_input_map_gameplay;
+                                                    lp.editor_input_map = &default_gamepad_input_map_editor;
 
-                                                if (!connected) {
-                                                    const player = Player{
-                                                        .id = lp.id.?,
-                                                        .pos = v3{ .x = 0, .y = 0, .z = 10.0 },
-                                                        .vel = v3{ .x = 0, .y = 0, .z = 0 },
-                                                        .dir = v3{ .x = 1, .y = 0, .z = 0 },
-                                                        .yaw = 0,
-                                                        .pitch = 0,
-                                                    };
-                                                    memory.players.appendAssumeCapacity(player);
+                                                    if (!connected) {
+                                                        const player = Player{
+                                                            .id = lp.id.?,
+                                                            .pos = v3{ .x = 0, .y = 0, .z = 10.0 },
+                                                            .vel = v3{ .x = 0, .y = 0, .z = 0 },
+                                                            .dir = v3{ .x = 1, .y = 0, .z = 0 },
+                                                            .yaw = 0,
+                                                            .pitch = 0,
+                                                        };
+                                                        memory.players.appendAssumeCapacity(player);
 
-                                                    memory.respawns.appendAssumeCapacity(.{
-                                                        .id = lp.id.?,
-                                                        .time_left = 0.0,
-                                                    });
+                                                        memory.respawns.appendAssumeCapacity(.{
+                                                            .id = lp.id.?,
+                                                            .time_left = 0.0,
+                                                        });
+                                                    }
                                                 }
+
+                                                break;
                                             }
+                                        }
 
+                                        if (gamepad_press) {
                                             break;
                                         }
-                                    }
-
-                                    if (gamepad_press) {
-                                        break;
                                     }
                                 }
                             }
                         }
                     }
 
-                    for (local_players.slice()) |*lp| {
-                        if (lp.input_device_id == null or lp.id == null)
+                    {
+                        const block = memory.profile.begin("gather input", 0);
+                        defer memory.profile.end(block);
+
+                        for (local_players.slice()) |*lp| {
+                            if (lp.input_device_id == null or lp.id == null)
                             continue;
 
-                        // Collect inputs if we're not in the console
-                        {
-                            const input_map = if (lp.input.isset(.Editor)) lp.editor_input_map.? else lp.gameplay_input_map.?;
-
-                            memory.stat_data.start("gather input");
-                            for (&input_map.map, 0..) |*state, i| {
-                                const input_name: InputName = @enumFromInt(i);
-                                if (lp.input.isset(.Console) and input_name != .Console and input_name != .Enter) {
-                                    continue;
-                                }
-
-                                const action: glfw.Action = switch (state.input_type) {
-                                    InputType.key => |key| window.getKey(key),
-                                    InputType.mouse_button => |mb| window.getMouseButton(mb),
-                                    InputType.mouse_scroll => |ms| switch (ms.dir) {
-                                        .scroll_down => if (scroll_delta < 0.0) .press else .release,
-                                        .scroll_up => if (scroll_delta > 0.0) .press else .release,
-                                    },
-                                    InputType.gamepad_button => |gb| blk: {
-                                        const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads - debug_gamepad_off) % max_num_gamepads);
-                                        const gamepad = glfw.Joystick.getGamepadState(.{ .jid = index }) orelse {
-                                            continue;
-                                        };
-                                        break :blk gamepad.getButton(gb);
-                                    },
-                                    InputType.gamepad_axis_abs => |a| blk: {
-                                        const deadzone = 0.1;
-                                        const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads - debug_gamepad_off) % max_num_gamepads);
-                                        const gamepad = glfw.Joystick.getGamepadState(.{ .jid = index }) orelse {
-                                            continue;
-                                        };
-                                        break :blk switch (a.dir) {
-                                            .larger_than_zero => if (gamepad.getAxis(a.axis) > deadzone) .press else .release,
-                                            .smaller_than_zero => if (gamepad.getAxis(a.axis) < -deadzone) .press else .release,
-                                        };
-                                    },
-                                    else => continue,
-                                };
-
-                                switch (state.trigger) {
-                                    .state => {
-                                        const active = action == .press;
-                                        lp.input.setto(input_name, active);
-                                    },
-                                    .rising_edge => {
-                                        const active = state.last_action == .release and action == .press;
-                                        lp.input.setto(input_name, active);
-                                    },
-                                    .falling_edge => {
-                                        const active = state.last_action == .press and action == .release;
-                                        lp.input.setto(input_name, active);
-                                    },
-                                    .rising_or_falling_edge => {
-                                        const active = state.last_action != action;
-                                        lp.input.setto(input_name, active);
-                                    },
-                                    .toggle => {
-                                        const active = state.last_action == .release and action == .press;
-                                        lp.input.setto(input_name, active != lp.input.isset(input_name));
-                                    },
-                                }
-                                state.last_action = action;
-                            }
-                            memory.stat_data.end();
-                        }
-
-                        if (lp.input_device_id.? == keyboard_input_device_id) {
-                            // Mouse/keyboard specific inputs
-
-                            // TODO(anjo): We have to deal with mouse buttons separately here which is annoying
-                            lp.input.scroll = scroll_delta;
-
-                            var delta: v2 = .{};
+                            // Collect inputs if we're not in the console
                             {
-                                const pos = window.getCursorPos();
-                                delta.x = @as(f32, @floatCast(pos.xpos)) - old_mouse_pos.x;
-                                delta.y = @as(f32, @floatCast(pos.ypos)) - old_mouse_pos.y;
-                                old_mouse_pos.x = @floatCast(pos.xpos);
-                                old_mouse_pos.y = @floatCast(pos.ypos);
+                                const input_map = if (lp.input.isset(.Editor)) lp.editor_input_map.? else lp.gameplay_input_map.?;
+
+                                for (&input_map.map, 0..) |*state, i| {
+                                    const input_name: InputName = @enumFromInt(i);
+                                    if (lp.input.isset(.Console) and input_name != .Console and input_name != .Enter) {
+                                        continue;
+                                    }
+
+                                    const action: glfw.Action = switch (state.input_type) {
+                                        InputType.key => |key| window.getKey(key),
+                                        InputType.mouse_button => |mb| window.getMouseButton(mb),
+                                        InputType.mouse_scroll => |ms| switch (ms.dir) {
+                                            .scroll_down => if (scroll_delta < 0.0) .press else .release,
+                                            .scroll_up => if (scroll_delta > 0.0) .press else .release,
+                                        },
+                                        InputType.gamepad_button => |gb| blk: {
+                                            const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads - debug_gamepad_off) % max_num_gamepads);
+                                            const gamepad = glfw.Joystick.getGamepadState(.{ .jid = index }) orelse {
+                                                continue;
+                                            };
+                                            break :blk gamepad.getButton(gb);
+                                        },
+                                        InputType.gamepad_axis_abs => |a| blk: {
+                                            const deadzone = 0.1;
+                                            const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads - debug_gamepad_off) % max_num_gamepads);
+                                            const gamepad = glfw.Joystick.getGamepadState(.{ .jid = index }) orelse {
+                                                continue;
+                                            };
+                                            break :blk switch (a.dir) {
+                                                .larger_than_zero => if (gamepad.getAxis(a.axis) > deadzone) .press else .release,
+                                                .smaller_than_zero => if (gamepad.getAxis(a.axis) < -deadzone) .press else .release,
+                                            };
+                                        },
+                                        else => continue,
+                                    };
+
+                                    switch (state.trigger) {
+                                        .state => {
+                                            const active = action == .press;
+                                            lp.input.setto(input_name, active);
+                                        },
+                                        .rising_edge => {
+                                            const active = state.last_action == .release and action == .press;
+                                            lp.input.setto(input_name, active);
+                                        },
+                                        .falling_edge => {
+                                            const active = state.last_action == .press and action == .release;
+                                            lp.input.setto(input_name, active);
+                                        },
+                                        .rising_or_falling_edge => {
+                                            const active = state.last_action != action;
+                                            lp.input.setto(input_name, active);
+                                        },
+                                        .toggle => {
+                                            const active = state.last_action == .release and action == .press;
+                                            lp.input.setto(input_name, active != lp.input.isset(input_name));
+                                        },
+                                    }
+                                    state.last_action = action;
+                                }
                             }
 
-                            lp.input.cursor_delta = .{ .x = config.vars.sensitivity * delta.x, .y = config.vars.sensitivity * delta.y };
-                        } else {
-                            // Gamepad specific inputs
-                            const deadzone = 0.1;
-                            const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads - debug_gamepad_off) % max_num_gamepads);
-                            const gamepad = glfw.Joystick.getGamepadState(.{ .jid = index }) orelse {
-                                continue;
-                            };
-                            // TODO(anjo): @optimize
-                            var dx = gamepad.getAxis(.right_x);
-                            var dy = gamepad.getAxis(.right_y);
-                            var abs_dx = @abs(dx);
-                            var abs_dy = @abs(dy);
-                            dx = if (abs_dx > deadzone) dx else 0.0;
-                            dy = if (abs_dy > deadzone) dy else 0.0;
-                            abs_dx = if (abs_dx > deadzone) abs_dx else 1.0;
-                            abs_dy = if (abs_dy > deadzone) abs_dy else 1.0;
-                            // TODO(anjo): Add acceleration
-                            lp.input.cursor_delta.x = 20.0 * config.vars.sensitivity * dx / abs_dx;
-                            // TODO(anjo): Move aspect ratio to camera
-                            lp.input.cursor_delta.y = (9.0 / 16.0) * 20.0 * config.vars.sensitivity * dy / abs_dy;
-                        }
+                            if (lp.input_device_id.? == keyboard_input_device_id) {
+                                // Mouse/keyboard specific inputs
 
-                        // push input state
-                        lp.input_buffer.push(lp.input);
+                                // TODO(anjo): We have to deal with mouse buttons separately here which is annoying
+                                lp.input.scroll = scroll_delta;
 
-                        if (connected) {
-                            net.pushMessage(server_index.?, packet.PlayerUpdate{
-                                .tick = tick,
-                                .id = lp.id.?,
-                                .input = lp.input,
-                            });
-                        }
+                                var delta: v2 = .{};
+                            {
+                                    const pos = window.getCursorPos();
+                                    delta.x = @as(f32, @floatCast(pos.xpos)) - old_mouse_pos.x;
+                                    delta.y = @as(f32, @floatCast(pos.ypos)) - old_mouse_pos.y;
+                                    old_mouse_pos.x = @floatCast(pos.xpos);
+                                    old_mouse_pos.y = @floatCast(pos.ypos);
+                                }
 
-                        const player = common.findPlayerById(&memory.players.buffer, lp.id.?);
-
-                        // run predictive move
-                        if (player != null) {
-                            memory.stat_data.start("game update");
-                            defer memory.stat_data.end();
-                            module.function_table.update(&config.vars, &memory, player.?, &lp.input, dt);
-                            if (!connected) {
-                                module.function_table.authorizedPlayerUpdate(&config.vars, &memory, player.?, &lp.input, dt);
+                                lp.input.cursor_delta = .{ .x = config.vars.sensitivity * delta.x, .y = config.vars.sensitivity * delta.y };
+                            } else {
+                                // Gamepad specific inputs
+                                const deadzone = 0.1;
+                                const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads - debug_gamepad_off) % max_num_gamepads);
+                                const gamepad = glfw.Joystick.getGamepadState(.{ .jid = index }) orelse {
+                                    continue;
+                                };
+                                // TODO(anjo): @optimize
+                                var dx = gamepad.getAxis(.right_x);
+                                var dy = gamepad.getAxis(.right_y);
+                                var abs_dx = @abs(dx);
+                                var abs_dy = @abs(dy);
+                                dx = if (abs_dx > deadzone) dx else 0.0;
+                                dy = if (abs_dy > deadzone) dy else 0.0;
+                                abs_dx = if (abs_dx > deadzone) abs_dx else 1.0;
+                                abs_dy = if (abs_dy > deadzone) abs_dy else 1.0;
+                                // TODO(anjo): Add acceleration
+                                lp.input.cursor_delta.x = 20.0 * config.vars.sensitivity * dx / abs_dx;
+                                // TODO(anjo): Move aspect ratio to camera
+                                lp.input.cursor_delta.y = (9.0 / 16.0) * 20.0 * config.vars.sensitivity * dy / abs_dy;
                             }
-                        }
 
-                        // Handle console input for 0:th local player input
-                        capture_text = lp.input.isset(.Console);
-                        if (lp.input.isset(.Console)) {
-                            // TODO(anjo): Move to charcallack
-                            if (window.getKey(last_key) == .press) {
-                                last_key_down = true;
-                            } else if (window.getKey(last_key) == .release) {
-                                last_key_down = false;
+                            // push input state
+                            lp.input_buffer.push(lp.input);
+
+                            if (connected) {
+                                net.pushMessage(server_index.?, packet.PlayerUpdate{
+                                    .tick = tick,
+                                    .id = lp.id.?,
+                                    .input = lp.input,
+                                });
                             }
-                            if (last_key_down and (!repeat and key_repeat_timer.read() >= 500 * std.time.us_per_s or
+
+                            const player = common.findPlayerById(&memory.players.buffer, lp.id.?);
+
+                            // run predictive move
+                            if (player != null) {
+                                {
+                                    const block_update = memory.profile.begin("update", 0);
+                                    defer memory.profile.end(block_update);
+                                    module.function_table.update(&config.vars, &memory, player.?, &lp.input, dt);
+                                }
+                                if (!connected) {
+                                    module.function_table.authorizedPlayerUpdate(&config.vars, &memory, player.?, &lp.input, dt);
+                                }
+                            }
+
+                            // Handle console input for 0:th local player input
+                            capture_text = lp.input.isset(.Console);
+                            if (lp.input.isset(.Console)) {
+                                // TODO(anjo): Move to charcallack
+                                if (window.getKey(last_key) == .press) {
+                                    last_key_down = true;
+                                } else if (window.getKey(last_key) == .release) {
+                                    last_key_down = false;
+                                }
+                                if (last_key_down and (!repeat and key_repeat_timer.read() >= 500 * std.time.us_per_s or
                                 repeat and key_repeat_timer.read() >= 50 * std.time.us_per_s))
                             {
-                                key_repeat_timer.reset();
-                                repeat = true;
+                                    key_repeat_timer.reset();
+                                    repeat = true;
+                                }
+
+                                if (memory.console_input_index > 0 and (window.getKey(.left) == .press or last_key == .left and repeat)) {
+                                    memory.console_input_index -= 1;
+                                }
+                                if (memory.console_input_index < memory.console_input.len and (window.getKey(.right) == .press or last_key == .right and repeat)) {
+                                    memory.console_input_index += 1;
+                                }
+                                if (memory.console_input_index > 0 and (window.getKey(.backspace) == .press or last_key == .backspace and repeat)) {
+                                    _ = memory.console_input.orderedRemove(memory.console_input_index - 1);
+                                    memory.console_input.buffer[memory.console_input.len] = 0;
+                                    memory.console_input_index -= 1;
+                                }
+                                if (memory.console_input.len < memory.console_input.buffer.len - 1 and (last_char >= 32 and last_char <= 126 and repeat)) {
+                                    memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
+                                    memory.console_input.buffer[memory.console_input.len] = 0;
+                                    memory.console_input_index += 1;
+                                }
+
+                                if (lp.input.isset(.Enter) and memory.console_input.len > 0) {
+                                    command.dodododododododo(memory.console_input.slice());
+                                    std.log.info("Running command: {s}", .{memory.console_input.slice()});
+
+                                    memory.console_input_index = 0;
+                                    memory.console_input.len = 0;
+                                    memory.console_input.buffer[0] = 0;
+                                }
                             }
 
-                            if (memory.console_input_index > 0 and (window.getKey(.left) == .press or last_key == .left and repeat)) {
-                                memory.console_input_index -= 1;
+                            // @debug
+                            if (lp.input.isset(.DebugIncGamepadOffset)) {
+                                debug_gamepad_off += 1;
+                                log.info("debug_gamepad_off: {}", .{debug_gamepad_off});
                             }
-                            if (memory.console_input_index < memory.console_input.len and (window.getKey(.right) == .press or last_key == .right and repeat)) {
-                                memory.console_input_index += 1;
-                            }
-                            if (memory.console_input_index > 0 and (window.getKey(.backspace) == .press or last_key == .backspace and repeat)) {
-                                _ = memory.console_input.orderedRemove(memory.console_input_index - 1);
-                                memory.console_input.buffer[memory.console_input.len] = 0;
-                                memory.console_input_index -= 1;
-                            }
-                            if (memory.console_input.len < memory.console_input.buffer.len - 1 and (last_char >= 32 and last_char <= 126 and repeat)) {
-                                memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
-                                memory.console_input.buffer[memory.console_input.len] = 0;
-                                memory.console_input_index += 1;
-                            }
-
-                            if (lp.input.isset(.Enter) and memory.console_input.len > 0) {
-                                command.dodododododododo(memory.console_input.slice());
-                                std.log.info("Running command: {s}", .{memory.console_input.slice()});
-
-                                memory.console_input_index = 0;
-                                memory.console_input.len = 0;
-                                memory.console_input.buffer[0] = 0;
-                            }
-                        }
-
-                        // @debug
-                        if (lp.input.isset(.DebugIncGamepadOffset)) {
-                            debug_gamepad_off += 1;
-                            log.info("debug_gamepad_off: {}", .{debug_gamepad_off});
-                        }
-                        if (lp.input.isset(.DebugDecGamepadOffset)) {
-                            if (debug_gamepad_off > 0)
+                            if (lp.input.isset(.DebugDecGamepadOffset)) {
+                                if (debug_gamepad_off > 0)
                                 debug_gamepad_off -= 1;
-                            log.info("debug_gamepad_off: {}", .{debug_gamepad_off});
+                                log.info("debug_gamepad_off: {}", .{debug_gamepad_off});
+                            }
                         }
                     }
 
@@ -1122,8 +1124,6 @@ pub fn main() !void {
             // Send network data
             //
             if (server_index) |index| {
-                //const s = perf_stats.get(.SendNetData).startTime();
-                //defer s.endTime();
                 net.process(&host, index);
             }
 
@@ -1131,20 +1131,22 @@ pub fn main() !void {
             // Render
             //
             {
-                //const s = perf_stats.get(.Render).startTime();
-                //defer s.endTime();
-
-                memory.stat_data.start("draw collect");
-                for (local_players.constSlice()) |lp| {
-                    if (lp.id == null)
-                        continue;
-                    module.function_table.draw(&config.vars, &memory, &command_buffer, lp.id.?, &lp.input);
+                {
+                    const block = memory.profile.begin("draw collect", 0);
+                    defer memory.profile.end(block);
+                    for (local_players.constSlice()) |lp| {
+                        if (lp.id == null) {
+                            continue;
+                        }
+                        module.function_table.draw(&config.vars, &memory, &command_buffer, lp.id.?, &lp.input);
+                    }
                 }
-                memory.stat_data.end();
 
-                memory.stat_data.start("draw process");
-                draw.process(&command_buffer, width, height, local_players.len);
-                memory.stat_data.end();
+                {
+                    const block = memory.profile.begin("draw", 0);
+                    defer memory.profile.end(block);
+                    draw.process(&command_buffer, width, height, local_players.len);
+                }
 
                 window.swapBuffers();
             }
