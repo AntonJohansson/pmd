@@ -9,11 +9,8 @@ pub const packet_meta = @import("packet_meta.zig");
 const common = @import("common");
 const bb = common.bb;
 const stat = common.stat;
-const logging = common.logging;
 
-var log: logging.Log = .{
-    .mirror_to_stdio = false,
-};
+var log: common.log.GroupLog(.net) = undefined;
 
 const ClientHost = struct {
     fd: std.posix.socket_t,
@@ -72,6 +69,10 @@ pub const Host = struct {
     state: PeerState = .Disconnected,
     fd: std.posix.socket_t = undefined,
 };
+
+pub fn init(log_memory: *common.log.LogMemory) void {
+    log = log_memory.group_log(.net);
+}
 
 pub fn bind(port: u16) ?Host {
     const addr_list = std.net.getAddressList(mem.frame, "0.0.0.0", port) catch return null;
@@ -490,11 +491,10 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
     var events = mem.frame.alloc(Event, 128) catch unreachable;
 
     // Timeout disconnected peers
-    const tickrate = 165; // TODO: move somewhere
     for (&peers.buffer, 0..) |*peer, i| {
         if (peer.state == .Disconnected)
             continue;
-        if (peer.timeout < std.time.ns_per_s / tickrate) {
+        if (peer.timeout < std.time.ns_per_s / common.target_tickrate) {
             pushMessage(@intCast(i), packet.ConnectionTimeout{});
             events[num_events] = Event{
                 .peer_disconnected = .{
@@ -504,7 +504,7 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
             num_events += 1;
             peer.state = .Disconnected;
         } else {
-            peer.timeout -= std.time.ns_per_s / tickrate;
+            peer.timeout -= std.time.ns_per_s / common.target_tickrate;
         }
     }
 

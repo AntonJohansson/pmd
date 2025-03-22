@@ -164,7 +164,7 @@ pub const bt_texcoords: u8 = 4;
 pub const bt_indices: u8 = 8;
 
 pub const ModelNode = struct {
-    model_name: []const u8 = undefined,
+    root_entry_relative_index: i32 = 0,
     mesh_index: ?u32 = 0,
     transform: math.m4 = undefined,
 };
@@ -177,26 +177,25 @@ pub const Mesh = struct {
 
 pub const MeshPrimitive = struct {
     buffer_types: u8 = 0,
-    pos: BufferView = undefined,
-    normals: BufferView = undefined,
-    texcoords: BufferView = undefined,
-    indices: BufferView = undefined,
-    material_index: MaterialIndex,
+    pos: ?[]u8 = null,
+    normals: ?[]u8 = null,
+    texcoords: ?[]u8 = null,
+    indices: ?[]u8 = null,
+    material_index: MaterialIndex = 0,
 };
 
 pub const Model = struct {
-    binary_data: []const u8 = undefined,
+    id: u64 = undefined,
+    binary_data: []u8 = undefined,
     meshes: []Mesh = undefined,
     materials: []Material = undefined,
     nodes: []u32 = undefined,
 };
 
-pub const BufferView = struct {
-    offset: u32,
-    size: u32,
-};
-
 pub const Material = struct {
     // metallic
     base_color: math.v4 = .{},
+    has_image: bool = false,
+    image: Image = undefined,
+
 };

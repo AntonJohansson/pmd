@@ -170,9 +170,17 @@ pub fn CircularBuffer(comptime T: type, comptime max_len: usize) type {
             return self.data[self.top];
         }
 
-        pub fn peekRelative(self: *@This(), offset: i64) T {
-            const index: usize = @intCast(@mod(@as(i64, @intCast(self.top)) + @as(i64, @intCast(self.data.len)) + offset, @as(i64, @intCast(self.data.len))));
-            return self.data[index];
+        pub fn peek_index(self: *@This(), offset: i64) usize {
+            return @intCast(@mod(@as(i64, @intCast(self.top)) + @as(i64, @intCast(self.data.len)) + offset, @as(i64, @intCast(self.data.len))));
+        }
+
+        pub fn peekRelative(self: *@This(), offset: i64) *T {
+            const index = self.peek_index(offset);
+            return &self.data[index];
+        }
+
+        pub fn dist(self: *@This(), a: usize, b: usize) usize {
+            return @subWithOverflow(@addWithOverflow(b, self.data.len)[0], a)[0] % self.data.len;
         }
     };
 }

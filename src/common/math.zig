@@ -185,6 +185,15 @@ pub const v4 = extern struct {
     y: f32 = 0.0,
     z: f32 = 0.0,
     w: f32 = 0.0,
+
+    pub fn add(a: v4, b: v4) v4 {
+        return .{
+            .x = a.x + b.x,
+            .y = a.y + b.y,
+            .z = a.z + b.z,
+            .w = a.w + b.w,
+        };
+    }
 };
 
 //
@@ -763,7 +772,7 @@ pub const m4 = extern struct {
 
         // Here we perform a redudency check to make sure the matrix
         // inverse is actually the inverse.
-        std.debug.assert(equal(mul(world_to_view, view_to_world), identity));
+        std.debug.assert(equal(mul(world_to_view, view_to_world), m4_identity));
 
         return world_to_view;
     }
@@ -872,6 +881,39 @@ pub const m4 = extern struct {
             .m33 = 0,
         };
     }
+
+    pub fn modelRotX(angle: f32) m4 {
+        const cosa = cos(angle);
+        const sina = sin(angle);
+        return m4{
+            .m00 = 1, .m01 = 0, .m02 = 0, .m03 = 0,
+            .m10 = 0, .m11 = cosa, .m12 = -sina, .m13 = 0,
+            .m20 = 0, .m21 = sina, .m22 = cosa, .m23 = 0,
+            .m30 = 0, .m31 = 0, .m32 = 0, .m33 = 1,
+        };
+    }
+
+    pub fn modelRotY(angle: f32) m4 {
+        const cosa = cos(angle);
+        const sina = sin(angle);
+        return m4{
+            .m00 = cosa, .m01 = 0, .m02 = sina, .m03 = 0,
+            .m10 = 0, .m11 = 1, .m12 = 0, .m13 = 0,
+            .m20 = -sina, .m21 = 0, .m22 = cosa, .m23 = 0,
+            .m30 = 0, .m31 = 0, .m32 = 0, .m33 = 1,
+        };
+    }
+
+    pub fn modelRotZ(angle: f32) m4 {
+        const cosa = cos(angle);
+        const sina = sin(angle);
+        return m4{
+            .m00 = cosa, .m01 = -sina, .m02 = 0, .m03 = 0,
+            .m10 = sina, .m11 = cosa, .m12 = 0, .m13 = 0,
+            .m20 = 0, .m21 = 0, .m22 = 1, .m23 = 0,
+            .m30 = 0, .m31 = 0, .m32 = 0, .m33 = 1,
+        };
+    }
 };
 
 pub const m3 = extern struct {
@@ -940,6 +982,7 @@ pub const m3 = extern struct {
             .m22 = cosa,
         };
     }
+
     pub fn modelRotY(angle: f32) m3 {
         const cosa = cos(angle);
         const sina = sin(angle);
@@ -972,7 +1015,7 @@ pub const m3 = extern struct {
     }
 };
 
-pub const identity = m4{
+pub const m4_identity = m4{
     .m00 = 1,
     .m01 = 0,
     .m02 = 0,
@@ -1055,5 +1098,12 @@ pub const Quat = struct {
         const q = normalize(a);
         const p = mul(q, mul(.{ .v = v, .s = 0 }, conj(q)));
         return p.v;
+    }
+
+    pub fn lerp(a: Quat, b: Quat, t: f32) Quat {
+        return .{
+            .v = v3.lerp(a.v, b.v, t),
+            .s = a.s + t*(b.s-a.s),
+        };
     }
 };

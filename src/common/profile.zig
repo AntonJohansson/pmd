@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Self = @This();
+
 pub const FrameBlock = struct {
     start_tsc: u64,
     start_pagefault_count: u64,
@@ -37,6 +39,7 @@ const Anchor = struct {
     processed_bytecount: u64 = 0,
     tsc_delta_from_root: u64 = 0,
     parent_id: usize = 0,
+    active_last_frame: bool = false,
 };
 
 pub const TotalElapsed = struct {
@@ -66,15 +69,15 @@ pub const AnchorMap = struct {
     global_parent_id: usize = 0,
     index_current: u8 = 0,
 
-    pub fn anchor_values(self: *const @This()) []const Anchor {
+    pub fn anchor_values(self: *AnchorMap) []Anchor {
         return self.anchors[0..self.index_current];
     }
 
-    pub fn id_values(self: *const @This()) []const usize {
+    pub fn id_values(self: *AnchorMap) []usize {
         return self.ids[0..self.index_current];
     }
 
-    pub fn get_index(self: *const @This(), id: usize) ?usize {
+    pub fn get_index(self: *AnchorMap, id: usize) ?usize {
         for (self.id_values(), 0..) |_id, i| {
             if (_id == id) {
                 return i;
@@ -83,7 +86,7 @@ pub const AnchorMap = struct {
         return null;
     }
 
-    pub fn get_or_put_index(self: *@This(), id: usize) usize {
+    pub fn get_or_put_index(self: *AnchorMap, id: usize) usize {
         return self.get_index(id) orelse blk: {
             const i = self.index_current;
             self.ids[i] = id;
@@ -93,14 +96,14 @@ pub const AnchorMap = struct {
         };
     }
 
-    fn get_anchor(self: *@This(), id: usize) *Anchor {
+    fn get_anchor(self: *AnchorMap, id: usize) *Anchor {
         return &self.anchors[self.get_or_put_index(id)];
     }
 };
 
 var allocator: std.mem.Allocator = undefined;
 
-used_thread_indices: u8 = 0,
+used_thread_indices: std.atomic.Value(u8) = undefined,
 thread_indices: []usize = undefined,
 anchor_maps: []AnchorMap = undefined,
 
@@ -117,24 +120,29 @@ block_current_frame: FrameBlock = undefined,
 block_last_frame: FrameBlock = undefined,
 
 // Should be called from the main thread, not thread safe
-pub fn begin_frame(self: *@This()) void {
+pub fn begin_frame(self: *Self) void {
     self.block_last_frame = self.block_current_frame;
     self.block_current_frame = .{
         .start_tsc = read_tsc(),
         .start_pagefault_count = read_pagefault_count(),
         .start_cachemiss_count = self.read_cachemiss_count(),
     };
+    for (self.anchor_maps_slice()) |*map| {
+        for (map.anchor_values()) |*a| {
+            a.active_last_frame = false;
+        }
+    }
 }
 
 // Should be called from the main thread, not thread safe
-pub fn end_frame(self: *@This()) void {
+pub fn end_frame(self: *Self) void {
     self.block_current_frame.elapsed_tsc = read_tsc() - self.block_current_frame.start_tsc;
     self.block_current_frame.elapsed_pagefault_count = read_pagefault_count() - self.block_current_frame.start_pagefault_count;
     self.block_current_frame.elapsed_cachemiss_count = self.read_cachemiss_count() - self.block_current_frame.start_cachemiss_count;
 }
 
-pub fn begin(self: *@This(), comptime name: []const u8, bytecount: u64) Block {
-    const id = @returnAddress();
+pub fn begin(self: *Self, comptime name: []const u8, bytecount: u64) Block {
+    const id = @intFromPtr(name.ptr);
 
     const thread_index = self.get_or_put_thread_index(std.Thread.getCurrentId());
     var map = &self.anchor_maps[thread_index];
@@ -144,6 +152,7 @@ pub fn begin(self: *@This(), comptime name: []const u8, bytecount: u64) Block {
 
     anchor.processed_bytecount += bytecount;
     anchor.tsc_delta_from_root = start_tsc - self.block_current_frame.start_tsc;
+    anchor.active_last_frame = true;
 
     const b = Block{
         .label = name,
@@ -163,7 +172,7 @@ pub fn begin(self: *@This(), comptime name: []const u8, bytecount: u64) Block {
     return b;
 }
 
-pub fn end(self: *@This(), b: Block) void {
+pub fn end(self: *Self, b: Block) void {
     const elapsed_tsc = read_tsc() - b.start_tsc;
     const elapsed_pagefault = read_pagefault_count() - b.start_pagefault_count;
     const elapsed_cachemiss = self.read_cachemiss_count() - b.start_cachemiss_count;
@@ -197,9 +206,10 @@ pub fn end(self: *@This(), b: Block) void {
     map.global_parent_id = b.parent_id;
 }
 
-pub fn init(self: *@This(), _allocator: std.mem.Allocator) void {
+pub fn init(self: *Self, _allocator: std.mem.Allocator) void {
     allocator = _allocator;
 
+    self.used_thread_indices = std.atomic.Value(u8).init(0);
     self.cachemiss_fd = init_cachemiss_fd();
     self.start_tsc = read_tsc();
     self.start_cachemiss = self.read_cachemiss_count();
@@ -211,15 +221,23 @@ pub fn init(self: *@This(), _allocator: std.mem.Allocator) void {
     self.anchor_maps = allocator.alloc(AnchorMap, thread_count) catch unreachable;
 }
 
-pub fn deinit(self: *@This()) void {
-    _ = std.os.linux.ioctl(self.cachemiss_fd, std.os.linux.PERF.EVENT_IOC.RESET, 0);
-    _ = std.os.linux.close(self.cachemiss_fd);
+pub fn free_indices(self: *Self) void {
     allocator.free(self.thread_indices);
+}
+
+pub fn free_anchors(self: *Self) void {
     allocator.free(self.anchor_maps);
 }
 
-pub fn get_thread_index(self: *@This(), _id: usize) ?u8 {
-    for (self.thread_indices[0..self.used_thread_indices], 0..) |id, i| {
+pub fn deinit(self: *Self) void {
+    _ = std.os.linux.ioctl(self.cachemiss_fd, std.os.linux.PERF.EVENT_IOC.RESET, 0);
+    _ = std.os.linux.close(self.cachemiss_fd);
+    self.free_indices();
+    self.free_anchors();
+}
+
+pub fn get_thread_index(self: *Self, _id: usize) ?u8 {
+    for (self.thread_indices[0..self.used_thread_indices.load(.monotonic)], 0..) |id, i| {
         if (_id == id) {
             return @intCast(i);
         }
@@ -227,43 +245,56 @@ pub fn get_thread_index(self: *@This(), _id: usize) ?u8 {
     return null;
 }
 
-pub fn get_or_put_thread_index(self: *@This(), id: usize) u8 {
+pub fn get_or_put_thread_index(self: *Self, id: usize) u8 {
     return self.get_thread_index(id) orelse blk: {
-        const i = self.used_thread_indices;
+        const i = self.used_thread_indices.fetchAdd(1, .monotonic);
         self.thread_indices[i] = id;
         self.anchor_maps[i] = .{};
-        self.used_thread_indices += 1;
         break :blk i;
     };
 }
 
-pub fn get_anchor_map(self: *@This(), id: usize) *AnchorMap {
+pub fn get_anchor_map(self: *Self, id: usize) *AnchorMap {
     return &self.anchor_maps[self.get_or_put_thread_index(id)];
 }
 
-pub fn anchor_maps_slice(self: *@This()) []AnchorMap {
-    return self.anchor_maps[0..self.used_thread_indices];
+pub fn anchor_maps_slice(self: *Self) []AnchorMap {
+    return self.anchor_maps[0..self.used_thread_indices.load(.monotonic)];
 }
 
-pub fn total_elapsed(self: *@This()) TotalElapsed {
+pub fn total_elapsed(self: *Self) TotalElapsed {
     return .{
         .tsc_elapsed = read_tsc() - self.start_tsc,
         .pagefault_elapsed = read_pagefault_count() - self.start_pagefault,
-        .cachemiss_elapsed = self.read_cachemiss_count() - self.start_cachemiss,
+        .cachemiss_elapsed = self.read_cachemiss_count(),// - self.start_cachemiss,
     };
 }
 
-pub fn print(self: *@This()) void {
+pub fn print(self: *Self) void {
     const total = self.total_elapsed();
     print_anchors(self, total.tsc_elapsed, total.pagefault_elapsed, total.cachemiss_elapsed);
 }
 
-fn print_anchors(self: *@This(), tsc_elapsed: u64, pagefault_elapsed: u64, cachemiss_elapsed: u64) void {
+pub fn duplicate(self: *Self) !*Self {
+    const dup: *Self = @ptrCast((try allocator.alloc(Self, 1)).ptr);
+    dup.* = self.*;
+    // NOTE: We don't need to copy thread_indices, as these don't change across
+    // frames, and the array only grows monotonically :)
+    dup.anchor_maps = try allocator.alloc(AnchorMap, self.anchor_maps.len);
+    for (self.anchor_maps_slice(), 0..) |map, i| {
+        dup.anchor_maps[i] = map;
+    }
+    return dup;
+}
+
+fn print_anchors(self: *Self, tsc_elapsed: u64, pagefault_elapsed: u64, cachemiss_elapsed: u64) void {
     std.log.info("{s:16} {s:10} {s:16} {s:5} {s:10} {s:6} {s:5} {s:10} {s:9} {s:5} {s:10} {s:10} {s:10}\n",
                  .{"name", "samples", "tsc", "%", "% w/chld", "faults", "%", "% w/chld", "l1 misses", "%", "% w/chld", "mib", "gib/s"});
-    for (self.get_anchor_map(std.Thread.getCurrentId()).anchor_values()) |*a| {
-        if (a.tsc_elapsed_inclusive > 0) {
-            print_elapsed_time(self.timer_freq, tsc_elapsed, pagefault_elapsed, cachemiss_elapsed, a);
+    for (self.anchor_maps_slice()) |*map| {
+        for (map.anchor_values()) |*a| {
+            if (a.tsc_elapsed_inclusive > 0) {
+                print_elapsed_time(self.timer_freq, tsc_elapsed, pagefault_elapsed, cachemiss_elapsed, a);
+            }
         }
     }
 }
@@ -367,7 +398,7 @@ fn read_os_timer_ns() std.time.Instant {
     return std.time.Instant.now() catch unreachable;
 }
 
-fn read_cachemiss_count(self: *@This()) u64 {
+fn read_cachemiss_count(self: *Self) u64 {
     var count: usize = 0;
     _ = std.os.linux.read(self.cachemiss_fd, @ptrCast(&count), @sizeOf(usize));
     return count;

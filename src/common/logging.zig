@@ -1,63 +1,98 @@
 const std = @import("std");
 
-const pa = std.heap.page_allocator;
-var arena = std.heap.ArenaAllocator.init(pa);
-const aa = arena.allocator();
+const logdir = "log";
 
-pub const Log = struct {
-    messages: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(pa),
-    mirror_to_stdio: bool = false,
-    file: ?[]const u8 = null,
-
-    pub fn info(log: *Log, comptime fmt: []const u8, args: anytype) void {
-        const message = std.fmt.allocPrint(aa, "[info] " ++ fmt ++ "\n", args) catch unreachable;
-        log.messages.append(message) catch unreachable;
-
-        if (log.file != null) {
-            std.fs.cwd().makeDir("logs") catch |dir_err| switch (dir_err) {
-                error.PathAlreadyExists => {},
-                else => unreachable,
-            };
-
-            const dir = std.fs.cwd().openDir("logs", .{}) catch unreachable;
-            const file = dir.createFile(log.file.?, .{}) catch unreachable;
-            defer file.close();
-
-            _ = file.write(message) catch unreachable;
-        }
-
-        if (log.mirror_to_stdio) {
-            const stdout = std.io.getStdOut().writer();
-            _ = stdout.write(message) catch unreachable;
-        }
-    }
-
-    pub fn err(log: *Log, comptime fmt: []const u8, args: anytype) void {
-        const message = std.fmt.allocPrint(aa, "[error] " ++ fmt ++ "\n", args) catch unreachable;
-        log.messages.append(message) catch unreachable;
-
-        if (log.file != null) {
-            std.fs.cwd().makeDir("logs") catch |dir_err| switch (dir_err) {
-                error.PathAlreadyExists => {},
-                else => unreachable,
-            };
-
-            const dir = std.fs.cwd().openDir("logs", .{}) catch unreachable;
-            const file = dir.createFile(log.file.?, .{}) catch unreachable;
-            defer file.close();
-
-            _ = file.write(message) catch unreachable;
-        }
-
-        if (log.mirror_to_stdio) {
-            const stdout = std.io.getStdOut().writer();
-            _ = stdout.write(message) catch unreachable;
-        }
-    }
-
+pub const Group = enum(u8) {
+    general,
+    net,
+    draw,
+    game,
 };
 
-pub fn free() void {
-    aa.deinit();
-    pa.deinit();
+pub const Severity = enum(u8) {
+    info,
+    warn,
+    err,
+};
+
+pub const Message = struct {
+    group: Group,
+    severity: Severity,
+    message: []const u8,
+};
+
+pub const LogMemory = struct {
+    messages: std.ArrayList(Message) = undefined,
+    mirror_to_stdio: bool = false,
+    file: ?std.fs.File = null,
+    persistent: std.mem.Allocator,
+    frame: std.mem.Allocator,
+
+    pub fn init(persistent: std.mem.Allocator, frame: std.mem.Allocator, file: ?[]const u8, mirror_to_stdio: bool) !LogMemory {
+        var logmem = LogMemory {
+            .messages = std.ArrayList(Message).init(persistent),
+            .mirror_to_stdio = mirror_to_stdio,
+            .persistent = persistent,
+            .frame = frame,
+        };
+
+        if (file != null) {
+            std.fs.cwd().makeDir(logdir) catch |dir_err| switch (dir_err) {
+                error.PathAlreadyExists => {},
+                else => unreachable,
+            };
+
+            const dir = try std.fs.cwd().openDir(logdir, .{});
+            logmem.file = try dir.createFile(file.?, .{});
+        }
+
+        return logmem;
+    }
+
+    pub fn deinit() void {
+    }
+
+    pub fn append(memory: *LogMemory, comptime group: Group, comptime severity: Severity, comptime fmt: []const u8, args: anytype) void {
+        const str = std.fmt.allocPrint(memory.persistent, fmt, args) catch return;
+
+        memory.messages.append(.{
+            .group = group,
+            .severity = severity,
+            .message = str,
+        }) catch return;
+
+
+        if (memory.mirror_to_stdio) {
+            const head = std.fmt.allocPrint(memory.frame, "[{s}] [{s}]: " , .{@tagName(group), @tagName(severity)}) catch return;
+            const stdout = std.io.getStdOut();
+            const writer = stdout.writer();
+            _ = writer.writeAll(head) catch return;
+            _ = writer.writeAll(str) catch return;
+            _ = writer.writeAll("\n") catch return;
+        }
+    }
+
+    pub fn group_log(memory: *LogMemory, comptime group: Group) GroupLog(group) {
+        return .{
+            .memory = memory,
+        };
+    }
+};
+
+pub fn GroupLog(comptime group: Group) type {
+    return struct {
+        memory: *LogMemory = undefined,
+
+        pub fn info(log: *@This(), comptime fmt: []const u8, args: anytype) void {
+            log.memory.append(group, .info, fmt, args);
+        }
+
+        pub fn warn(log: *@This(), comptime fmt: []const u8, args: anytype) void {
+            log.memory.append(group, .warn, fmt, args);
+        }
+
+        pub fn err(log: *@This(), comptime fmt: []const u8, args: anytype) void {
+            log.memory.append(group, .err, fmt, args);
+        }
+    };
 }

@@ -27,9 +27,13 @@
             .url = "git+https://github.com/AntonJohansson/mach-glfw#d14ae0f3fc873301ad0e2d34128f6d931c638fc0",
             .hash = "1220cdcde5cb8c8e323ebfbdcbde734ac5638bacaa5e6affabd4fbfd74fecf6eace4",
         },
-        .@"sokol-zig" = .{
-            .url = "git+https://github.com/floooh/sokol-zig#fe47d2055d7b86bdcbaf02610109b1f1aa5dfdc1",
-            .hash = "12201b62a6fd9e15e0b78a4fbcda3ac907a423446c68c6b8614c9b3b21d24a955639",
+        .sokol = .{
+            .url = "git+https://github.com/AntonJohansson/sokol-zig.git#864a13abb476e6cfde443c94223b3ac5c64019bf",
+            .hash = "12205074d7f1b7708ebd1006e27b52faa8c08f7369220f1c6933e98e285a41bca02f",
+        },
+        .zphysics = .{
+            .url = "git+https://github.com/zig-gamedev/zphysics/#e5d77a1f25c456786d8981eb287857cff0869c30",
+            .hash = "1220631e6b4ac819aedd854cfa68af37e2513ffd7f363243ae30bdfadadf46aac509",
         },
     },
     .paths = .{

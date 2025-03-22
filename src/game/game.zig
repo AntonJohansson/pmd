@@ -22,8 +22,6 @@ const Vars = config.Vars;
 const primitive = common.primitive;
 const Color = primitive.Color;
 
-const stat = common.stat;
-
 const bb = common.bb;
 const CircularArray = bb.CircularArray;
 
@@ -35,6 +33,8 @@ const m3 = math.m3;
 const m4 = math.m4;
 
 const draw_api = common.draw_api;
+
+const zphy = @import("zphysics");
 
 const widget_length = 20.0;
 const widget_thickness = 2.0;
@@ -57,6 +57,146 @@ const grid_size = 32;
 const tile_size = 32.0;
 const tile_max_height = 4.0;
 const tile_base_height = 2.0;
+
+//
+// PHYSICS
+//
+
+const object_layers = struct {
+    const non_moving: zphy.ObjectLayer = 0;
+    const moving: zphy.ObjectLayer = 1;
+    const len: u32 = 2;
+};
+
+const broad_phase_layers = struct {
+    const non_moving: zphy.BroadPhaseLayer = 0;
+    const moving: zphy.BroadPhaseLayer = 1;
+    const len: u32 = 2;
+};
+
+const BroadPhaseLayerInterface = extern struct {
+    usingnamespace zphy.BroadPhaseLayerInterface.Methods(@This());
+    __v: *const zphy.BroadPhaseLayerInterface.VTable = &vtable,
+
+    object_to_broad_phase: [object_layers.len]zphy.BroadPhaseLayer = undefined,
+
+    const vtable = zphy.BroadPhaseLayerInterface.VTable{
+        .getNumBroadPhaseLayers = _getNumBroadPhaseLayers,
+        .getBroadPhaseLayer = _getBroadPhaseLayer,
+    };
+
+    fn init() BroadPhaseLayerInterface {
+        var layer_interface: BroadPhaseLayerInterface = .{};
+        layer_interface.object_to_broad_phase[object_layers.non_moving] = broad_phase_layers.non_moving;
+        layer_interface.object_to_broad_phase[object_layers.moving] = broad_phase_layers.moving;
+        return layer_interface;
+    }
+
+    fn _getNumBroadPhaseLayers(_: *const zphy.BroadPhaseLayerInterface) callconv(.C) u32 {
+        return broad_phase_layers.len;
+    }
+
+    fn _getBroadPhaseLayer(
+        iself: *const zphy.BroadPhaseLayerInterface,
+        layer: zphy.ObjectLayer,
+    ) callconv(.C) zphy.BroadPhaseLayer {
+        const self = @as(*const BroadPhaseLayerInterface, @ptrCast(iself));
+        return self.object_to_broad_phase[layer];
+    }
+};
+
+const ObjectVsBroadPhaseLayerFilter = extern struct {
+    usingnamespace zphy.ObjectVsBroadPhaseLayerFilter.Methods(@This());
+    __v: *const zphy.ObjectVsBroadPhaseLayerFilter.VTable = &vtable,
+
+    const vtable = zphy.ObjectVsBroadPhaseLayerFilter.VTable{ .shouldCollide = _shouldCollide };
+
+    fn _shouldCollide(
+        _: *const zphy.ObjectVsBroadPhaseLayerFilter,
+        layer1: zphy.ObjectLayer,
+        layer2: zphy.BroadPhaseLayer,
+    ) callconv(.C) bool {
+        return switch (layer1) {
+            object_layers.non_moving => layer2 == broad_phase_layers.moving,
+            object_layers.moving => true,
+            else => unreachable,
+        };
+    }
+};
+
+const ObjectLayerPairFilter = extern struct {
+    usingnamespace zphy.ObjectLayerPairFilter.Methods(@This());
+    __v: *const zphy.ObjectLayerPairFilter.VTable = &vtable,
+
+    const vtable = zphy.ObjectLayerPairFilter.VTable{ .shouldCollide = _shouldCollide };
+
+    fn _shouldCollide(
+        _: *const zphy.ObjectLayerPairFilter,
+        object1: zphy.ObjectLayer,
+        object2: zphy.ObjectLayer,
+    ) callconv(.C) bool {
+        return switch (object1) {
+            object_layers.non_moving => object2 == object_layers.moving,
+            object_layers.moving => true,
+            else => unreachable,
+        };
+    }
+};
+
+const ContactListener = extern struct {
+    usingnamespace zphy.ContactListener.Methods(@This());
+    __v: *const zphy.ContactListener.VTable = &vtable,
+
+    const vtable = zphy.ContactListener.VTable{ .onContactValidate = _onContactValidate };
+
+    fn _onContactValidate(
+        self: *zphy.ContactListener,
+        body1: *const zphy.Body,
+        body2: *const zphy.Body,
+        base_offset: *const [3]zphy.Real,
+        collision_result: *const zphy.CollideShapeResult,
+    ) callconv(.C) zphy.ValidateResult {
+        _ = self;
+        _ = body1;
+        _ = body2;
+        _ = base_offset;
+        _ = collision_result;
+        return .accept_all_contacts;
+    }
+};
+
+//
+// END PHYSICS
+//
+
+var broad_phase_layer_interface = BroadPhaseLayerInterface.init();
+var object_vs_broad_phase_layer_filter: ObjectVsBroadPhaseLayerFilter = .{};
+var object_layer_pair_filter: ObjectLayerPairFilter = .{};
+var contact_listener: ContactListener = .{};
+var physics_system: *zphy.PhysicsSystem = undefined;
+
+export fn init(memory: *Memory) bool {
+    zphy.init(memory.mem.persistent, .{}) catch return false;
+
+    physics_system = zphy.PhysicsSystem.create(
+        @as(*const zphy.BroadPhaseLayerInterface, @ptrCast(&broad_phase_layer_interface)),
+        @as(*const zphy.ObjectVsBroadPhaseLayerFilter, @ptrCast(&object_vs_broad_phase_layer_filter)),
+        @as(*const zphy.ObjectLayerPairFilter, @ptrCast(&object_layer_pair_filter)),
+        .{
+            .max_bodies = 1024,
+            .num_body_mutexes = 0,
+            .max_body_pairs = 1024,
+            .max_contact_constraints = 1024,
+        },
+    ) catch return false;
+    return true;
+}
+
+export fn deinit(memory: *Memory) void {
+    _ = memory;
+    physics_system.destroy();
+    zphy.deinit();
+}
 
 fn updateWidget(widget: *common.WidgetModel, input: *const Input, start: v3, dir: v3) void {
     var model = widget.model.*;
@@ -163,37 +303,37 @@ fn updateWidget(widget: *common.WidgetModel, input: *const Input, start: v3, dir
     }
 }
 
-fn drawWidget(b: *draw_api.CommandBuffer, widget: *common.WidgetModel) void {
+fn drawWidget(cmd: *draw_api.CommandBuffer, widget: *common.WidgetModel) void {
     const model = widget.model.*;
     // x y z axes
-    b.push(primitive.Cube{
+    cmd.push(primitive.Cube{
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_x)),
     }, .{ .r = 255, .g = 0, .b = 0, .a = 255 });
-    b.push(primitive.Cube{
+    cmd.push(primitive.Cube{
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_y)),
     }, .{ .r = 0, .g = 255, .b = 0, .a = 255 });
-    b.push(primitive.Cube{
+    cmd.push(primitive.Cube{
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_z)),
     }, .{ .r = 0, .g = 0, .b = 255, .a = 255 });
 
-    b.push(primitive.Cube{
+    cmd.push(primitive.Cube{
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_plane_xy)),
     }, .{ .r = 0, .g = 0, .b = 255, .a = 255 });
-    b.push(primitive.Cube{
+    cmd.push(primitive.Cube{
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_plane_yz)),
     }, .{ .r = 255, .g = 0, .b = 0, .a = 255 });
-    b.push(primitive.Cube{
+    cmd.push(primitive.Cube{
         .model = m4.modelSetScale(model, v3.scale(1.0, widget_size_plane_xz)),
     }, .{ .r = 0, .g = 255, .b = 0, .a = 255 });
 
     const rot = m4.modelRot(model);
-    b.push(primitive.Circle{
+    cmd.push(primitive.Circle{
         .model = m4.modelSetRot(model, m3.mul(rot, m3.modelRotY(std.math.pi / 2.0))),
     }, .{ .r = 255, .g = 0, .b = 0, .a = 255 });
-    b.push(primitive.Circle{
+    cmd.push(primitive.Circle{
         .model = m4.modelSetRot(model, m3.mul(rot, m3.modelRotX(std.math.pi / 2.0))),
     }, .{ .r = 0, .g = 255, .b = 0, .a = 255 });
-    b.push(primitive.Circle{
+    cmd.push(primitive.Circle{
         .model = m4.modelSetRot(model, m3.mul(rot, m3.modelRotZ(std.math.pi / 2.0))),
     }, .{ .r = 0, .g = 0, .b = 255, .a = 255 });
 }
@@ -201,7 +341,7 @@ fn drawWidget(b: *draw_api.CommandBuffer, widget: *common.WidgetModel) void {
 const ground_plane_model = m4.model(.{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 });
 
 fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
-    if (!input.isset(.InMenu)) {
+    if (memory.state == .gameplay or memory.state == .editor) {
         if (input.cursor_delta.x != 0 or input.cursor_delta.y != 0) {
             player.yaw -= input.cursor_delta.x;
             player.pitch += input.cursor_delta.y;
@@ -214,7 +354,7 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
         }
     }
 
-    const noclip = input.isset(.Editor);
+    const noclip = memory.state == .editor;
 
     // compute wishvel
     var wishvel: v3 = .{};
@@ -305,7 +445,6 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
 
     // delta from movement
 
-    memory.stat_data.start("collide");
     // collision with planes
     var potential_delta = v3.scale(dt, player.vel);
     if (v3.len2(potential_delta) != 0.0) {
@@ -350,7 +489,6 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
 
         player.pos = v3.add(player.pos, pos_delta);
     }
-    memory.stat_data.end();
 
     // integrate velocity
     const delta = v3.scale(dt, player.vel);
@@ -358,7 +496,6 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
 
     // Check for ground touch
     player.onground = false;
-    memory.stat_data.start("ground detect");
     for (memory.entities.constSlice()) |e| {
         if (intersect.planeModelRay(e.plane.model, global_plane_size, player.pos, .{ .x = 0, .y = 0, .z = -0.5 })) |_| {
             player.onground = true;
@@ -367,7 +504,6 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
     if (intersect.planeModelRay(ground_plane_model, ground_plane_size, player.pos, .{ .x = 0, .y = 0, .z = -0.5 })) |_| {
         player.onground = true;
     }
-    memory.stat_data.end();
 
     // copy player pos to camera pos
     {
@@ -462,37 +598,67 @@ fn readEntitiesFromDisk(memory: *common.Memory) !void {
     }
 }
 
-fn pushWindow(memory: *Memory, title: []const u8, x: f32, y: f32) bool {
-    for (memory.windows.?.items, 0..) |*win, i| {
-        if (std.mem.eql(u8, win.title, title)) {
-            win.children = std.ArrayList(common.WindowItem).init(memory.mem.frame);
-            memory.current_window = i;
-            return true;
+fn pushWindow(memory: *Memory, cmd: *draw_api.CommandBuffer, title: []const u8, x: f32, y: f32) bool {
+    var persistent: ?*common.WindowPersistentState = null;
+    for (memory.windows_persistent.items) |*p| {
+        if (std.mem.eql(u8, p.title, title)) {
+            persistent = p;
+            //win.children = std.ArrayList(common.WindowItem).init(memory.mem.frame);
+            //memory.current_window = i;
         }
     }
 
-    memory.windows.?.append(.{
-        .title = title,
-        .x = x,
-        .y = y,
-        .w = 0.20,
-        .h = 0.20,
+    if (persistent == null) {
+        persistent = memory.windows_persistent.addOne() catch unreachable;
+        persistent.?.* = .{
+            .title = title,
+            .x = x,
+            .y = y,
+            .w = 0.20,
+            .h = 0.20,
+        };
+    }
+
+    const window = memory.windows.addOne() catch unreachable;
+    window.* = .{
+        .persistent = persistent.?,
         .cursor_x = 0,
         .cursor_y = 1,
-        .children = std.ArrayList(common.WindowItem).init(memory.mem.frame),
-    }) catch unreachable;
+    };
 
-    memory.current_window = memory.windows.?.items.len - 1;
+    memory.current_window = memory.windows.items.len - 1;
+
+    drawWindow(cmd, window);
+
     return true;
 }
 
-fn pushText(memory: *Memory, text: []const u8) void {
+fn pushText(memory: *Memory, cmd: *draw_api.CommandBuffer, text: []const u8) void {
     const index = memory.current_window.?;
-    memory.windows.?.items[index].children.append(.{
-        .text = .{
-            .str = text,
+    const window = &memory.windows.items[index];
+
+    var text_prim = primitive.Text{
+        .pos = .{
+            .x = window.persistent.x + window.persistent.w * window.cursor_x,
+            .y = window.persistent.y + window.persistent.h * window.cursor_y - top_bar_height - window_fontsize,
         },
-    }) catch unreachable;
+        .str = undefined,
+        .len = text.len,
+        .size = window_fontsize,
+        .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
+        .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
+    };
+    @memset(&text_prim.str, 0);
+    const dst: []u8 = &text_prim.str;
+    @memcpy(dst[0..text.len], text);
+    cmd.push(text_prim, hsv_to_rgb(100, 0.5, 0.5));
+    window.cursor_y -= window_fontsize / window.persistent.h;
+
+    //memory.windows.items[index].children.append(.{
+    //    .text = .{
+    //        .str = text,
+    //    },
+    //}) catch unreachable;
 }
 
 export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
@@ -534,19 +700,8 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
         move(vars, memory, player, input, dt);
         aim(vars, memory, player);
 
-        if (!input.isset(.Editor))
+        if (memory.state == .gameplay) {
             weaponUpdate(memory, player, input, dt);
-    }
-
-    if (vars.mode2d) {
-        if (input.isset(.Interact)) {
-            memory.target.x -= input.cursor_delta.x / memory.zoom;
-            memory.target.y -= input.cursor_delta.y / memory.zoom;
-        }
-        if (input.scroll != 0) {
-            memory.zoom += input.scroll;
-            if (memory.zoom < 0.1)
-                memory.zoom = 0.1;
         }
     }
 
@@ -557,31 +712,32 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
         memory.zoom = 1.0;
     }
 
-    if (input.isset(.Editor)) {
-        if (input.isset(.Interact)) {
-            var closest: ?intersect.Result = null;
-            var closest_entity_id: ?u32 = null;
-            for (memory.entities.constSlice(), 0..) |e, i| {
-                if (intersect.planeModelLine(e.plane.model, global_plane_size, player.camera.pos, player.camera.dir)) |res| {
-                    if (closest == null or res.distance < closest.?.distance) {
-                        closest = res;
-                        closest_entity_id = @intCast(i);
-                    }
-                }
-            }
+    // select entity
+    //if (input.isset(.Editor) or input.isset(.pause)) {
+    //    if (input.isset(.Interact)) {
+    //        var closest: ?intersect.Result = null;
+    //        var closest_entity_id: ?u32 = null;
+    //        for (memory.entities.constSlice(), 0..) |e, i| {
+    //            if (intersect.planeModelLine(e.plane.model, global_plane_size, player.camera.pos, player.camera.dir)) |res| {
+    //                if (closest == null or res.distance < closest.?.distance) {
+    //                    closest = res;
+    //                    closest_entity_id = @intCast(i);
+    //                }
+    //            }
+    //        }
 
-            if (closest_entity_id) |id| {
-                memory.selected_entity = closest_entity_id;
-                memory.widget.model = &memory.entities.buffer[id].plane.model;
-            }
-        }
+    //        if (closest_entity_id) |id| {
+    //            memory.selected_entity = closest_entity_id;
+    //            memory.widget.model = &memory.entities.buffer[id].plane.model;
+    //        }
+    //    }
 
-        if (memory.selected_entity != null) {
-            updateWidget(&memory.widget, input, player.camera.pos, player.camera.dir);
-            var e = &memory.entities.slice()[memory.selected_entity.?];
-            e.flags.updated_client = true;
-        }
-    }
+    //    if (memory.selected_entity != null) {
+    //        updateWidget(&memory.widget, input, player.camera.pos, player.camera.dir);
+    //        var e = &memory.entities.slice()[memory.selected_entity.?];
+    //        e.flags.updated_client = true;
+    //    }
+    //}
 
     if (input.isset(.Save)) {
         dumpEntitiesToDisk(memory.entities.slice()) catch {};
@@ -590,66 +746,6 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
         readEntitiesFromDisk(memory) catch {};
     }
 
-    if (memory.windows != null) {
-        if (pushWindow(memory, "wow", 0.5, 0.5)) {
-            pushText(memory, "haha");
-            pushText(memory, "abcarstratrastarst");
-            pushText(memory, "haha");
-            pushText(memory, "haha");
-            pushText(memory, "haha");
-            pushText(memory, "haha");
-            pushText(memory, "haha");
-            pushText(memory, "haha");
-            //const index = memory.current_window.?;
-            //memory.windows.?.items[index].children.append(.{
-            //    .text = .{
-            //        .str = memory.console_input.slice(),
-            //    },
-            //}) catch unreachable;
-        }
-    }
-
-    // ?
-    if (input.isset(.InMenu)) {
-        // update cursor position
-        memory.cursor_pos.x += input.cursor_delta.x;
-        memory.cursor_pos.y -= input.cursor_delta.y;
-        memory.cursor_pos.x = std.math.clamp(memory.cursor_pos.x, 0, 1);
-        memory.cursor_pos.y = std.math.clamp(memory.cursor_pos.y, 0, 1);
-
-        // check window collisions
-        if (memory.windows != null) {
-            for (memory.windows.?.items) |*win| {
-                if (memory.cursor_pos.x >= win.x and
-                    memory.cursor_pos.y >= win.y + win.h - top_bar_height and
-                    memory.cursor_pos.x <= win.x + win.w and
-                    memory.cursor_pos.y <= win.y + win.h)
-                {
-                    win.hover = true;
-                } else {
-                    win.hover = false;
-                }
-
-                if (input.isset(.Interact)) {
-                    if (win.moving) {
-                        win.moving = false;
-                    } else if (win.hover) {
-                        memory.window_moving_offset = v2.sub(.{ .x = win.x, .y = win.y }, memory.cursor_pos);
-                        win.moving = true;
-                    }
-                }
-
-                if (win.moving) {
-                    win.x = memory.cursor_pos.x + memory.window_moving_offset.x;
-                    win.y = memory.cursor_pos.y + memory.window_moving_offset.y;
-                }
-            }
-        }
-
-        //for (memory.windows.?.items) |*win| {
-        //    if (win.moving) {}
-        //}
-    }
 }
 
 export fn authorizedPlayerUpdate(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
@@ -1084,9 +1180,7 @@ fn raycastAgainstEntities(memory: *Memory, pos: v3, dir: v3, skip_id: ?common.En
 //}
 
 const top_bar_height = 0.01;
-fn drawWindow(b: *draw_api.CommandBuffer, windows: *std.ArrayList(common.Window), index: usize) void {
-    const window = &windows.items[index];
-
+fn drawWindow(cmd: *draw_api.CommandBuffer, window: *common.WindowState) void {
     //var parent = if (window.parent) |p| &windows.items[p] else null;
     //var w = if (parent) |p| p.w else 1;
     //_ = w;
@@ -1099,26 +1193,26 @@ fn drawWindow(b: *draw_api.CommandBuffer, windows: *std.ArrayList(common.Window)
     //var y = if (parent) |p| p.y + p.cursor_y else 0;
 
     // background
-    b.push(primitive.Rectangle{ .pos = .{
-        .x = window.x,
-        .y = window.y,
+    cmd.push(primitive.Rectangle{ .pos = .{
+        .x = window.persistent.x,
+        .y = window.persistent.y,
     }, .size = .{
-        .x = window.w,
-        .y = window.h - top_bar_height,
+        .x = window.persistent.w,
+        .y = window.persistent.h - top_bar_height,
     } }, hsv_to_rgb(
         window.color.x,
         window.color.y,
         window.color.z,
     ));
 
-    const top_bar_color_factor: f32 = if (window.moving or window.hover) 0.8 else 1.5;
+    const top_bar_color_factor: f32 = if (window.persistent.moving or window.hover) 0.8 else 1.5;
 
     // top bar
-    b.push(primitive.Rectangle{ .pos = .{
-        .x = window.x,
-        .y = window.y + window.h - top_bar_height,
+    cmd.push(primitive.Rectangle{ .pos = .{
+        .x = window.persistent.x,
+        .y = window.persistent.y + window.persistent.h - top_bar_height,
     }, .size = .{
-        .x = window.w,
+        .x = window.persistent.w,
         .y = top_bar_height,
     } }, hsv_to_rgb(
         window.color.x,
@@ -1128,54 +1222,215 @@ fn drawWindow(b: *draw_api.CommandBuffer, windows: *std.ArrayList(common.Window)
 
     window.cursor_x = 0;
     window.cursor_y = 1;
-    for (window.children.items) |item| {
-        switch (item) {
-            .text => |t| {
-                var text = primitive.Text{
-                    .pos = .{
-                        .x = window.x + window.w * window.cursor_x,
-                        .y = window.y + window.h * window.cursor_y - top_bar_height - window_fontsize,
-                    },
-                    .str = undefined,
-                    .len = t.str.len,
-                    .size = window_fontsize,
-                    .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
-                    .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
-                };
-                @memset(&text.str, 0);
-                const dst: []u8 = &text.str;
-                @memcpy(dst[0..t.str.len], t.str);
-                b.push(text, hsv_to_rgb(t.color.x, t.color.y, t.color.z));
+    //for (window.children.items) |item| {
+    //    switch (item) {
+    //        .text => |t| {
+    //            var text = primitive.Text{
+    //                .pos = .{
+    //                    .x = window.x + window.w * window.cursor_x,
+    //                    .y = window.y + window.h * window.cursor_y - top_bar_height - window_fontsize,
+    //                },
+    //                .str = undefined,
+    //                .len = t.str.len,
+    //                .size = window_fontsize,
+    //                .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
+    //                .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
+    //            };
+    //            @memset(&text.str, 0);
+    //            const dst: []u8 = &text.str;
+    //            @memcpy(dst[0..t.str.len], t.str);
+    //            cmd.push(text, hsv_to_rgb(t.color.x, t.color.y, t.color.z));
 
-                window.cursor_y -= window_fontsize / window.h;
-            },
-            else => {},
+    //            window.cursor_y -= window_fontsize / window.h;
+    //        },
+    //        else => {},
+    //    }
+    //}
+}
+
+const dim = 64;
+var voxels: [dim][dim][dim]u1 = .{.{.{0} ** dim} ** dim} ** dim;
+var built_terrain = false;
+
+fn addVoxelFaceIfSet(faces: []primitive.VoxelTransform, len: *usize, x: usize, y: usize, z: usize, face: primitive.VoxelTransform.FaceDir) void {
+    if (voxels[z][y][x] == 1) {
+        faces[len] = .{
+            .x = @intCast(x),
+            .y = @intCast(y),
+            .z = @intCast(z),
+            .face = face,
+        };
+        len.* += 1;
+    }
+}
+
+const VoxelFaceArray = MultiThreadedArray(primitive.VoxelTransform, 128);
+
+fn build_terrain(memory: *Memory, x0: usize, x1: usize, y0: usize, y1: usize, z: usize) void {
+    const block = memory.profile.begin(@src().fn_name, (x1 - x0) * (y1 - y0) / 8);
+    defer memory.profile.end(block);
+
+    for (y0..y1) |y| {
+        for (x0..x1) |x| {
+            const halfdim = dim / 2.0;
+            const d = v3{
+                .x = @as(f32, @floatFromInt(x)) + 0.5 - halfdim,
+                .y = @as(f32, @floatFromInt(y)) + 0.5 - halfdim,
+                .z = @as(f32, @floatFromInt(z)) + 0.5 - halfdim,
+            };
+            if (v3.len(d) <= halfdim) {
+                voxels[z][y][x] = 1;
+            }
         }
     }
 }
 
-const dim = 16;
-var voxels: [dim][dim][dim]u1 = .{.{.{0} ** dim} ** dim} ** dim;
-var set = false;
+fn build_faces(memory: *Memory, faces: *VoxelFaceArray, x0: usize, x1: usize, y0: usize, y1: usize, z: usize) void {
+    const profile_block = memory.profile.begin(@src().fn_name, 6 * (x1 - x0) * (y1 - y0) / 8);
+    defer memory.profile.end(profile_block);
 
-export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, player_id: common.EntityId, input: *const Input) void {
-    if (!set) {
-        for (0..dim) |z| {
-            for (0..dim) |y| {
-                for (0..dim) |x| {
-                    const halfdim = dim / 2.0;
-                    const d = v3{
-                        .x = @as(f32, @floatFromInt(x)) - halfdim,
-                        .y = @as(f32, @floatFromInt(y)) - halfdim,
-                        .z = @as(f32, @floatFromInt(z)) - halfdim,
-                    };
-                    if (v3.len(d) <= halfdim) {
-                        voxels[x][y][z] = 1;
-                    }
-                }
+    var block = faces.head();
+
+    for (y0..y1) |y| {
+        for (x0..x1) |x| {
+            if (voxels[z][y][x] > 0) {
+                continue;
+            }
+
+            const n = dim - 1;
+            const f = if (x < n) voxels[z][y][x + 1] else 0;
+            const b = if (x > 0) voxels[z][y][x - 1] else 0;
+            const r = if (y < n) voxels[z][y + 1][x] else 0;
+            const l = if (y > 0) voxels[z][y - 1][x] else 0;
+            const u = if (z < n) voxels[z + 1][y][x] else 0;
+            const d = if (z > 0) voxels[z - 1][y][x] else 0;
+
+            if (f == 1) {
+                VoxelFaceArray.push(&block, .{
+                    .x = @intCast(x + 1),
+                    .y = @intCast(y),
+                    .z = @intCast(z),
+                    .face = .back,
+                });
+            }
+            if (b == 1) {
+                VoxelFaceArray.push(&block, .{
+                    .x = @intCast(x - 1),
+                    .y = @intCast(y),
+                    .z = @intCast(z),
+                    .face = .front,
+                });
+            }
+            if (r == 1) {
+                VoxelFaceArray.push(&block, .{
+                    .x = @intCast(x),
+                    .y = @intCast(y + 1),
+                    .z = @intCast(z),
+                    .face = .left,
+                });
+            }
+            if (l == 1) {
+                VoxelFaceArray.push(&block, .{
+                    .x = @intCast(x),
+                    .y = @intCast(y - 1),
+                    .z = @intCast(z),
+                    .face = .right,
+                });
+            }
+            if (u == 1) {
+                VoxelFaceArray.push(&block, .{
+                    .x = @intCast(x),
+                    .y = @intCast(y),
+                    .z = @intCast(z + 1),
+                    .face = .down,
+                });
+            }
+            if (d == 1) {
+                VoxelFaceArray.push(&block, .{
+                    .x = @intCast(x),
+                    .y = @intCast(y),
+                    .z = @intCast(z - 1),
+                    .face = .up,
+                });
             }
         }
-        set = true;
+    }
+}
+
+fn build_chunk_edges(memory: *Memory, faces: *VoxelFaceArray, _i0: usize, _i1: usize, j: usize) void {
+    const profile_block = memory.profile.begin(@src().fn_name, (_i1 - _i0) / 8);
+    defer memory.profile.end(profile_block);
+
+    var block = faces.head();
+
+    for (_i0.._i1) |i| {
+        const n = dim - 1;
+        if (voxels[0][j][i] > 0) {
+            VoxelFaceArray.push(&block, .{
+                .x = @intCast(i),
+                .y = @intCast(j),
+                .z = @intCast(0),
+                .face = .down,
+            });
+        }
+        if (voxels[n][j][i] > 0) {
+            VoxelFaceArray.push(&block, .{
+                .x = @intCast(i),
+                .y = @intCast(j),
+                .z = @intCast(n),
+                .face = .up,
+            });
+        }
+        if (voxels[j][0][i] > 0) {
+            VoxelFaceArray.push(&block, .{
+                .x = @intCast(i),
+                .y = @intCast(0),
+                .z = @intCast(j),
+                .face = .left,
+            });
+        }
+        if (voxels[j][n][i] > 0) {
+            VoxelFaceArray.push(&block, .{
+                .x = @intCast(i),
+                .y = @intCast(n),
+                .z = @intCast(j),
+                .face = .right,
+            });
+        }
+        if (voxels[j][i][0] > 0) {
+            VoxelFaceArray.push(&block, .{
+                .x = @intCast(0),
+                .y = @intCast(i),
+                .z = @intCast(j),
+                .face = .back,
+            });
+        }
+        if (voxels[j][i][n] > 0) {
+            VoxelFaceArray.push(&block, .{
+                .x = @intCast(n),
+                .y = @intCast(i),
+                .z = @intCast(j),
+                .face = .front,
+            });
+        }
+    }
+}
+
+const bl = 100;
+const a0 = math.Quat.fromAxisAngle(.{.x=1}, 0);
+const a1 = math.Quat.fromAxisAngle(.{.x=1}, 0);
+const b0 = math.Quat.fromAxisAngle(.{.x=1}, std.math.pi/4.0);
+const b1 = math.Quat.fromAxisAngle(.{.x=1}, std.math.pi/4.0);
+
+export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer, player_id: common.EntityId, input: *const Input) void {
+    if (!built_terrain) {
+        var wg: std.Thread.WaitGroup = undefined;
+        wg.reset();
+        for (0..dim) |z| {
+            memory.threadpool.spawnWg(&wg, build_terrain, .{ memory, 0, dim, 0, dim, z });
+        }
+        built_terrain = true;
+        memory.threadpool.waitAndWork(&wg);
     }
 
     const player = common.findPlayerById(memory.players.slice(), player_id) orelse return;
@@ -1184,63 +1439,123 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
     }
     const camera = player.camera;
 
-    b.push(camera, .{});
+    cmd.push(camera, .{});
 
-    const selected_index: usize = 0;
+    cmd.push(primitive.Mesh{
+        .model = m4.modelWithRotations(.{ .x = 50, .y = 0, .z = 20 }, .{ .x = 20, .y = 20, .z = 20 }, .{
+            .x = 0,
+            .y = 0,
+            .z = @as(f32, @floatFromInt(memory.time)) / 1e9,
+        }),
+        .name = "res/models/brog/frog",
+        .draw_children = true,
+    }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
 
-    var num_nonemtpy_voxels: usize = 0;
-    const nonempty_voxels = memory.mem.frame.alloc(primitive.VoxelTransform, dim * dim * dim) catch unreachable;
+    cmd.push(primitive.Mesh{
+        .model = m4.modelWithRotations(.{ .x = 100, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
+            .x = 0,
+            .y = 0,
+            .z = @as(f32, @floatFromInt(memory.time)) / 1e9,
+        }),
+        .name = "res/models/weapons/granat",
+        .draw_children = true,
+    }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
 
-    for (0..dim) |z| {
-        for (0..dim) |y| {
-            for (0..dim) |x| {
-                if (voxels[x][y][z] > 0) {
-                    nonempty_voxels[num_nonemtpy_voxels] = .{
-                        .pos = .{
-                            .x = dim * @as(f32, @floatFromInt(x)),
-                            .y = dim * @as(f32, @floatFromInt(y)),
-                            .z = dim * @as(f32, @floatFromInt(z)),
-                        },
-                    };
-                    num_nonemtpy_voxels += 1;
 
-                    b.push(primitive.Cube{
-                        .model = m4.modelWithRotations(
-                            .{
-                                .x = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(x)),
-                                .y = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(y)),
-                                .z = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(z)),
-                            },
-                            .{ .x = tile_size, .y = tile_size, .z = tile_size },
-                            .{ .x = 0, .y = 0, .z = 0 },
-                        ),
-                    }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
-                } else {
-                    //b.push(primitive.CubeOutline{ .model = m4.modelWithRotations(
-                    //    .{
-                    //        .x = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(x)),
-                    //        .y = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(y)),
-                    //        .z = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(z)),
-                    //    },
-                    //    .{ .x = tile_size, .y = tile_size, .z = tile_size },
-                    //    .{ .x = 0, .y = 0, .z = 0 },
-                    //), .thickness = 0.02 }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
-                }
-            }
-        }
+    //cmd.push(primitive.Cube{
+    //    .model = m4.modelWithRotations(
+    //        .{
+    //            .x = 50,
+    //            .y = 0,
+    //            .z = 0,
+    //        },
+    //        .{ .x = 100, .y = 10, .z = 10 },
+    //        .{ .x = 0, .y = 0, .z = 0 },
+    //    ),
+    //}, .{ .r = 255, .g = 0, .b = 0, .a = 255 });
+    //cmd.push(primitive.Cube{
+    //    .model = m4.modelWithRotations(
+    //        .{
+    //            .x = 0,
+    //            .y = 50,
+    //            .z = 0,
+    //        },
+    //        .{ .x = 10, .y = 100, .z = 10 },
+    //        .{ .x = 0, .y = 0, .z = 0 },
+    //    ),
+    //}, .{ .r = 0, .g = 255, .b = 0, .a = 255 });
+    //cmd.push(primitive.Cube{
+    //    .model = m4.modelWithRotations(
+    //        .{
+    //            .x = 0,
+    //            .y = 0,
+    //            .z = 50,
+    //        },
+    //        .{ .x = 10, .y = 10, .z = 100 },
+    //        .{ .x = 0, .y = 0, .z = 0 },
+    //    ),
+    //}, .{ .r = 0, .g = 0, .b = 255, .a = 255 });
+
+    //const selected_index: usize = 0;
+
+    //const max_faces = 6*n*n + n*(4*n + 2*n*(n-1)) + (n-1)*n*n;
+    //const max_faces_per_thread = dim*(4*dim + 2*dim*(dim-1));
+    //const faces_thread = memory.mem.frame.alloc(primitive.VoxelTransform, memory.threadpool.threads.len*max_faces_per_thread) catch unreachable;
+
+    {
+        const c0 = .{ .r = 255, .g = 0, .b = 0, .a = 255 };
+        const c1 = .{ .r = 0, .g = 255, .b = 0, .a = 255 };
+        const p0: v4 = .{.w=1};
+        cmd.push(primitive.Cube{
+            .model = m4.modelWithRotations(.{.x=p0.x, .y=p0.y, .z=p0.z}, .{.x=25,.y=25,.z=25}, .{}),
+        }, c0);
+        var p1: v3 = .{};
+        p1.z += bl;
+        const t = @as(f32, @floatFromInt(memory.time % 1000000000)) / 1e9;
+        const qb0 = math.Quat.lerp(a0, b0, t);
+        p1 = math.Quat.rotate(qb0, p1);
+        //p1 = m4.mulv(b0, p1);
+        cmd.push(primitive.Cube{
+            .model = m4.modelWithRotations(p1, .{.x=25,.y=25,.z=25}, .{}),
+        }, c0);
+        var p2: v3 = .{};
+        p2.z += bl;
+        //p2 = m4.mulv(m4.mul(b1, b0), p2);
+        const qb1 = math.Quat.lerp(a1, b1, t);
+        const q2 = math.Quat.mul(qb1, qb0);
+        p2 = math.Quat.rotate(q2, p2);
+        p2 = v3.add(p2, p1);
+        cmd.push(primitive.Cube{
+            .model = m4.modelWithRotations(p2, .{.x=25,.y=25,.z=25}, .{}),
+        }, c1);
     }
 
-    b.push(primitive.Cube{
-        .model = m4.modelWithRotations(
-            .{
-                .x = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(selected_index)),
-                .y = tile_size * @as(f32, @floatFromInt(dim)) / 2.0,
-                .z = tile_size * @as(f32, @floatFromInt(dim)) / 2.0,
-            },
-            .{ .x = 0.05, .y = tile_size * dim, .z = tile_size * dim },
-            .{ .x = 0, .y = 0, .z = 0 },
-        ),
-    }, hsv_to_rgb(40.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+    var faces = VoxelFaceArray.init(memory.mem.frame, memory.threadpool.threads.len + 1);
+
+    {
+        var wg: std.Thread.WaitGroup = undefined;
+        wg.reset();
+
+        for (0..dim) |z| {
+            memory.threadpool.spawnWg(&wg, build_faces, .{ memory, &faces, 0, dim, 0, dim, z });
+        }
+
+        for (0..dim) |j| {
+            memory.threadpool.spawnWg(&wg, build_chunk_edges, .{ memory, &faces, 0, dim, j });
+        }
+
+        memory.threadpool.waitAndWork(&wg);
+
+        {
+            const block = memory.profile.begin("collect voxel faces", 0);
+            defer memory.profile.end(block);
+
+            cmd.push(primitive.VoxelChunk{
+                .dim = dim,
+                .voxels = faces.collect(memory.mem.frame),
+            }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+        }
+    }
 
     if (intersect.planeModelLine(math.m4.model(.{ .x = 0, .y = 0, .z = tile_size / 2.0 }, .{ .x = 1, .y = 1, .z = 1 }), .{ .x = 1000000.0, .y = 1000000.0 }, player.camera.pos, player.camera.dir)) |res| {
         if (res.pos.x > 0 and res.pos.y > 0 and res.pos.z > 0) {
@@ -1249,13 +1564,13 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             const k: usize = @intFromFloat(@trunc(res.pos.z / tile_size));
             if (i < dim and j < dim and k < dim) {
                 if (input.isset(.Interact)) {
-                    voxels[i][j][k] = ~voxels[i][j][k];
+                    voxels[k][j][i] = ~voxels[k][j][i];
                 }
                 var p: v3 = .{};
                 p.x = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(i));
                 p.y = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(j));
                 p.z = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(k));
-                b.push(primitive.CubeOutline{
+                cmd.push(primitive.CubeOutline{
                     .model = m4.modelWithRotations(
                         p,
                         .{ .x = tile_size, .y = tile_size, .z = tile_size },
@@ -1274,7 +1589,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
     //    while (i < grid_size) : (i += 1) {
     //        var j: usize = 0;
     //        while (j < grid_size) : (j += 1) {
-    //            b.push(primitive.Cube{
+    //            cmd.push(primitive.Cube{
     //                .model = m4.modelWithRotations(
     //                    .{
     //                        .x = tile_size * @as(f32, @floatFromInt(i)) - tile_size * @as(f32, @floatFromInt(grid_size)) / 2 + tile_size / 2.0,
@@ -1313,7 +1628,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         const p = v3.add(camera.pos, v3.scale(15.0, d));
         _ = p;
 
-        //b.push(primitive.Cube{
+        //cmd.push(primitive.Cube{
         //    .model = m4.modelWithRotations(
         //        p,
         //        .{ .x = 20, .y = 20, .z = 20 },
@@ -1322,17 +1637,16 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         //}, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
     }
 
-
     for (memory.entities.constSlice()) |e| {
         var plane = e.plane;
         plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x, .y = global_plane_size.y, .z = 1 });
-        b.push(plane, hsv_to_rgb(10, 0.6, 0.7));
+        cmd.push(plane, hsv_to_rgb(10, 0.6, 0.7));
         plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x - 10, .y = global_plane_size.y - 10, .z = 2 });
-        b.push(plane, hsv_to_rgb(10, 0.6, 0.5));
+        cmd.push(plane, hsv_to_rgb(10, 0.6, 0.5));
     }
 
     if (input.isset(.Editor) and memory.selected_entity != null) {
-        drawWidget(b, &memory.widget);
+        drawWidget(cmd, &memory.widget);
     }
 
     // Draw players
@@ -1359,7 +1673,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                 .z = p.yaw,
             };
             const model = m4.modelWithRotations(pos, scale, rot);
-            b.push(primitive.Cube{
+            cmd.push(primitive.Cube{
                 .model = model,
             }, playerRandomColor(p.id, rand));
         } else {
@@ -1381,29 +1695,19 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                 .z = p.yaw,
             };
             const model = m4.modelWithRotations(pos, scale, rot);
-            b.push(primitive.Cube{
+            cmd.push(primitive.Cube{
                 .model = model,
             }, playerRandomColor(p.id, rand));
         }
     }
 
-    b.push(primitive.Mesh{
-        .model = m4.modelWithRotations(.{ .x = 20, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
-            .x = 0,
-            .y = 0,
-            .z = @as(f32, @floatFromInt(memory.time)) / 1e9,
-        }),
-        .name = "res/models/weapons/granat",
-        .draw_children = true,
-    }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
-
-    b.push(primitive.Cube{
-        .model = m4.modelWithRotations(.{ .x = -20, .y = 500 * @sin(0.1 * @as(f32, @floatFromInt(memory.time)) / 1e9), .z = 40 }, .{ .x = 10, .y = 10, .z = 10 }, .{
-            .x = 0,
-            .y = 0,
-            .z = 0,
-        }),
-    }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
+    //cmd.push(primitive.Cube{
+    //    .model = m4.modelWithRotations(.{ .x = -20, .y = 500 * @sin(0.1 * @as(f32, @floatFromInt(memory.time)) / 1e9), .z = 40 }, .{ .x = 10, .y = 10, .z = 10 }, .{
+    //        .x = 0,
+    //        .y = 0,
+    //        .z = 0,
+    //    }),
+    //}, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
 
     for (memory.players.slice()) |p| {
         if (p.state == .dead)
@@ -1470,7 +1774,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                         const aim_dir = if (zoom_fire) p.camera.dir else p.aim_dir;
                         const model_sniper = m4.modelFromXDir(v3.add(p.camera.pos, offset), .{ .x = 1, .y = 1, .z = 1 }, aim_dir);
 
-                        b.push(primitive.Mesh{
+                        cmd.push(primitive.Mesh{
                             .model = model_sniper,
                             .name = "res/models/weapons/sniper",
                             .draw_children = true,
@@ -1483,7 +1787,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                     var offset: v3 = .{};
                     if (weapon.state == .zoom) {
                         const t = weapon.cooldown / weapon.total_zoom_cooldown;
-                        const end_offset = v3.add(v3.add(v3.scale(vars.pistol_handle_off_x + 8.0, forward), v3.scale(0.0, right)), v3.scale(vars.pistol_handle_off_z + 0.5, up));
+                        const end_offset = v3.add(v3.add(v3.scale(vars.pistol_handle_off_x + 12.0, forward), v3.scale(0.0, right)), v3.scale(vars.pistol_handle_off_z - 0.4, up));
                         offset = v3.lerp(start_offset, end_offset, t);
                         offset = v3.add(offset, v3.scale(1.0 - t, move_offset));
                     } else {
@@ -1494,7 +1798,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                     const aim_dir = if (zoom_fire) p.camera.dir else p.aim_dir;
                     const model_pistol = m4.modelFromXDir(v3.add(p.camera.pos, offset), .{ .x = 1, .y = 1, .z = 1 }, aim_dir);
 
-                    b.push(primitive.Mesh{
+                    cmd.push(primitive.Mesh{
                         .model = model_pistol,
                         .name = "res/models/weapons/pistol",
                         .draw_children = true,
@@ -1509,7 +1813,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
     for (memory.hitscans.constSlice()) |h| {
         var col = playerRandomColor(h.id_from, rand);
         col.a = @intFromFloat(255.0 * h.time_left / h.total_time);
-        b.push(primitive.Cube{
+        cmd.push(primitive.Cube{
             .model = m4.modelFromXDir(
                 v3.add(h.ray.pos, v3.scale(h.ray.len / 2 + 2, h.ray.dir)),
                 .{ .x = h.ray.len, .y = h.width, .z = h.width },
@@ -1518,9 +1822,9 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         }, col);
     }
 
-    b.push(primitive.End3d{}, .{});
+    cmd.push(primitive.End3d{}, .{});
 
-    b.push(primitive.Camera2d{
+    cmd.push(primitive.Camera2d{
         .target = memory.target,
         .zoom = memory.zoom,
     }, .{});
@@ -1533,14 +1837,61 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
     //            15, 0.75, 0.5);
     //    }
 
-    {
-        for (memory.windows.?.items, 0..) |win, i| {
-            _ = i;
-            if (win.parent != null)
-                continue;
-            //calculateWindowSizes(&windows, i);
-            //drawWindow(b, &memory.windows.?, i);
+    if (memory.state == .pause) {
+        if (pushWindow(memory, cmd, "wow", 0.5, 0.5)) {
+            pushText(memory, cmd, "haha");
+            pushText(memory, cmd, "abcarstratrastarst");
+            pushText(memory, cmd, "haha");
+            pushText(memory, cmd, "haha");
+            pushText(memory, cmd, "haha");
+            pushText(memory, cmd, "haha");
+            pushText(memory, cmd, "haha");
+            pushText(memory, cmd, "haha");
+            //const index = memory.current_window.?;
+            //memory.windows.?.items[index].children.append(.{
+            //    .text = .{
+            //        .str = memory.console_input.slice(),
+            //    },
+            //}) catch unreachable;
         }
+    }
+
+    if (memory.state == .pause) {
+        // update cursor position
+        memory.cursor_pos.x += input.cursor_delta.x;
+        memory.cursor_pos.y -= input.cursor_delta.y;
+        memory.cursor_pos.x = std.math.clamp(memory.cursor_pos.x, 0, 1);
+        memory.cursor_pos.y = std.math.clamp(memory.cursor_pos.y, 0, 1);
+
+        // check window collisions
+        for (memory.windows.items) |*win| {
+            if (memory.cursor_pos.x >= win.persistent.x and
+                memory.cursor_pos.y >= win.persistent.y + win.persistent.h - top_bar_height and
+                memory.cursor_pos.x <= win.persistent.x + win.persistent.w and
+                memory.cursor_pos.y <= win.persistent.y + win.persistent.h) {
+                win.hover = true;
+            } else {
+                win.hover = false;
+            }
+
+            if (input.isset(.Interact)) {
+                if (win.persistent.moving) {
+                    win.persistent.moving = false;
+                } else if (win.hover) {
+                    memory.window_moving_offset = v2.sub(.{ .x = win.persistent.x, .y = win.persistent.y }, memory.cursor_pos);
+                    win.persistent.moving = true;
+                }
+            }
+
+            if (win.persistent.moving) {
+                win.persistent.x = memory.cursor_pos.x + memory.window_moving_offset.x;
+                win.persistent.y = memory.cursor_pos.y + memory.window_moving_offset.y;
+            }
+        }
+
+        //for (memory.windows.?.items) |*win| {
+        //    if (win.moving) {}
+        //}
     }
 
     if (input.isset(.Console)) {
@@ -1549,14 +1900,14 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         //        raylib.EnableCursor();
         //    }
         const console_height = 1.0 / 3.0;
-        b.push(primitive.Rectangle{ .pos = .{
+        cmd.push(primitive.Rectangle{ .pos = .{
             .x = 0,
             .y = 1 - (console_height - fontsize),
         }, .size = .{
             .x = 1,
             .y = console_height,
         } }, hsv_to_rgb(200, 0.5, 0.25));
-        b.push(primitive.Rectangle{ .pos = .{
+        cmd.push(primitive.Rectangle{ .pos = .{
             .x = 0,
             .y = 1 - console_height,
         }, .size = .{
@@ -1579,7 +1930,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             @memset(&text.str, 0);
             const dst: []u8 = &text.str;
             @memcpy(dst[0..memory.console_input.slice().len], memory.console_input.slice());
-            b.push(text, hsv_to_rgb(200, 0.75, 0.75));
+            cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
         }
     }
 
@@ -1600,13 +1951,13 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
 
         @memset(&text.str, 0);
         {
-            //if (memory.stat_data.findId("frame")) |id| {
-            //    const result = memory.stat_data.entries.buffer[id].mean_std();
-            //    const str = std.fmt.bufPrint(&text.str, "fps: {d:5.0}", .{1000000000 / result.avg}) catch unreachable;
-            //    text.len = str.len;
-            //    text.pos.x = 0.0;
-            //    b.push(text, hsv_to_rgb(200, 0.75, 0.75));
-            //}
+            const elapsed: f32 = @floatFromInt(memory.profile.block_last_frame.elapsed_tsc);
+            const freq: f32 = @floatFromInt(memory.profile.timer_freq);
+            const last_frametime = freq / elapsed;
+            const str = std.fmt.bufPrint(&text.str, "fps: {d:5.0}", .{last_frametime}) catch unreachable;
+            text.len = str.len;
+            text.pos.x = 0.0;
+            cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
         }
 
         @memset(&text.str, 0);
@@ -1614,7 +1965,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             const str = std.fmt.bufPrint(&text.str, "speed: {d:5.0}", .{v3.len(memory.players.get(0).vel)}) catch unreachable;
             text.len = str.len;
             text.pos.x = 1.0 - 0.3;
-            b.push(text, hsv_to_rgb(200, 0.75, 0.75));
+            cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
         }
 
         // ammo
@@ -1625,7 +1976,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
             text.len = str.len;
             text.pos.x = 1.0 - 3 * size + size + size / 4.0;
             text.pos.y = 0.05;
-            b.push(text, hsv_to_rgb(200, 0.75, 0.75));
+            cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
         }
 
         // killfeed
@@ -1636,7 +1987,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                 const entry = &memory.killfeed.data[index];
 
                 const size = 0.05;
-                b.push(primitive.Rectangle{
+                cmd.push(primitive.Rectangle{
                     .pos = .{
                         .x = 1.0 - 3 * size,
                         .y = 1.0 - (size + 1.5 * size * @as(f32, @floatFromInt(i))),
@@ -1644,7 +1995,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                     .size = .{ .x = size, .y = size },
                 }, playerColor(entry.from));
 
-                b.push(primitive.Rectangle{
+                cmd.push(primitive.Rectangle{
                     .pos = .{
                         .x = 1.0 - 3 * size + 2 * size,
                         .y = 1.0 - (size + 1.5 * size * @as(f32, @floatFromInt(i))),
@@ -1658,16 +2009,16 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                     text.len = str.len;
                     text.pos.x = 1.0 - 3 * size + size + size / 4.0;
                     text.pos.y = 1.0 - (size - size / 4.0 + 1.5 * size * @as(f32, @floatFromInt(i)));
-                    b.push(text, hsv_to_rgb(200, 0.75, 0.75));
+                    cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
                 }
             }
         }
     }
 
-    if (input.isset(.InMenu)) {
+    if (memory.state == .pause) {
         // cursor
         const cursor_size = 0.01;
-        b.push(primitive.Rectangle{
+        cmd.push(primitive.Rectangle{
             .pos = .{
                 .x = memory.cursor_pos.x - cursor_size / 2.0,
                 .y = memory.cursor_pos.y - cursor_size / 2.0,
@@ -1682,14 +2033,14 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         const zoom_fire = weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
 
         // Crosshair
-        if (input.isset(.Editor)) {
+        if (memory.state == .pause) {
             const cursor_thickness = 0.004;
             const color = hsv_to_rgb(
                 (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
                 0.3,
                 0.9,
             );
-            b.push(primitive.Rectangle{
+            cmd.push(primitive.Rectangle{
                 .pos = .{
                     .x = 0.5 - cursor_thickness / 2.0,
                     .y = 0.5 - cursor_thickness / 2.0,
@@ -1700,66 +2051,62 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                 },
             }, color);
         } else if (!zoom_fire) {
-            const cursor_thickness = 0.004;
-            const cursor_length = 0.01;
-            const cursor_gap = 0.03;
-            const color = hsv_to_rgb(
-                (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
-                0.3,
-                0.9,
-            );
-            b.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.5 - cursor_gap / 2.0 - cursor_length,
-                    .y = 0.5 - cursor_thickness / 2.0,
-                },
-                .size = .{
-                    .x = cursor_length,
-                    .y = cursor_thickness,
-                },
-            }, color);
-            b.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.5 + cursor_gap / 2.0,
-                    .y = 0.5 - cursor_thickness / 2.0,
-                },
-                .size = .{
-                    .x = cursor_length,
-                    .y = cursor_thickness,
-                },
-            }, color);
-            b.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.5 - cursor_thickness / 2.0,
-                    .y = 0.5 + cursor_gap / 2.0,
-                },
-                .size = .{
-                    .x = cursor_thickness,
-                    .y = cursor_length,
-                },
-            }, color);
-            b.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.5 - cursor_thickness / 2.0,
-                    .y = 0.5 - cursor_gap / 2.0 - cursor_length,
-                },
-                .size = .{
-                    .x = cursor_thickness,
-                    .y = cursor_length,
-                },
-            }, color);
+            //const cursor_thickness = 0.004;
+            //const cursor_length = 0.01;
+            //const cursor_gap = 0.03;
+            //const color = hsv_to_rgb(
+            //    (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
+            //    0.3,
+            //    0.9,
+            //);
+            //cmd.push(primitive.Rectangle{
+            //    .pos = .{
+            //        .x = 0.5 - cursor_gap / 2.0 - cursor_length,
+            //        .y = 0.5 - cursor_thickness / 2.0,
+            //    },
+            //    .size = .{
+            //        .x = cursor_length,
+            //        .y = cursor_thickness,
+            //    },
+            //}, color);
+            //cmd.push(primitive.Rectangle{
+            //    .pos = .{
+            //        .x = 0.5 + cursor_gap / 2.0,
+            //        .y = 0.5 - cursor_thickness / 2.0,
+            //    },
+            //    .size = .{
+            //        .x = cursor_length,
+            //        .y = cursor_thickness,
+            //    },
+            //}, color);
+            //cmd.push(primitive.Rectangle{
+            //    .pos = .{
+            //        .x = 0.5 - cursor_thickness / 2.0,
+            //        .y = 0.5 + cursor_gap / 2.0,
+            //    },
+            //    .size = .{
+            //        .x = cursor_thickness,
+            //        .y = cursor_length,
+            //    },
+            //}, color);
+            //cmd.push(primitive.Rectangle{
+            //    .pos = .{
+            //        .x = 0.5 - cursor_thickness / 2.0,
+            //        .y = 0.5 - cursor_gap / 2.0 - cursor_length,
+            //    },
+            //    .size = .{
+            //        .x = cursor_thickness,
+            //        .y = cursor_length,
+            //    },
+            //}, color);
         } else if (zoom_fire) {
             // Sniper crosshair
             const cursor_thickness = 0.0025;
             const gap = 0.75;
 
-            const color = hsv_to_rgb(
-                (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
-                0.8,
-                0.2,
-            );
+            const color = Color{.r=0,.g=0,.b=0,.a=255};
 
-            b.push(primitive.Rectangle{
+            cmd.push(primitive.Rectangle{
                 .pos = .{
                     .x = 0.0,
                     .y = 0.5 - cursor_thickness / 2.0,
@@ -1769,7 +2116,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                     .y = cursor_thickness,
                 },
             }, color);
-            b.push(primitive.Rectangle{
+            cmd.push(primitive.Rectangle{
                 .pos = .{
                     .x = 0.5 - cursor_thickness / 2.0,
                     .y = 0.0,
@@ -1780,7 +2127,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                 },
             }, color);
 
-            b.push(primitive.Rectangle{
+            cmd.push(primitive.Rectangle{
                 .pos = .{
                     .x = 0.0,
                     .y = 0.5 + gap / 2.0,
@@ -1790,7 +2137,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                     .y = 0.5 - gap / 2.0,
                 },
             }, color);
-            b.push(primitive.Rectangle{
+            cmd.push(primitive.Rectangle{
                 .pos = .{
                     .x = 0.0,
                     .y = 0.0,
@@ -1801,7 +2148,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                 },
             }, color);
 
-            b.push(primitive.Rectangle{
+            cmd.push(primitive.Rectangle{
                 .pos = .{
                     .x = 0.5 + gap / 2.0,
                     .y = 0.0,
@@ -1811,7 +2158,7 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
                     .y = 1.0,
                 },
             }, color);
-            b.push(primitive.Rectangle{
+            cmd.push(primitive.Rectangle{
                 .pos = .{
                     .x = 0.0,
                     .y = 0.0,
@@ -1824,9 +2171,11 @@ export fn draw(vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, p
         }
     }
 
-    ui_profile.draw(memory, b, input);
+    if (input.isset(.DebugShowData)) {
+        ui_profile.draw(memory, cmd, input);
+    }
 
-    b.push(primitive.End2d{}, .{});
+    cmd.push(primitive.End2d{}, .{});
 }
 
 fn playerColor(id: common.EntityId) Color {
@@ -1841,24 +2190,24 @@ fn playerRandomColor(id: common.EntityId, rand: std.rand.Random) Color {
     return hsv_to_rgb((360.0 / 8.0) * @as(f32, @floatFromInt(id % 8)) + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0));
 }
 
-fn drawCenteredLine(b: *draw_api.Buffer, start: v2, end: v2, thickness: f32, color: Color) void {
+fn drawCenteredLine(cmd: *draw_api.Buffer, start: v2, end: v2, thickness: f32, color: Color) void {
     const dir = v2.normalize(v2.sub(end, start));
     const ortho = v2{ .x = -dir.y, .y = dir.x };
 
     const new_start = v2.add(start, v2.scale(thickness / 2.0, ortho));
     const new_end = v2.add(end, v2.scale(thickness / 2.0, ortho));
 
-    b.push(b, primitive.Line{
+    cmd.push(cmd, primitive.Line{
         .start = new_start,
         .end = new_end,
         .thickness = thickness,
     }, color);
 }
 
-fn drawGraph(b: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f32, s: f32, v: f32) void {
+fn drawGraph(cmd: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f32, s: f32, v: f32) void {
     var bg = hsv_to_rgb(50.0, 0.75, 0.05);
     bg.a = @intFromFloat(0.75 * 255.0);
-    b.push(b, primitive.Rectangle{
+    cmd.push(cmd, primitive.Rectangle{
         .pos = pos,
         .size = size,
     }, bg);
@@ -1886,7 +2235,7 @@ fn drawGraph(b: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f
 
         const color = hsv_to_rgb(h, s, v - 0.4 * @as(f32, @floatFromInt(dist)) / @as(f32, @floatFromInt(g.data.len)));
         if (i > 0) {
-            drawCenteredLine(b, v2{ .x = last_x, .y = last_y }, v2{ .x = x, .y = y }, 2.0, color);
+            drawCenteredLine(cmd, v2{ .x = last_x, .y = last_y }, v2{ .x = x, .y = y }, 2.0, color);
         }
 
         //push(b, primitive.Cirlce {
@@ -1898,7 +2247,7 @@ fn drawGraph(b: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f
         last_y = y;
     }
 
-    b.push(primitive.Line{
+    cmd.push(primitive.Line{
         .start = .{
             .x = pos.x + margin.x + scale_x * @as(f32, @floatFromInt(g.top)),
             .y = pos.y,
@@ -1911,54 +2260,108 @@ fn drawGraph(b: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f
     }, Color{ .r = 128, .g = 128, .b = 128, .a = 255 });
 }
 
-fn drawProfileData(memory: *Memory, b: *draw_api.CommandBuffer) void {
-    var worklist: std.BoundedArray(struct {
-        entry: *stat.StatEntry = undefined,
-        depth: u32 = 0,
-    }, 64) = .{};
+fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
+    return struct {
+        const Self = @This();
+        const Block = struct {
+            allocator: std.mem.Allocator = undefined,
+            next: ?*Block = null,
+            head: **Block = undefined,
+            used: usize = 0,
+            memory: [blocksize]T = undefined,
+        };
 
-    // Add root nodes to worklist
-    for (memory.stat_data.entries.slice()) |*s| {
-        if (!s.is_root)
-            continue;
-        worklist.appendAssumeCapacity(.{ .entry = s });
-    }
+        roots: []*Block = undefined,
+        heads: []*Block = undefined,
+        thread_indices: []usize = undefined,
+        used_thread_indices: std.atomic.Value(u8) = undefined,
 
-    const y: f32 = 1.0 - fontsize;
+        fn push(self: **Block, t: T) void {
+            if (self.*.used == self.*.memory.len) {
+                std.debug.assert(self.*.next == null);
+                const block = self.*.allocator.alloc(Block, 1) catch unreachable;
+                self.*.next = @ptrCast(block.ptr);
+                self.*.head.* = self.*.next.?;
+                self.*.next.?.* = Block{
+                    .allocator = self.*.allocator,
+                    .head = self.*.head,
+                };
+                self.* = self.*.next.?;
+            }
 
-    var text = primitive.Text{
-        .pos = .{
-            .x = 0,
-            .y = y,
-        },
-        .str = undefined,
-        .len = 0,
-        .size = fontsize,
-        .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
-        .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
-    };
-
-    while (worklist.len > 0) {
-        const work = worklist.pop();
-
-        const result = work.entry.mean_std();
-        @memset(&text.str, 0);
-        const str = std.fmt.bufPrint(&text.str, "{s}: {:4} us", .{
-            work.entry.name,
-            result.avg / 1000,
-        }) catch unreachable;
-
-        text.len = str.len;
-        text.pos.x = fontsize * @as(f32, @floatFromInt(work.depth));
-        b.push(text, hsv_to_rgb(200, 0.75, 0.75));
-        text.pos.y -= fontsize;
-
-        for (work.entry.children.slice()) |i| {
-            const entry = &memory.stat_data.entries.slice()[i];
-            worklist.appendAssumeCapacity(.{
-                .entry = entry,
-                .depth = work.depth + 1,
-            });
+            self.*.memory[self.*.used] = t;
+            self.*.used += 1;
         }
-    }
+
+        fn init(allocator: std.mem.Allocator, num_cpus: usize) Self {
+            var self = Self{
+                .used_thread_indices = std.atomic.Value(u8).init(0),
+            };
+
+            self.roots = allocator.alloc(*Block, num_cpus) catch unreachable;
+            self.heads = allocator.alloc(*Block, num_cpus) catch unreachable;
+            self.thread_indices = allocator.alloc(usize, num_cpus) catch unreachable;
+
+            for (0..num_cpus) |i| {
+                const block = allocator.alloc(Block, 1) catch unreachable;
+                self.roots[i] = @ptrCast(block.ptr);
+                self.roots[i].* = Block{
+                    .allocator = allocator,
+                    .head = &self.heads[i],
+                };
+                self.heads[i] = self.roots[i];
+            }
+
+            return self;
+        }
+
+        fn get_thread_index(self: *Self) usize {
+            const id = std.Thread.getCurrentId();
+            for (self.thread_indices[0..self.used_thread_indices.load(.monotonic)], 0..) |_id, i| {
+                if (id == _id) {
+                    return i;
+                }
+            }
+
+            const i = self.used_thread_indices.fetchAdd(1, .monotonic);
+            self.thread_indices[i] = id;
+            return i;
+        }
+
+        fn head(self: *Self) *Block {
+            const index = self.get_thread_index();
+            return self.heads[index];
+        }
+
+        fn collect(self: *Self, allocator: std.mem.Allocator) []T {
+            var len: usize = 0;
+            for (self.roots) |r| {
+                var b: ?*Block = r;
+                while (true) {
+                    len += b.?.used;
+                    b = b.?.next;
+                    if (b == null) {
+                        break;
+                    }
+                }
+            }
+
+            const memory = allocator.alloc(T, len) catch unreachable;
+            var index: usize = 0;
+            for (self.roots) |r| {
+                var b: ?*Block = r;
+                while (true) {
+                    @memcpy(memory[index..(index + b.?.used)], b.?.memory[0..b.?.used]);
+                    index += b.?.used;
+
+                    b = b.?.next;
+                    if (b == null) {
+                        break;
+                    }
+                }
+            }
+
+            return memory;
+        }
+    };
 }

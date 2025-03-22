@@ -1,5 +1,6 @@
 const std = @import("std");
-const config = @import("config.zig");
+const common = @import("common");
+const config = common.config;
 const Vars = config.Vars;
 const commands = @import("command_client.zig");
 

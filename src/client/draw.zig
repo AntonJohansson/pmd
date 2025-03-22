@@ -12,6 +12,7 @@ const v2 = math.v2;
 const v3 = math.v3;
 const v4 = math.v4;
 const m4 = math.m4;
+const m3 = math.m3;
 
 const sokol = @import("sokol");
 const sg = sokol.gfx;
@@ -19,6 +20,8 @@ const slog = sokol.log;
 
 const res = common.res;
 const goosepack = common.goosepack;
+
+var log: common.log.GroupLog(.draw) = undefined;
 
 pub const Pipeline = enum {
     depth,
@@ -38,179 +41,223 @@ pub const Pipeline = enum {
 //    return bindings.len;
 //}
 
-const Offscreen3d = struct {
-    pass: sg.Pass = .{},
-    pip: sg.Pipeline = .{},
-    bind: sg.Bindings = .{},
-    color: sg.Image = undefined,
-    depth: sg.Image = undefined,
-};
-
-const Offscreen2d = struct {
-    pass: sg.Pass = .{},
-    pip: sg.Pipeline = .{},
-    bind: sg.Bindings = .{},
-    color: sg.Image = undefined,
-};
-
-const OffscreenCubemap = struct {
-    pass: sg.Pass = .{},
-    pip: sg.Pipeline = .{},
-    bind: sg.Bindings = .{},
-};
-
-const Display = struct {
-    pass: sg.Pass = .{},
-    pip: sg.Pipeline = .{},
-    bind: sg.Bindings = .{},
-};
-
-const Postprocess = struct {
-    pass: sg.Pass = .{},
-    pip: sg.Pipeline = .{},
-    bind: sg.Bindings = .{},
-};
-
-const TextPipeline = struct {
-    pass: sg.Pass = .{},
-    pip: sg.Pipeline = .{},
-    bind: sg.Bindings = .{},
-    atlas: sg.Image = undefined,
-    chars: []res.FontChar = undefined,
-};
-
-var text_pipeline: TextPipeline = .{};
-var postprocess: Postprocess = .{};
-var display: Display = .{};
-var offscreen_3d: Offscreen3d = .{};
-var offscreen_2d: Offscreen2d = .{};
-var offscreen_cubemap: OffscreenCubemap = .{};
-
-var pip_mesh = sg.Pipeline{};
-var pip_mesh_line = sg.Pipeline{};
-var pip_triangle_strip = sg.Pipeline{};
-
 var circle_bind = sg.Bindings{};
 var rectangle_bind = sg.Bindings{};
 var cube_bind = sg.Bindings{};
 
 var pipelines: std.BoundedArray(sg.Pipeline, 16) = .{};
-var shd_3d: sg.Shader = undefined;
-
-const BindInfo = struct {
-    base: *const u8,
-    prim_index: u32,
-    mesh_index: u32,
-    bind: sg.Bindings,
-};
-
 var binds: std.BoundedArray(BindInfo, 64) = .{};
 
-fn sliceFromBufferView(model: res.Model, view: res.BufferView) []const u8 {
-    const base: [*]const u8 = @ptrCast(model.binary_data.ptr);
-    return (base + view.offset)[0..view.size];
-}
+const MeshBindings = struct {
+    bind: sg.Bindings = undefined,
+    pip: sg.Pipeline = undefined,
+    image: sg.Image = undefined,
+    sampler: sg.Sampler = undefined,
+    buffer_types: u8 = 0,
+    has_image: bool = false,
+};
 
-fn buildBindForMesh(model: res.Model, mesh_index: u32, prim_index: u32) sg.Bindings {
+const BindInfo = struct {
+    id: u64,
+    prim_index: u32,
+    mesh_index: u32,
+    mesh_binds: MeshBindings,
+};
+
+fn buildBindForMesh(model: res.Model, material: res.Material, mesh_index: u32, prim_index: u32) MeshBindings {
     const mesh = model.meshes[mesh_index];
     const prim = mesh.primitives[prim_index];
     var bind: sg.Bindings = .{};
     if ((prim.buffer_types & res.bt_position) != 0) {
-        const buf = sliceFromBufferView(model, prim.pos);
         bind.vertex_buffers[0] = sg.makeBuffer(.{
-            .data = sg.asRange(buf),
+            .data = sg.asRange(prim.pos.?),
         });
     }
     if ((prim.buffer_types & res.bt_normals) != 0) {
-        const buf = sliceFromBufferView(model, prim.normals);
         bind.vertex_buffers[1] = sg.makeBuffer(.{
-            .data = sg.asRange(buf),
+            .data = sg.asRange(prim.normals.?),
+        });
+    }
+    if (material.has_image and (prim.buffer_types & res.bt_texcoords) != 0) {
+        bind.vertex_buffers[2] = sg.makeBuffer(.{
+            .data = sg.asRange(prim.texcoords.?),
         });
     }
     if ((prim.buffer_types & res.bt_indices) != 0) {
-        const buf = sliceFromBufferView(model, prim.indices);
         bind.index_buffer = sg.makeBuffer(.{
             .type = .INDEXBUFFER,
-            .data = sg.asRange(buf),
+            .data = sg.asRange(prim.indices.?),
         });
     }
-    return bind;
+
+    var pip: sg.Pipeline = undefined;
+    if (material.has_image and (prim.buffer_types & res.bt_texcoords) != 0) {
+        pip = pipeline_texture;
+    } else {
+        pip = pipeline_3d;
+    }
+
+    var image: sg.Image = undefined;
+    var smp: sg.Sampler = undefined;
+    if ((prim.buffer_types & res.bt_texcoords) != 0) {
+        if (material.has_image) {
+            const format: sg.PixelFormat = switch (material.image.channels) {
+                4 => .RGBA8,
+                else => unreachable,
+            };
+            var desc = sg.ImageDesc{
+                .width = @intCast(material.image.width),
+                .height = @intCast(material.image.height),
+                .pixel_format = format,
+                .sample_count = 1,
+            };
+            std.log.info("{} {} {}", .{material.image.width, material.image.height, material.image.channels});
+            desc.data.subimage[0][0] = sg.asRange(material.image.pixels);
+            image = sg.makeImage(desc);
+
+            smp = sg.makeSampler(.{
+                .min_filter = .NEAREST,
+                .mag_filter = .NEAREST,
+                .wrap_u = .CLAMP_TO_BORDER,
+                .wrap_v = .CLAMP_TO_BORDER,
+            });
+        }
+    }
+
+    return .{
+        .bind = bind,
+        .pip = pip,
+        .image = image,
+        .sampler = smp,
+        .buffer_types = prim.buffer_types,
+        .has_image = material.has_image,
+    };
 }
 
-fn bindForMesh(model: res.Model, mesh_index: u32, prim_index: u32) sg.Bindings {
+fn bindForMesh(model: res.Model, material: res.Material, mesh_index: u32, prim_index: u32) MeshBindings {
     for (binds.buffer) |info| {
-        if (info.base == @as(*const u8, @ptrCast(model.binary_data.ptr)) and info.mesh_index == mesh_index and info.prim_index == prim_index)
-            return info.bind;
+        if (info.id == model.id and info.mesh_index == mesh_index and info.prim_index == prim_index)
+            return info.mesh_binds;
     }
-    const bind = buildBindForMesh(model, mesh_index, prim_index);
-    binds.appendAssumeCapacity(.{ .base = @ptrCast(model.binary_data.ptr), .mesh_index = mesh_index, .prim_index = prim_index, .bind = bind });
-    return bind;
+    const mesh_binds = buildBindForMesh(model, material, mesh_index, prim_index);
+    binds.appendAssumeCapacity(.{ .id = model.id, .mesh_index = mesh_index, .prim_index = prim_index, .mesh_binds = mesh_binds});
+    return mesh_binds;
 }
 
 // TODO: ?
-fn buildPipelineForModel(model: res.Model) *sg.Pipeline {
-    _ = model;
-    var attachments_desc = sg.AttachmentsDesc{};
-    attachments_desc.colors[0].image = offscreen_3d.color;
-    attachments_desc.depth_stencil.image = offscreen_3d.depth;
-    offscreen_3d.pass.attachments = sg.makeAttachments(attachments_desc);
-    //offscreen_3d.pass.swapchain.width =
-    //offscreen_3d.pass.swapchain.height =
+//fn buildPipelineForModel(model: res.Model) *sg.Pipeline {
+//    _ = model;
+//    var attachments_desc = sg.AttachmentsDesc{};
+//    attachments_desc.colors[0].image = offscreen_3d.color;
+//    attachments_desc.depth_stencil.image = offscreen_3d.depth;
+//    offscreen_3d.pass.attachments = sg.makeAttachments(attachments_desc);
+//    //offscreen_3d.pass.swapchain.width =
+//    //offscreen_3d.pass.swapchain.height =
+//
+//    var desc = sg.PipelineDesc{
+//        .index_type = .UINT16,
+//        .shader = shd_3d,
+//        .primitive_type = .TRIANGLE,
+//        .cull_mode = .FRONT,
+//        .sample_count = 1,
+//        .depth = .{
+//            .pixel_format = .DEPTH,
+//            .compare = .LESS_EQUAL,
+//            .write_enabled = true,
+//        },
+//    };
+//    desc.colors[0] = .{
+//        .blend = .{
+//            .enabled = true,
+//            .src_factor_rgb = .SRC_ALPHA,
+//            .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+//        },
+//        .pixel_format = .RGBA8,
+//    };
+//    desc.layout.attrs[0].format = .FLOAT3;
+//
+//    const pip = pipelines.addOneAssumeCapacity();
+//    pip.* = sg.makePipeline(desc);
+//    return pip;
+//}
 
-    var desc = sg.PipelineDesc{
-        .index_type = .UINT16,
-        .shader = shd_3d,
-        .primitive_type = .TRIANGLE,
-        .cull_mode = .FRONT,
-        .sample_count = 1,
-        .depth = .{
-            .pixel_format = .DEPTH,
-            .compare = .LESS_EQUAL,
-            .write_enabled = true,
-        },
-    };
-    desc.colors[0] = .{
-        .blend = .{
-            .enabled = true,
-            .src_factor_rgb = .SRC_ALPHA,
-            .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
-        },
-        .pixel_format = .RGBA8,
-    };
-    desc.layout.attrs[0].format = .FLOAT3;
-
-    const pip = pipelines.addOneAssumeCapacity();
-    pip.* = sg.makePipeline(desc);
-    return pip;
-}
-
-const Uniforms3d = struct {
+const UniformsVertex3d = struct {
     mvp: m4,
     model: m4,
+};
+
+const UniformsFragment3d = struct {
     color: v4,
     light_pos: v3 = .{},
     light_color: v3 = .{},
     camera_pos: v3 = .{},
 };
 
-const Uniforms2d = struct {
+const UniformsVertex2d = struct {
     mvp: m4,
+};
+
+const UniformsFragment2d = struct {
     color: v4,
 };
 
-const AtlasUniform = struct {
-    off: v2,
-    scale: v2,
+
+const UniformsVertexVoxelChunk = struct {
+    vp: m4 = undefined,
+    chunk_pos: v3 = .{},
+    rotations: [6]m4 = undefined,
+    voxel_size: f32 = voxel_width,
+};
+
+const UniformsFragmentVoxelChunk = struct {
+    color: v4 = .{},
+    light_pos: v3 = .{},
+    light_color: v3 = .{},
+    camera_pos: v3 = .{},
+};
+
+const UniformsVertexAtlas = struct {
     vs_off: v2,
     vs_scale: v2,
+};
+
+const UniformsFragmentAtlas = struct {
+    off: v2,
+    scale: v2,
     fg: v4,
     bg: v4,
 };
 
-const TextUniform = struct {
-    off: v2,
-    scale: v2,
-};
+fn uniform_type(T: anytype) sg.UniformType {
+    return switch (T) {
+        f32 => .FLOAT,
+        v2 => .FLOAT2,
+        v3 => .FLOAT3,
+        v4 => .FLOAT4,
+        m4 => .MAT4,
+        else => unreachable,
+    };
+}
+
+fn specify_uniforms(desc: *sg.ShaderUniformBlock, uniform: anytype, stage: sg.ShaderStage) void {
+    desc.size = @sizeOf(uniform);
+    desc.stage = stage;
+    const ti = @typeInfo(uniform);
+    inline for (ti.Struct.fields, 0..) |field, i| {
+        comptime var base_type = field.type;
+        var array_count: u32 = 0;
+        const field_ti = @typeInfo(base_type);
+        if (field_ti == .Array) {
+            base_type = field_ti.Array.child;
+            array_count = field_ti.Array.len;
+        }
+        desc.glsl_uniforms[i] = .{
+            .glsl_name = field.name,
+            .type = uniform_type(base_type),
+            .array_count = @intCast(array_count),
+        };
+    }
+}
 
 const circle_vertices = blk: {
     const inner_radius = 9;
@@ -244,6 +291,36 @@ const textured_rectangle_vertices = [_]f32{
     -1.0, -1.0, 0.0, 1.0, // bottom left
 };
 const textured_rectangle_indices = [_]u16{ 0, 1, 2, 0, 2, 3 };
+
+// TODO: https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques
+
+const voxel_width = 32.0;
+const half_voxel_width = 0.5*voxel_width;
+const voxel_face_vertices = [_]f32{
+    half_voxel_width, -half_voxel_width, half_voxel_width, //   0   x front top left
+    half_voxel_width, half_voxel_width, half_voxel_width, //    3   x front top right
+    -half_voxel_width, -half_voxel_width, half_voxel_width, //  12 -x back top left
+    -half_voxel_width, half_voxel_width, half_voxel_width, //   15 -x back top right
+};
+
+const voxel_face_normals = [_]f32{
+    0,  0,  1,
+    0,  0,  1,
+    0,  0,  1,
+    0,  0,  1,
+};
+
+const voxel_face_texcoords = [_]f32{
+    0,0,
+    1,0,
+    0,1,
+    1,1,
+};
+
+const voxel_face_indices = [_]u16{
+    0, 1, 3,
+    0, 3, 2,
+};
 
 const cube_vertices = [_]f32{
     0.5, -0.5, 0.5, //   0   x front top left
@@ -304,6 +381,7 @@ const cube_normals = [_]f32{
     0,  -1, 0,
     0,  0,  -1,
 };
+
 const cube_indices = [_]u16{
     0, 6, 3, 0, 9, 6, // front face
     15, 21, 12, 15, 18, 21, // back face
@@ -319,9 +397,656 @@ var bind_cube_model = sg.Bindings{};
 var pack: *goosepack.Pack = undefined;
 var mem: common.MemoryAllocators = undefined;
 var font: res.Font = undefined;
+var uniforms_voxel: UniformsVertexVoxelChunk = .{};
 
-pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
+var bindings_initialized = false;
+var sampler_linear_clamped: sg.Sampler = undefined;
+var sampler_nearest_clamped: sg.Sampler = undefined;
+var binding_textured_rectangle: sg.Bindings = undefined;
+var binding_cubemap: sg.Bindings = undefined;
+
+fn deinit_bindings() void {
+    sg.destroySampler(sampler_linear_clamped);
+    sg.destroySampler(sampler_nearest_clamped);
+    sg.destroyBuffer(binding_textured_rectangle.vertex_buffers[0]);
+    sg.destroyBuffer(binding_textured_rectangle.index_buffer);
+    sg.destroyBuffer(binding_cubemap.vertex_buffers[0]);
+    sg.destroyBuffer(binding_cubemap.index_buffer);
+}
+
+fn rebuild_bindings() void {
+    if (bindings_initialized) {
+        deinit_bindings();
+    } else {
+        bindings_initialized = true;
+    }
+
+    sampler_linear_clamped = sg.makeSampler(.{
+        .min_filter = .LINEAR,
+        .mag_filter = .LINEAR,
+        .wrap_u = .CLAMP_TO_BORDER,
+        .wrap_v = .CLAMP_TO_BORDER,
+    });
+
+    sampler_nearest_clamped = sg.makeSampler(.{
+        .min_filter = .NEAREST,
+        .mag_filter = .NEAREST,
+        .wrap_u = .CLAMP_TO_BORDER,
+        .wrap_v = .CLAMP_TO_BORDER,
+    });
+
+    // textured rectangle
+    binding_textured_rectangle.vertex_buffers[0] = sg.makeBuffer(.{
+        .data = sg.asRange(&textured_rectangle_vertices),
+    });
+    binding_textured_rectangle.index_buffer = sg.makeBuffer(.{
+        .type = .INDEXBUFFER,
+        .data = sg.asRange(&textured_rectangle_indices),
+    });
+    binding_textured_rectangle.samplers[0] = sampler_linear_clamped;
+
+    // cubemap
+    binding_cubemap.vertex_buffers[0] = sg.makeBuffer(.{
+        .data = sg.asRange(&cube_vertices),
+    });
+    binding_cubemap.index_buffer = sg.makeBuffer(.{
+        .type = .INDEXBUFFER,
+        .data = sg.asRange(&cube_indices),
+    });
+    binding_cubemap.samplers[0] = sampler_linear_clamped;
+}
+
+// Shaders
+var shaders_initialized = false;
+var shd_2d: sg.Shader = undefined;
+var shd_pp: sg.Shader = undefined;
+var shd_text: sg.Shader = undefined;
+var shd_display: sg.Shader = undefined;
+var shd_cm: sg.Shader = undefined;
+var shd_3d: sg.Shader = undefined;
+var shd_voxelchunk: sg.Shader = undefined;
+var shd_texture: sg.Shader = undefined;
+
+fn make_shader_and_write_if_valid(shd: *sg.Shader, desc: sg.ShaderDesc) void {
+    const tmp = sg.makeShader(desc);
+    const state = sg.queryShaderState(tmp);
+    const valid = state != .FAILED and state != .INVALID;
+    if (valid) {
+        if (shaders_initialized) {
+            sg.destroyShader(shd.*);
+        }
+        shd.* = tmp;
+    }
+}
+
+fn deinit_shaders() void {
+    sg.destroyShader(shd_2d);
+    sg.destroyShader(shd_pp);
+    sg.destroyShader(shd_text);
+    sg.destroyShader(shd_display);
+    sg.destroyShader(shd_cm);
+    sg.destroyShader(shd_3d);
+    sg.destroyShader(shd_voxelchunk);
+    sg.destroyShader(shd_texture);
+}
+
+fn rebuild_shaders() void {
+    if (shaders_initialized) {
+        // We instead deinit if makeShader succeeds
+        //deinit_shaders();
+    } else {
+        shaders_initialized = true;
+    }
+
+    // 2d shader
+    {
+        var shd_desc = sg.ShaderDesc{};
+        const res_shader = goosepack.resource_lookup(pack, "res/2d-p").?.shader;
+        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
+        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertex2d, .VERTEX);
+        specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragment2d, .FRAGMENT);
+        make_shader_and_write_if_valid(&shd_2d, shd_desc);
+    }
+
+    // 3d shader
+    {
+        var shd_desc = sg.ShaderDesc{};
+        const res_shader = goosepack.resource_lookup(pack, "res/3d-pn").?.shader;
+        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
+        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertex3d, .VERTEX);
+        specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragment3d, .FRAGMENT);
+        make_shader_and_write_if_valid(&shd_3d, shd_desc);
+    }
+
+    // texture shader
+    {
+        var shd_desc = sg.ShaderDesc{};
+        const res_shader = goosepack.resource_lookup(pack, "res/3d-pnt").?.shader;
+        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
+        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertex3d, .VERTEX);
+        specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragment3d, .FRAGMENT);
+        shd_desc.images[0] = .{ .stage = .FRAGMENT };
+        shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
+        shd_desc.image_sampler_pairs[0] = .{
+            .stage = .FRAGMENT,
+            .image_slot = 0,
+            .sampler_slot = 0,
+            .glsl_name = "tex",
+        };
+        make_shader_and_write_if_valid(&shd_texture, shd_desc);
+    }
+
+    // Voxel chunk shader
+    {
+        var shd_desc = sg.ShaderDesc{};
+        const res_shader = goosepack.resource_lookup(pack, "res/voxelchunk").?.shader;
+        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
+        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        //shd_desc.fs.images[0] = .{ .used = true }
+        //shd_desc.fs.samplers[0] = .{ .used = true };
+        //shd_desc.fs.image_sampler_pairs[0] = .{
+        //    .used = true,
+        //    .image_slot = 0,
+        //    .sampler_slot = 0,
+        //    .glsl_name = "tex",
+        //};
+        specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertexVoxelChunk, .VERTEX);
+        specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragmentVoxelChunk, .FRAGMENT);
+        make_shader_and_write_if_valid(&shd_voxelchunk, shd_desc);
+    }
+
+    // Postprocess shader
+    {
+        var shd_desc = sg.ShaderDesc{};
+        const res_shader = goosepack.resource_lookup(pack, "res/cc").?.shader;
+        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
+        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        shd_desc.images[0] = .{ .stage = .FRAGMENT };
+        shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
+        shd_desc.image_sampler_pairs[0] = .{
+            .stage = .FRAGMENT,
+            .image_slot = 0,
+            .sampler_slot = 0,
+            .glsl_name = "tex",
+        };
+        make_shader_and_write_if_valid(&shd_pp, shd_desc);
+    }
+
+    {
+        var shd_desc = sg.ShaderDesc{};
+        const res_shader = goosepack.resource_lookup(pack, "res/text").?.shader;
+        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
+        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertexAtlas, .VERTEX);
+        specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragmentAtlas, .FRAGMENT);
+        shd_desc.images[0] = .{ .stage = .FRAGMENT };
+        shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
+        shd_desc.image_sampler_pairs[0] = .{
+            .stage = .FRAGMENT,
+            .image_slot = 0,
+            .sampler_slot = 0,
+            .glsl_name = "tex",
+        };
+        make_shader_and_write_if_valid(&shd_text, shd_desc);
+    }
+
+    // TODO(anjo): We can get rid of this shader after moving 2d to separate buffer
+    // Display shader
+    {
+        var shd_desc = sg.ShaderDesc{};
+        shd_desc.vertex_func.source =
+            \\ #version 330
+            \\ layout(location=0) in vec2 position;
+            \\ layout(location=1) in vec2 texcoords;
+            \\ out vec2 v_texcoords;
+            \\ void main() {
+            \\   v_texcoords = texcoords;
+            \\   gl_Position = vec4(position, 0, 1);
+            \\ }
+        ;
+        shd_desc.fragment_func.source =
+            \\ #version 330
+            \\ in vec2 v_texcoords;
+            \\ out vec4 frag_color;
+            \\ uniform sampler2D tex;
+            \\ void main() {
+            \\   frag_color = texture(tex, vec2(v_texcoords.x, 1.0-v_texcoords.y));
+            \\ }
+        ;
+
+        shd_desc.images[0] = .{ .stage = .FRAGMENT };
+        shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
+        shd_desc.image_sampler_pairs[0] = .{
+            .stage = .FRAGMENT,
+            .image_slot = 0,
+            .sampler_slot = 0,
+            .glsl_name = "tex",
+        };
+        make_shader_and_write_if_valid(&shd_display, shd_desc);
+    }
+
+    // Cubemap shader
+    {
+        var shd_desc = sg.ShaderDesc{};
+        const res_shader = goosepack.resource_lookup(pack, "res/cubemap").?.shader;
+        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
+        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertex2d, .VERTEX);
+        specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragment2d, .FRAGMENT);
+        shd_desc.images[0] = .{ .stage = .FRAGMENT, .image_type = .CUBE };
+        shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
+        shd_desc.image_sampler_pairs[0] = .{
+            .stage = .FRAGMENT,
+            .image_slot = 0,
+            .sampler_slot = 0,
+            .glsl_name = "cube",
+        };
+        make_shader_and_write_if_valid(&shd_cm, shd_desc);
+    }
+}
+
+var images_initialized = false;
+var image_3d_framebuffer: sg.Image = undefined;
+var image_3d_depthbuffer: sg.Image = undefined;
+var image_2d_framebuffer: sg.Image = undefined;
+
+fn deinit_images() void {
+    sg.destroyImage(image_3d_framebuffer);
+    sg.destroyImage(image_3d_depthbuffer);
+    sg.destroyImage(image_2d_framebuffer);
+}
+
+fn rebuild_images(width: u32, height: u32) void {
+    if (images_initialized) {
+        deinit_images();
+    } else {
+        images_initialized = true;
+    }
+
+    image_3d_framebuffer = sg.makeImage(.{
+        .render_target = true,
+        .width = @intCast(width),
+        .height = @intCast(height),
+        .pixel_format = .RGBA8,
+        .sample_count = 1,
+    });
+
+    image_3d_depthbuffer = sg.makeImage(.{
+        .render_target = true,
+        .width = @intCast(width),
+        .height = @intCast(height),
+        .pixel_format = .DEPTH,
+        .sample_count = 1,
+    });
+
+    image_2d_framebuffer = sg.makeImage(.{
+        .render_target = true,
+        .width = @intCast(width),
+        .height = @intCast(height),
+        .pixel_format = .RGBA8,
+        .sample_count = 1,
+    });
+}
+
+var passes_initialized = false;
+var pass_load: sg.Pass = .{};
+var pass_load_color_depth: sg.Pass = .{};
+var pass_load_clear: sg.Pass = .{};
+var pass_load_swapchain: sg.Pass = .{};
+
+fn deinit_passes() void {
+    sg.destroyAttachments(pass_load_color_depth.attachments);
+    sg.destroyAttachments(pass_load_clear.attachments);
+}
+
+fn rebuild_passes(width: u32, height: u32) void {
+    if (passes_initialized) {
+        deinit_passes();
+    } else {
+        passes_initialized = true;
+    }
+
+    pass_load.action.colors[0] = .{
+        .load_action = .LOAD,
+    };
+
+    {
+        pass_load_color_depth.action.colors[0] = .{
+            .load_action = .LOAD,
+        };
+        var attachments_desc = sg.AttachmentsDesc{};
+        attachments_desc.colors[0].image = image_3d_framebuffer;
+        attachments_desc.depth_stencil.image = image_3d_depthbuffer;
+        pass_load_color_depth.attachments = sg.makeAttachments(attachments_desc);
+    }
+
+    {
+        pass_load_clear.action.colors[0] = .{
+            .load_action = .LOAD,
+            .clear_value = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
+        };
+        var attachments_desc = sg.AttachmentsDesc{};
+        attachments_desc.colors[0].image = image_2d_framebuffer;
+        pass_load_clear.attachments = sg.makeAttachments(attachments_desc);
+    }
+
+    {
+        pass_load_swapchain.action.colors[0] = .{
+            .load_action = .LOAD,
+        };
+        pass_load_swapchain.swapchain.width = @intCast(width);
+        pass_load_swapchain.swapchain.height = @intCast(height);
+    }
+
+}
+
+var pipelines_initialized = false;
+var image_font_atlas: sg.Image = undefined;
+var image_cubemap: sg.Image = undefined;
+var pipeline_text: sg.Pipeline = undefined;
+var pipeline_3d: sg.Pipeline = undefined;
+var pipeline_2d: sg.Pipeline = undefined;
+var pipeline_texture: sg.Pipeline = undefined;
+var pipeline_cubemap: sg.Pipeline = undefined;
+var pipeline_postprocess: sg.Pipeline = undefined;
+var pipeline_overlay_2d: sg.Pipeline = undefined;
+var pipeline_voxel: sg.Pipeline = undefined;
+var font_chars: []res.FontChar = undefined;
+
+fn deinit_pipelines() void {
+    sg.destroyImage(image_font_atlas);
+    sg.destroyImage(image_cubemap);
+    sg.destroyPipeline(pipeline_text);
+    sg.destroyPipeline(pipeline_3d);
+    sg.destroyPipeline(pipeline_2d);
+    sg.destroyPipeline(pipeline_texture);
+    sg.destroyPipeline(pipeline_cubemap);
+    sg.destroyPipeline(pipeline_postprocess);
+    sg.destroyPipeline(pipeline_overlay_2d);
+    sg.destroyPipeline(pipeline_voxel);
+
+    //pipelines = .{};
+    for (binds.slice()) |b| {
+        if ((b.mesh_binds.buffer_types & res.bt_position) != 0) {
+            sg.destroyBuffer(b.mesh_binds.bind.vertex_buffers[0]);
+        }
+        if ((b.mesh_binds.buffer_types & res.bt_normals) != 0) {
+            sg.destroyBuffer(b.mesh_binds.bind.vertex_buffers[1]);
+        }
+        if (b.mesh_binds.has_image and (b.mesh_binds.buffer_types & res.bt_texcoords) != 0) {
+            sg.destroyBuffer(b.mesh_binds.bind.vertex_buffers[2]);
+        }
+        if ((b.mesh_binds.buffer_types & res.bt_indices) != 0) {
+            sg.destroyBuffer(b.mesh_binds.bind.index_buffer);
+        }
+        if (b.mesh_binds.has_image) {
+            sg.destroyImage(b.mesh_binds.image);
+        }
+    }
+    binds = .{};
+}
+
+fn rebuild_pipelines() void {
+    if (pipelines_initialized) {
+        deinit_pipelines();
+    } else {
+        pipelines_initialized = true;
+    }
+
+    // Text pipeline
+    {
+        font = goosepack.resource_lookup(pack, "res/fonts/MononokiNerdFontMono-Regular").?.font;
+        var data = sg.ImageData{};
+        data.subimage[0][0] = .{ .ptr = font.pixels.ptr, .size = font.pixels.len };
+        image_font_atlas = sg.makeImage(.{
+            .width = font.width,
+            .height = font.height,
+            .data = data,
+            .pixel_format = .R8,
+            .sample_count = 1,
+        });
+        font_chars = font.chars;
+
+        var pip_desc = sg.PipelineDesc{
+            .index_type = .UINT16,
+            .shader = shd_text,
+            .color_count = 1,
+            .sample_count = 1,
+            .depth = .{
+                .pixel_format = .NONE,
+            },
+        };
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+                .src_factor_alpha = .SRC_ALPHA,
+                .dst_factor_alpha = .DST_ALPHA,
+                .op_alpha = .ADD,
+                .op_rgb = .ADD,
+            },
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT2;
+        pip_desc.layout.attrs[1].format = .FLOAT2;
+        pipeline_text = sg.makePipeline(pip_desc);
+    }
+
+    // Offscreen 3d
+    {
+        var pip_desc = sg.PipelineDesc{
+            .index_type = .UINT16,
+            .shader = shd_3d,
+            .cull_mode = .FRONT,
+            .sample_count = 1,
+            .depth = .{
+                .pixel_format = .DEPTH,
+                .compare = .LESS_EQUAL,
+                .write_enabled = true,
+            },
+            .label = "offscreen 3d",
+        };
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            },
+            .pixel_format = .RGBA8,
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT3;
+        pip_desc.layout.attrs[1].format = .FLOAT3;
+        pip_desc.layout.attrs[1].buffer_index = 1;
+        pipeline_3d = sg.makePipeline(pip_desc);
+    }
+
+    // Offscreen 2d
+    {
+        var pip_desc = sg.PipelineDesc{
+            .index_type = .UINT16,
+            .shader = shd_2d,
+            .sample_count = 1,
+            .color_count = 1,
+            .depth = .{
+                .pixel_format = .NONE,
+            },
+            .label = "offscreen 2d",
+        };
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            },
+            .pixel_format = .RGBA8,
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT2;
+        pipeline_2d = sg.makePipeline(pip_desc);
+    }
+
+    // Texture pipeline
+    {
+        var pip_desc = sg.PipelineDesc{
+            .index_type = .UINT16,
+            .shader = shd_texture,
+            .cull_mode = .FRONT,
+            .sample_count = 1,
+            .depth = .{
+                .pixel_format = .DEPTH,
+                .compare = .LESS_EQUAL,
+                .write_enabled = true,
+            },
+            .label = "pipeline texture",
+        };
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            },
+            .pixel_format = .RGBA8,
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT3;
+        pip_desc.layout.attrs[1].format = .FLOAT3;
+        pip_desc.layout.attrs[1].buffer_index = 1;
+        pip_desc.layout.attrs[2].format = .FLOAT2;
+        pip_desc.layout.attrs[2].buffer_index = 2;
+        pipeline_texture = sg.makePipeline(pip_desc);
+    }
+
+    // Voxelchunk pipeline
+    {
+        var pip_desc = sg.PipelineDesc{
+            .index_type = .UINT16,
+            .shader = shd_voxelchunk,
+            .cull_mode = .FRONT,
+            .sample_count = 1,
+            .depth = .{
+                .pixel_format = .DEPTH,
+                .compare = .LESS_EQUAL,
+                .write_enabled = true,
+            },
+            .label = "voxel pipeline",
+        };
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            },
+            .pixel_format = .RGBA8,
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT3;
+        pip_desc.layout.attrs[0].buffer_index = 0;
+        pip_desc.layout.attrs[1].format = .FLOAT3;
+        pip_desc.layout.attrs[1].buffer_index = 1;
+        pip_desc.layout.attrs[2].format = .UBYTE4;
+        pip_desc.layout.attrs[2].buffer_index = 2;
+        pip_desc.layout.buffers[2].step_func = .PER_INSTANCE;
+        pipeline_voxel = sg.makePipeline(pip_desc);
+    }
+
+    // Cubemap
+    {
+        var pip_desc = sg.PipelineDesc{
+            .index_type = .UINT16,
+            .shader = shd_cm,
+            .cull_mode = .BACK,
+            .sample_count = 1,
+            .color_count = 1,
+            .depth = .{
+                .pixel_format = .DEPTH,
+                .compare = .LESS_EQUAL,
+                .write_enabled = true,
+            },
+            .label = "offscreen cubemap",
+        };
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            },
+            .pixel_format = .RGBA8,
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT3;
+        pipeline_cubemap = sg.makePipeline(pip_desc);
+
+        const cubemap = goosepack.resource_lookup(pack, "res/cm").?.cubemap;
+        var img_desc = sg.ImageDesc{
+            .type = .CUBE,
+            .width = @intCast(cubemap.width),
+            .height = @intCast(cubemap.height),
+            .pixel_format = .RGBA8,
+        };
+        for (0..@intFromEnum(sg.CubeFace.NUM)) |i| {
+            img_desc.data.subimage[i][0] = sg.asRange(cubemap.faceSlice(@intCast(i)));
+        }
+        image_cubemap = sg.allocImage();
+        sg.initImage(image_cubemap, img_desc);
+    }
+
+    // Postprocess
+    {
+        var pip_desc = sg.PipelineDesc{
+            .index_type = .UINT16,
+            .shader = shd_pp,
+            .cull_mode = .BACK,
+            .depth = .{
+                .compare = .LESS_EQUAL,
+                .write_enabled = true,
+            },
+        };
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            },
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT2;
+        pip_desc.layout.attrs[1].format = .FLOAT2;
+        pipeline_postprocess = sg.makePipeline(pip_desc);
+    }
+
+    // Display
+    {
+        var pip_desc = sg.PipelineDesc{
+            .index_type = .UINT16,
+            .shader = shd_display,
+            .cull_mode = .BACK,
+            .depth = .{
+                .compare = .LESS_EQUAL,
+                .write_enabled = true,
+            },
+        };
+        pip_desc.colors[0] = .{
+            .blend = .{
+                .enabled = true,
+                .src_factor_rgb = .SRC_ALPHA,
+                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
+            },
+        };
+        pip_desc.layout.attrs[0].format = .FLOAT2;
+        pip_desc.layout.attrs[1].format = .FLOAT2;
+        pipeline_overlay_2d = sg.makePipeline(pip_desc);
+    }
+}
+
+pub fn init(log_memory: *common.log.LogMemory, _mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
     mem = _mem;
+
+    log = log_memory.group_log(.draw);
+
+    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.up)] = math.m4_identity;
+    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.down)] = m4.transpose(m4.modelRotX(std.math.pi));
+    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.back)] = m4.transpose(m4.modelRotY(-std.math.pi/2.0));
+    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.front)] = m4.transpose(m4.modelRotY(std.math.pi/2.0));
+    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.left)] = m4.transpose(m4.modelRotX(std.math.pi/2.0));
+    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.right)] = m4.transpose(m4.modelRotX(-std.math.pi/2.0));
 
     sg.setup(.{
         .logger = .{ .func = slog.func },
@@ -353,613 +1078,44 @@ pub fn init(_mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
         .data = sg.asRange(&cube_indices),
     });
 
-    // 2d shader
-    var shd_2d: sg.Shader = undefined;
-    {
-        var shd_desc = sg.ShaderDesc{};
-        shd_desc.vs.source =
-            \\ #version 330
-            \\ layout(location=0) in vec2 position;
-            \\ uniform mat4 mvp;
-            \\ uniform mat4 model;
-            \\ void main() {
-            \\   gl_Position = mvp*vec4(position, 0, 1);
-            \\ }
-        ;
-        shd_desc.fs.source =
-            \\ #version 330
-            \\ uniform vec4 color;
-            \\ out vec4 frag_color;
-            \\ void main() {
-            \\   frag_color = color;
-            \\ }
-        ;
-        shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms2d);
-        shd_desc.vs.uniform_blocks[0].uniforms[0] = .{
-            .name = "mvp",
-            .type = .MAT4,
-        };
-        shd_desc.vs.uniform_blocks[0].uniforms[1] = .{
-            .name = "color",
-            .type = .FLOAT4,
-        };
-        shd_2d = sg.makeShader(shd_desc);
-    }
-
-    // 3d shader
-    {
-        var shd_desc = sg.ShaderDesc{};
-        const res_shader = goosepack.lookup(pack, "res/default").?.shader;
-        const vs = res_shader.vs_bytes;
-        const fs = res_shader.fs_bytes;
-        shd_desc.vs.source = @ptrCast(vs);
-        shd_desc.fs.source = @ptrCast(fs);
-        shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms3d);
-        shd_desc.vs.uniform_blocks[0].uniforms[0] = .{
-            .name = "mvp",
-            .type = .MAT4,
-        };
-        shd_desc.vs.uniform_blocks[0].uniforms[1] = .{
-            .name = "model",
-            .type = .MAT4,
-        };
-        shd_desc.vs.uniform_blocks[0].uniforms[2] = .{
-            .name = "color",
-            .type = .FLOAT4,
-        };
-        shd_desc.vs.uniform_blocks[0].uniforms[3] = .{
-            .name = "light_pos",
-            .type = .FLOAT3,
-        };
-        shd_desc.vs.uniform_blocks[0].uniforms[4] = .{
-            .name = "light_color",
-            .type = .FLOAT3,
-        };
-        shd_desc.vs.uniform_blocks[0].uniforms[5] = .{
-            .name = "camera_pos",
-            .type = .FLOAT3,
-        };
-        std.log.info("f {}\n", .{fs[fs.len - 1]});
-        std.log.info("v {}\n", .{vs[vs.len - 1]});
-        shd_3d = sg.makeShader(shd_desc);
-        std.log.info("arstarsta\n", .{});
-    }
-
-    // Postprocess shader
-    var shd_pp: sg.Shader = undefined;
-    {
-        var shd_desc = sg.ShaderDesc{};
-
-        const res_shader = goosepack.lookup(pack, "res/cc").?.shader;
-        const vs = res_shader.vs_bytes;
-        const fs = res_shader.fs_bytes;
-        shd_desc.vs.source = @ptrCast(vs);
-        shd_desc.fs.source = @ptrCast(fs);
-
-        shd_desc.fs.images[0] = .{ .used = true };
-        shd_desc.fs.samplers[0] = .{ .used = true };
-        shd_desc.fs.image_sampler_pairs[0] = .{
-            .used = true,
-            .image_slot = 0,
-            .sampler_slot = 0,
-            .glsl_name = "tex",
-        };
-        shd_pp = sg.makeShader(shd_desc);
-    }
-
-    var shd_text: sg.Shader = undefined;
-    {
-        var shd_desc = sg.ShaderDesc{};
-        shd_desc.vs.source =
-            \\ #version 330
-            \\ layout(location=0) in vec2 position;
-            \\ layout(location=1) in vec2 texcoords;
-            \\ out vec2 v_texcoords;
-            \\ uniform vec2 vs_off;
-            \\ uniform vec2 vs_scale;
-            \\ void main() {
-            \\   v_texcoords = texcoords;
-            \\   gl_Position = vec4(vs_scale*0.5*(position+vec2(1,1)) + vs_off, 0, 1);
-            \\ }
-        ;
-        shd_desc.fs.source =
-            \\ #version 330
-            \\ in vec2 v_texcoords;
-            \\ out vec4 frag_color;
-            \\ uniform sampler2D tex;
-            \\ uniform vec2 off;
-            \\ uniform vec2 scale;
-            \\ uniform vec4 fg;
-            \\ uniform vec4 bg;
-            \\ void main() {
-            \\   float c = texture(tex, scale*v_texcoords + off).r;
-            \\   frag_color = vec4(0,0,0,0) + fg*c;
-            \\ }
-        ;
-
-        shd_desc.fs.uniform_blocks[0].size = @sizeOf(AtlasUniform);
-        shd_desc.fs.uniform_blocks[0].uniforms[0] = .{
-            .name = "off",
-            .type = .FLOAT2,
-        };
-        shd_desc.fs.uniform_blocks[0].uniforms[1] = .{
-            .name = "scale",
-            .type = .FLOAT2,
-        };
-        shd_desc.fs.uniform_blocks[0].uniforms[2] = .{
-            .name = "vs_off",
-            .type = .FLOAT2,
-        };
-        shd_desc.fs.uniform_blocks[0].uniforms[3] = .{
-            .name = "vs_scale",
-            .type = .FLOAT2,
-        };
-        shd_desc.fs.uniform_blocks[0].uniforms[4] = .{
-            .name = "fg",
-            .type = .FLOAT4,
-        };
-        shd_desc.fs.uniform_blocks[0].uniforms[5] = .{
-            .name = "bg",
-            .type = .FLOAT4,
-        };
-
-        shd_desc.fs.images[0] = .{ .used = true };
-        shd_desc.fs.samplers[0] = .{ .used = true };
-        shd_desc.fs.image_sampler_pairs[0] = .{
-            .used = true,
-            .image_slot = 0,
-            .sampler_slot = 0,
-            .glsl_name = "tex",
-        };
-        shd_text = sg.makeShader(shd_desc);
-    }
-
-    // Display shader
-    var shd_display: sg.Shader = undefined;
-    {
-        var shd_desc = sg.ShaderDesc{};
-        shd_desc.vs.source =
-            \\ #version 330
-            \\ layout(location=0) in vec2 position;
-            \\ layout(location=1) in vec2 texcoords;
-            \\ out vec2 v_texcoords;
-            \\ void main() {
-            \\   v_texcoords = texcoords;
-            \\   gl_Position = vec4(position, 0, 1);
-            \\ }
-        ;
-        shd_desc.fs.source =
-            \\ #version 330
-            \\ in vec2 v_texcoords;
-            \\ out vec4 frag_color;
-            \\ uniform sampler2D tex;
-            \\ void main() {
-            \\   frag_color = texture(tex, vec2(v_texcoords.x, 1.0-v_texcoords.y));
-            \\ }
-        ;
-
-        shd_desc.fs.images[0] = .{ .used = true };
-        shd_desc.fs.samplers[0] = .{ .used = true };
-        shd_desc.fs.image_sampler_pairs[0] = .{
-            .used = true,
-            .image_slot = 0,
-            .sampler_slot = 0,
-            .glsl_name = "tex",
-        };
-        shd_display = sg.makeShader(shd_desc);
-    }
-
-    // Cubemap shader
-    var shd_cm: sg.Shader = undefined;
-    {
-        var shd_desc = sg.ShaderDesc{};
-        shd_desc.vs.source =
-            \\ #version 330
-            \\ layout(location=0) in vec3 position;
-            \\ out vec3 v_texcoords;
-            \\ uniform mat4 mvp;
-            \\ uniform mat4 model;
-            \\ void main() {
-            \\   v_texcoords = normalize(position);
-            \\   gl_Position = mvp*vec4(position, 1);
-            \\ }
-        ;
-        shd_desc.fs.source =
-            \\ #version 330
-            \\ in vec3 v_texcoords;
-            \\ out vec4 frag_color;
-            \\ uniform samplerCube cube;
-            \\ uniform vec4 color;
-            \\ void main() {
-            \\   frag_color = color*texture(cube, v_texcoords);
-            \\ }
-        ;
-        shd_desc.vs.uniform_blocks[0].size = @sizeOf(Uniforms2d);
-        shd_desc.vs.uniform_blocks[0].uniforms[0] = .{
-            .name = "mvp",
-            .type = .MAT4,
-        };
-        shd_desc.vs.uniform_blocks[0].uniforms[1] = .{
-            .name = "color",
-            .type = .FLOAT4,
-        };
-        shd_desc.fs.images[0] = .{ .used = true, .image_type = .CUBE };
-        shd_desc.fs.samplers[0] = .{ .used = true };
-        shd_desc.fs.image_sampler_pairs[0] = .{
-            .used = true,
-            .image_slot = 0,
-            .sampler_slot = 0,
-            .glsl_name = "cube",
-        };
-        shd_cm = sg.makeShader(shd_desc);
-    }
-
     //
     // Pipelines
     //
 
-    // Offscreen 3d
-    {
-        offscreen_3d.pass.action.colors[0] = .{
-            .load_action = .LOAD,
-        };
-
-        offscreen_3d.color = sg.makeImage(.{
-            .render_target = true,
-            .width = 800,
-            .height = 600,
-            .pixel_format = .RGBA8,
-            .sample_count = 1,
-        });
-
-        offscreen_3d.depth = sg.makeImage(.{
-            .render_target = true,
-            .width = 800,
-            .height = 600,
-            .pixel_format = .DEPTH,
-            .sample_count = 1,
-        });
-
-        var attachments_desc = sg.AttachmentsDesc{};
-        attachments_desc.colors[0].image = offscreen_3d.color;
-        attachments_desc.depth_stencil.image = offscreen_3d.depth;
-        offscreen_3d.pass.attachments = sg.makeAttachments(attachments_desc);
-
-        var pip_desc = sg.PipelineDesc{
-            .index_type = .UINT16,
-            .shader = shd_3d,
-            .cull_mode = .FRONT,
-            .sample_count = 1,
-            .depth = .{
-                .pixel_format = .DEPTH,
-                .compare = .LESS_EQUAL,
-                .write_enabled = true,
-            },
-            .label = "offscreen 3d",
-        };
-        pip_desc.colors[0] = .{
-            .blend = .{
-                .enabled = true,
-                .src_factor_rgb = .SRC_ALPHA,
-                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
-            },
-            .pixel_format = .RGBA8,
-        };
-        pip_desc.layout.attrs[0].format = .FLOAT3;
-        pip_desc.layout.attrs[1].format = .FLOAT3;
-        pip_desc.layout.attrs[1].buffer_index = 1;
-        offscreen_3d.pip = sg.makePipeline(pip_desc);
-    }
-
-    // Offscreen 2d
-    {
-        offscreen_2d.pass.action.colors[0] = .{
-            .load_action = .LOAD,
-            .clear_value = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
-        };
-
-        offscreen_2d.color = sg.makeImage(.{
-            .render_target = true,
-            .width = 800,
-            .height = 600,
-            .pixel_format = .RGBA8,
-            .sample_count = 1,
-        });
-
-        var attachments_desc = sg.AttachmentsDesc{};
-        attachments_desc.colors[0].image = offscreen_2d.color;
-        offscreen_2d.pass.attachments = sg.makeAttachments(attachments_desc);
-
-        var pip_desc = sg.PipelineDesc{
-            .index_type = .UINT16,
-            .shader = shd_2d,
-            .sample_count = 1,
-            .color_count = 1,
-            .depth = .{
-                .pixel_format = .NONE,
-            },
-            .label = "offscreen 2d",
-        };
-        pip_desc.colors[0] = .{
-            .blend = .{
-                .enabled = true,
-                .src_factor_rgb = .SRC_ALPHA,
-                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
-            },
-            .pixel_format = .RGBA8,
-        };
-        pip_desc.layout.attrs[0].format = .FLOAT2;
-        offscreen_2d.pip = sg.makePipeline(pip_desc);
-    }
-
-    // Text shader
-    {
-        text_pipeline.pass.action.colors[0] = .{
-            .load_action = .LOAD,
-        };
-
-        font = goosepack.lookup(pack, "res/fonts/MononokiNerdFontMono-Regular").?.font;
-        var data = sg.ImageData{};
-        data.subimage[0][0] = .{ .ptr = font.pixels.ptr, .size = font.pixels.len };
-        text_pipeline.atlas = sg.makeImage(.{
-            .width = font.width,
-            .height = font.height,
-            .data = data,
-            .pixel_format = .R8,
-            .sample_count = 1,
-        });
-        text_pipeline.chars = font.chars;
-
-        var pip_desc = sg.PipelineDesc{
-            .index_type = .UINT16,
-            .shader = shd_text,
-            .color_count = 1,
-            .sample_count = 1,
-            .depth = .{
-                .pixel_format = .NONE,
-            },
-        };
-        pip_desc.colors[0] = .{
-            .blend = .{
-                .enabled = true,
-                .src_factor_rgb = .SRC_ALPHA,
-                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
-                .src_factor_alpha = .SRC_ALPHA,
-                .dst_factor_alpha = .DST_ALPHA,
-                .op_alpha = .ADD,
-                .op_rgb = .ADD,
-            },
-        };
-        pip_desc.layout.attrs[0].format = .FLOAT2;
-        pip_desc.layout.attrs[1].format = .FLOAT2;
-        text_pipeline.pip = sg.makePipeline(pip_desc);
-
-        const smp = sg.makeSampler(.{
-            .min_filter = .LINEAR,
-            .mag_filter = .LINEAR,
-            .wrap_u = .REPEAT,
-            .wrap_v = .REPEAT,
-        });
-
-        text_pipeline.bind.vertex_buffers[0] = sg.makeBuffer(.{
-            .data = sg.asRange(&textured_rectangle_vertices),
-        });
-        text_pipeline.bind.index_buffer = sg.makeBuffer(.{
-            .type = .INDEXBUFFER,
-            .data = sg.asRange(&textured_rectangle_indices),
-        });
-        text_pipeline.bind.fs.samplers[0] = smp;
-    }
-
-    // Cubemap
-    {
-        offscreen_cubemap.pass.action.colors[0] = .{
-            .load_action = .LOAD,
-        };
-
-        var attachments_desc = sg.AttachmentsDesc{};
-        attachments_desc.colors[0].image = offscreen_3d.color;
-        attachments_desc.depth_stencil.image = offscreen_3d.depth;
-        offscreen_cubemap.pass.attachments = sg.makeAttachments(attachments_desc);
-
-        var pip_desc = sg.PipelineDesc{
-            .index_type = .UINT16,
-            .shader = shd_cm,
-            .cull_mode = .BACK,
-            .sample_count = 1,
-            .color_count = 1,
-            .depth = .{
-                .pixel_format = .DEPTH,
-                .compare = .LESS_EQUAL,
-                .write_enabled = true,
-            },
-            .label = "offscreen cubemap",
-        };
-        pip_desc.colors[0] = .{
-            .blend = .{
-                .enabled = true,
-                .src_factor_rgb = .SRC_ALPHA,
-                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
-            },
-            .pixel_format = .RGBA8,
-        };
-        pip_desc.layout.attrs[0].format = .FLOAT3;
-        offscreen_cubemap.pip = sg.makePipeline(pip_desc);
-
-        offscreen_cubemap.bind.vertex_buffers[0] = sg.makeBuffer(.{
-            .data = sg.asRange(&cube_vertices),
-        });
-        offscreen_cubemap.bind.index_buffer = sg.makeBuffer(.{
-            .type = .INDEXBUFFER,
-            .data = sg.asRange(&cube_indices),
-        });
-
-        const cubemap = goosepack.lookup(pack, "res/cm").?.cubemap;
-
-        var img_desc = sg.ImageDesc{
-            .type = .CUBE,
-            .width = @intCast(cubemap.width),
-            .height = @intCast(cubemap.height),
-            .pixel_format = .RGBA8,
-        };
-        for (0..@intFromEnum(sg.CubeFace.NUM)) |i| {
-            img_desc.data.subimage[i][0] = sg.asRange(cubemap.faceSlice(@intCast(i)));
-        }
-        offscreen_cubemap.bind.fs.images[0] = sg.allocImage();
-        sg.initImage(offscreen_cubemap.bind.fs.images[0], img_desc);
-
-        const smp = sg.makeSampler(.{
-            .min_filter = .LINEAR,
-            .mag_filter = .LINEAR,
-        });
-        offscreen_cubemap.bind.fs.samplers[0] = smp;
-    }
-
-    // Postprocess
-    {
-        postprocess.pass.action.colors[0] = .{
-            .load_action = .LOAD,
-        };
-        postprocess.pass.swapchain.width = 800;
-        postprocess.pass.swapchain.height = 600;
-
-        //var attachments_desc = sg.AttachmentsDesc{};
-        //attachments_desc.colors[0].image = offscreen_3d.color;
-        ////attachments_desc.depth_stencil.image = offscreen_3d.depth;
-        //postprocess.pass.attachments = sg.makeAttachments(attachments_desc);
-
-        var pip_desc = sg.PipelineDesc{
-            .index_type = .UINT16,
-            .shader = shd_pp,
-            .cull_mode = .BACK,
-            .depth = .{
-                .compare = .LESS_EQUAL,
-                .write_enabled = true,
-            },
-        };
-        pip_desc.colors[0] = .{
-            .blend = .{
-                .enabled = true,
-                .src_factor_rgb = .SRC_ALPHA,
-                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
-            },
-        };
-        pip_desc.layout.attrs[0].format = .FLOAT2;
-        pip_desc.layout.attrs[1].format = .FLOAT2;
-        postprocess.pip = sg.makePipeline(pip_desc);
-
-        const smp = sg.makeSampler(.{
-            .min_filter = .LINEAR,
-            .mag_filter = .LINEAR,
-            .wrap_u = .REPEAT,
-            .wrap_v = .REPEAT,
-        });
-
-        postprocess.bind.vertex_buffers[0] = sg.makeBuffer(.{
-            .data = sg.asRange(&textured_rectangle_vertices),
-        });
-        postprocess.bind.index_buffer = sg.makeBuffer(.{
-            .type = .INDEXBUFFER,
-            .data = sg.asRange(&textured_rectangle_indices),
-        });
-        postprocess.bind.fs.samplers[0] = smp;
-    }
-
-    // Display
-    {
-        display.pass.action.colors[0] = .{
-            .load_action = .LOAD,
-        };
-        display.pass.swapchain.width = 800;
-        display.pass.swapchain.height = 600;
-
-        var pip_desc = sg.PipelineDesc{
-            .index_type = .UINT16,
-            .shader = shd_display,
-            .cull_mode = .BACK,
-            .depth = .{
-                .compare = .LESS_EQUAL,
-                .write_enabled = true,
-            },
-        };
-        pip_desc.colors[0] = .{
-            .blend = .{
-                .enabled = true,
-                .src_factor_rgb = .SRC_ALPHA,
-                .dst_factor_rgb = .ONE_MINUS_SRC_ALPHA,
-            },
-        };
-        pip_desc.layout.attrs[0].format = .FLOAT2;
-        pip_desc.layout.attrs[1].format = .FLOAT2;
-        display.pip = sg.makePipeline(pip_desc);
-
-        const smp = sg.makeSampler(.{
-            .min_filter = .LINEAR,
-            .mag_filter = .LINEAR,
-            .wrap_u = .REPEAT,
-            .wrap_v = .REPEAT,
-        });
-
-        display.bind.vertex_buffers[0] = sg.makeBuffer(.{
-            .data = sg.asRange(&textured_rectangle_vertices),
-        });
-        display.bind.index_buffer = sg.makeBuffer(.{
-            .type = .INDEXBUFFER,
-            .data = sg.asRange(&textured_rectangle_indices),
-        });
-        display.bind.fs.samplers[0] = smp;
-    }
-
-    // 3d mesh shader
-    {
-        var pip_desc = sg.PipelineDesc{
-            .shader = shd_3d,
-            .cull_mode = .BACK,
-            .depth = .{
-                .compare = .LESS_EQUAL,
-                .write_enabled = true,
-            },
-        };
-        pip_desc.layout.attrs[0].format = .FLOAT3;
-        pip_mesh = sg.makePipeline(pip_desc);
-    }
-    // pip mesh line
-    {
-        var pip_desc = sg.PipelineDesc{
-            .shader = shd_3d,
-            .primitive_type = .LINE_STRIP,
-            .depth = .{
-                .compare = .LESS_EQUAL,
-                .write_enabled = true,
-            },
-        };
-        pip_desc.layout.attrs[0].format = .FLOAT3;
-        pip_mesh_line = sg.makePipeline(pip_desc);
-    }
-    // triangle strip
-    {
-        var pip_desc = sg.PipelineDesc{
-            .shader = shd_3d,
-            .primitive_type = .TRIANGLE_STRIP,
-            .depth = .{
-                .compare = .LESS_EQUAL,
-                .write_enabled = true,
-            },
-        };
-        pip_desc.layout.attrs[0].format = .FLOAT3;
-        pip_triangle_strip = sg.makePipeline(pip_desc);
-    }
+    rebuild_bindings();
+    rebuild_shaders();
+    rebuild_pipelines();
+    rebuild_images(800, 600);
+    rebuild_passes(800, 600);
 }
 
 pub fn deinit() void {
     sg.shutdown();
 }
 
+pub fn resources_update(entries: []goosepack.Entry) void {
+    _ = entries;
+    rebuild_shaders();
+    rebuild_pipelines();
+}
+
+var old_width: u32 = 800;
+var old_height: u32 = 600;
+
 pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u32) void {
     var vp: m4 = .{};
 
+    defer b.bytes.clear();
+
     if (num_views == 0) {
         return;
+    }
+
+    if (old_width != width or old_height != height) {
+        rebuild_images(width, height);
+        rebuild_passes(width, height);
+        old_width = width;
+        old_height = height;
     }
 
     const views_per_col: u32 = @intFromFloat(@ceil(std.math.sqrt(@as(f32, @floatFromInt(num_views)))));
@@ -975,9 +1131,11 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
     const light_pos: v3 = .{ .x = 0, .y = 0, .z = 80 };
     const light_color: v3 = .{ .x = 1, .y = 1, .z = 1 };
 
-    offscreen_2d.pass.action.colors[0].load_action = .CLEAR;
-    sg.beginPass(offscreen_2d.pass);
+    pass_load_clear.action.colors[0].load_action = .CLEAR;
+    sg.beginPass(pass_load_clear);
     sg.endPass();
+
+    var temp_vertex_buffers = std.ArrayList(sg.Buffer).init(mem.frame);
 
     while (b.bytes.hasData()) {
         const header = b.pop(draw_api.Header);
@@ -999,27 +1157,29 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
 
                 // Draw cubemap
                 {
-                    sg.beginPass(offscreen_cubemap.pass);
+                    sg.beginPass(pass_load_color_depth);
                     sg.applyViewport(view_width * @as(i32, @intCast(col_index)), view_height * @as(i32, @intCast(row_index)), view_width, view_height, true);
-                    sg.applyPipeline(offscreen_cubemap.pip);
-                    sg.applyBindings(offscreen_cubemap.bind);
+                    sg.applyPipeline(pipeline_cubemap);
+                    binding_cubemap.images[0] = image_cubemap;
+                    sg.applyBindings(binding_cubemap);
                     const scale = 80000.0;
                     const model = m4.modelWithRotations(.{}, .{ .x = scale, .y = scale, .z = scale }, .{ .x = std.math.pi / 2.0, .y = 0.0, .z = 0 });
-                    const uniforms = Uniforms2d{
+                    sg.applyUniforms(0, sg.asRange(&UniformsVertex2d{
                         .mvp = m4.transpose(m4.mul(vp, model)),
+                    }));
+                    sg.applyUniforms(1, sg.asRange(&UniformsFragment2d{
                         .color = v4{
                             .x = @as(f32, @floatFromInt(255)) / 255.0,
                             .y = @as(f32, @floatFromInt(255)) / 255.0,
                             .z = @as(f32, @floatFromInt(255)) / 255.0,
                             .w = @as(f32, @floatFromInt(255)) / 255.0,
                         },
-                    };
-                    sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                    }));
                     sg.draw(0, cube_indices.len, 1);
                     sg.endPass();
                 }
 
-                sg.beginPass(offscreen_3d.pass);
+                sg.beginPass(pass_load_color_depth);
                 sg.applyViewport(view_width * @as(i32, @intCast(col_index)), view_height * @as(i32, @intCast(row_index)), view_width, view_height, true);
             },
             .End3d => {
@@ -1033,8 +1193,8 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
 
                 vp = world_to_view;
 
-                offscreen_2d.pass.action.colors[0].load_action = .LOAD;
-                sg.beginPass(offscreen_2d.pass);
+                pass_load_clear.action.colors[0].load_action = .LOAD;
+                sg.beginPass(pass_load_clear);
 
                 // index = j*height + i
                 const row_index = @divFloor(index_2d, views_per_row);
@@ -1055,114 +1215,77 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 const x: f32 = 2.0 * text.pos.x - 1.0;
                 const y: f32 = 2.0 * text.pos.y - 1.0;
 
-                text_pipeline.bind.fs.images[0] = text_pipeline.atlas;
-                sg.applyPipeline(text_pipeline.pip);
-                sg.applyBindings(text_pipeline.bind);
+                binding_textured_rectangle.images[0] = image_font_atlas;
+                sg.applyPipeline(pipeline_text);
+                sg.applyBindings(binding_textured_rectangle);
 
-                const scale: f32 = 2.0 * text.size / (@as(f32, @floatFromInt(font.size)) / @as(f32, @floatFromInt(height)));
+                //const scale: f32 = 2.0 * text.size / (@as(f32, @floatFromInt(font.size)) / @as(f32, @floatFromInt(height)));
+                //const scale: f32 = 1.0;//(1.0/60.0) / (1.0/2.0);//2.0 * text.size / (@as(f32, @floatFromInt(font.size)) / @as(f32, @floatFromInt(height)));
                 const atlas_w: f32 = @floatFromInt(font.width);
                 const atlas_h: f32 = @floatFromInt(font.height);
 
                 var xoff: f32 = 0.0;
                 for (text.str[0..text.len]) |c| {
                     const off = c - 32;
-                    const char = text_pipeline.chars[off];
+                    const char = font_chars[off];
 
                     const sx = @as(f32, @floatFromInt(char.x1 - char.x0)) / atlas_w;
                     const sy = @as(f32, @floatFromInt(char.y1 - char.y0)) / atlas_h;
                     const vsx = (char.xoff2 - char.xoff) / atlas_w;
                     const vsy = (char.yoff2 - char.yoff) / atlas_h;
+                    //const scale: f32 = 2.0 * text.size / (sy / atlas_h);
+                    const scale: f32 = 2.0 * text.size / (@as(f32, @floatFromInt(font.size)) / atlas_h);
 
-                    const uniforms = AtlasUniform{
-                        .off = .{ .x = @as(f32, @floatFromInt(char.x0)) / atlas_w, .y = @as(f32, @floatFromInt(char.y0)) / atlas_h },
-                        .scale = .{ .x = sx, .y = sy },
-                        .vs_off = .{ .x = x + xoff + scale * char.xoff / atlas_w, .y = y - scale * char.yoff / atlas_h - scale * vsy },
+                    sg.applyUniforms(0, sg.asRange(&UniformsVertexAtlas{
+                        .vs_off = .{
+                            .x = x + xoff + scale * char.xoff / atlas_w,
+                            .y = y - scale * char.yoff / atlas_h - scale * vsy
+                        },
                         .vs_scale = .{ .x = scale * vsx, .y = scale * vsy },
+                    }));
+                    sg.applyUniforms(1, sg.asRange(&UniformsFragmentAtlas{
+                        .off = .{
+                            .x = @as(f32, @floatFromInt(char.x0)) / atlas_w,
+                            .y = @as(f32, @floatFromInt(char.y0)) / atlas_h
+                        },
+                        .scale = .{
+                            .x = sx,
+                            .y = sy
+                        },
                         .fg = text.fg,
                         .bg = text.bg,
-                    };
-                    sg.applyUniforms(.FS, 0, sg.asRange(&uniforms));
+                    }));
 
                     sg.draw(0, textured_rectangle_indices.len, 1);
                     xoff += scale * char.xadvance / atlas_w;
                 }
             },
-            .Line => {
-                const line = b.pop(primitive.Line);
-                _ = line;
-                //raylib.DrawLineEx(
-                //    castToRaylibVector2(line.start),
-                //    castToRaylibVector2(line.end),
-                //    line.thickness,
-                //    castToRaylibColor(header.color)
-                //);
-            },
-            // .Mesh => {
-            //     const m = b.pop(primitive.Mesh);
-            //     _ = m;
-            //
-            //     //var bind = sg.Bindings{};
-            //     //bind.vertex_buffers[0] = sg.makeBuffer(.{
-            //     //    .data = sg.asRange(m.verts),
-            //     //});
-            //
-            //     //const model = m4.model(.{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 });
-            //     //var uniforms = Uniforms{
-            //     //    .mvp = m4.transpose(m4.mul(vp, model)),
-            //     //    .color = v4{ .x = 255.0, .y = 255.0, .z = 255.0, .w = 255.0 },
-            //     //};
-            //
-            //     //// TODO(anjo): We're always going to miss the last edge, we have to list
-            //     //// the first vertex at the end to get around this...
-            //     ////
-            //     //// we can probably use a geometry shader
-            //     ////  https://learnopengl.com/Advanced-OpenGL/Geometry-Shader
-            //     ////sg.applyPipeline(pip_mesh_line);
-            //     ////sg.applyBindings(bind);
-            //     ////sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-            //     ////sg.draw(0, @intCast(m.verts.len), 1);
-            //
-            //     //uniforms.color.x = @as(f32, @floatFromInt(header.color.r)) / 255.0;
-            //     //uniforms.color.y = @as(f32, @floatFromInt(header.color.g)) / 255.0;
-            //     //uniforms.color.z = @as(f32, @floatFromInt(header.color.b)) / 255.0;
-            //     //uniforms.color.w = @as(f32, @floatFromInt(header.color.a)) / 255.0;
-            //
-            //     //sg.applyPipeline(pip_mesh);
-            //     //sg.applyBindings(bind);
-            //     //sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-            //     //sg.draw(0, @intCast(m.verts.len), 1);
-            //
-            //     //sg.destroyBuffer(bind.vertex_buffers[0]);
-            // },
             .Rectangle => {
                 const r = b.pop(primitive.Rectangle);
                 const offset = v2{ .x = r.size.x / 2, .y = r.size.y / 2 };
                 const model = m4.model2d(v2.add(r.pos, offset), r.size);
-                const uniforms = Uniforms2d{
+
+                sg.applyPipeline(pipeline_2d);
+                sg.applyBindings(rectangle_bind);
+                sg.applyUniforms(0, sg.asRange(&UniformsVertex2d{
                     .mvp = m4.transpose(m4.mul(vp, model)),
+                }));
+                sg.applyUniforms(1, sg.asRange(&UniformsFragment2d{
                     .color = v4{
                         .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
                         .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
                         .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
                         .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
                     },
-                };
-
-                sg.applyPipeline(offscreen_2d.pip);
-                sg.applyBindings(rectangle_bind);
-                sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                }));
                 sg.draw(0, rectangle_indices.len, 1);
             },
             .Mesh => {
                 const cmd = b.pop(primitive.Mesh);
 
-                const node_entry_info = goosepack.lookupEntry(pack, cmd.name);
+                const node_entry_info = goosepack.entry_lookup(pack, cmd.name);
                 const node = goosepack.getResource(pack, node_entry_info.?.index).model_node;
-                const res_model = goosepack.lookup(pack, node.model_name) orelse {
-                    std.log.info("Failed to lookup {s}\n", .{node.model_name});
-                    unreachable;
-                };
-                const model = res_model.model;
+                const model = goosepack.getResource(pack, @intCast(@as(i32, @intCast(node_entry_info.?.index)) + node.root_entry_relative_index)).model;
 
                 if (cmd.draw_children and node_entry_info.?.entry.children != null) {
                     var stack = std.ArrayList(struct {
@@ -1177,32 +1300,38 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                         if (mesh_node.mesh_index) |mesh_index| {
                             const mesh = model.meshes[mesh_index];
                             for (mesh.primitives, 0..) |p, prim_index| {
-                                const bind = bindForMesh(model, mesh_index, @intCast(prim_index));
-                                const mat = model.materials[p.material_index];
-                                sg.applyPipeline(offscreen_3d.pip);
-                                sg.applyBindings(bind);
-                                const uniforms = Uniforms3d{
+                                const material = model.materials[p.material_index];
+                                var mesh_binds = bindForMesh(model, material, mesh_index, @intCast(prim_index));
+                                if (material.has_image) {
+                                    mesh_binds.bind.images[0] = mesh_binds.image;
+                                    mesh_binds.bind.samplers[0] = mesh_binds.sampler;
+                                }
+                                sg.applyPipeline(mesh_binds.pip);
+                                sg.applyBindings(mesh_binds.bind);
+                                sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
                                     .mvp = m4.transpose(m4.mul(vp, transform)),
                                     .model = m4.transpose(transform),
+                                }));
+                                sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
                                     .color = v4{
-                                        .x = mat.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                                        .y = mat.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                                        .z = mat.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                                        .w = mat.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                                        .x = material.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                                        .y = material.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                                        .z = material.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                                        .w = material.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
                                     },
                                     .light_pos = light_pos,
                                     .light_color = light_color,
                                     .camera_pos = camera_pos,
-                                };
-                                sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                                sg.draw(0, @intCast(p.indices.size / 2), 1);
+                                }));
+                                sg.draw(0, @intCast(p.indices.?.len / 2), 1);
                             }
                         }
 
                         if (item.info.entry.children) |children| {
                             for (children) |c| {
-                                const entry = pack.entries.?.items[c];
-                                stack.appendAssumeCapacity(.{ .info = .{ .entry = entry, .index = c }, .parent_transform = transform });
+                                const index: u32 = @intCast(@as(i32, @intCast(item.info.index)) + c);
+                                const entry = pack.entries.?.items[index];
+                                stack.appendAssumeCapacity(.{ .info = .{ .entry = entry, .index = index }, .parent_transform = transform });
                             }
                         }
                     }
@@ -1210,26 +1339,31 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     if (node.mesh_index) |mesh_index| {
                         const mesh = model.meshes[mesh_index];
                         for (mesh.primitives, 0..) |p, prim_index| {
-                            const bind = bindForMesh(model, mesh_index, @intCast(prim_index));
-                            const mat = model.materials[p.material_index];
-                            sg.applyPipeline(offscreen_3d.pip);
-                            sg.applyBindings(bind);
+                            const material = model.materials[p.material_index];
+                            var mesh_binds = bindForMesh(model, material, mesh_index, @intCast(prim_index));
+                            if (material.has_image) {
+                                mesh_binds.bind.images[0] = mesh_binds.image;
+                                mesh_binds.bind.samplers[0] = mesh_binds.sampler;
+                            }
+                            sg.applyPipeline(mesh_binds.pip);
+                            sg.applyBindings(mesh_binds.bind);
                             const transform = m4.mul(cmd.model, node.transform);
-                            const uniforms = Uniforms3d{
+                            sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
                                 .mvp = m4.transpose(m4.mul(vp, transform)),
                                 .model = m4.transpose(transform),
+                            }));
+                            sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
                                 .color = v4{
-                                    .x = mat.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                                    .y = mat.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                                    .z = mat.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                                    .w = mat.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                                    .x = material.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                                    .y = material.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                                    .z = material.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                                    .w = material.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
                                 },
                                 .light_pos = light_pos,
                                 .light_color = light_color,
                                 .camera_pos = camera_pos,
-                            };
-                            sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                            sg.draw(0, @intCast(p.indices.size / 2), 1);
+                            }));
+                            sg.draw(0, @intCast(p.indices.?.len / 2), 1);
                         }
                     }
                 }
@@ -1238,11 +1372,13 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 const cube = b.pop(primitive.Cube);
 
                 {
-                    sg.applyPipeline(offscreen_3d.pip);
+                    sg.applyPipeline(pipeline_3d);
                     sg.applyBindings(cube_bind);
-                    const uniforms = Uniforms3d{
+                    sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
                         .mvp = m4.transpose(m4.mul(vp, cube.model)),
                         .model = m4.transpose(cube.model),
+                    }));
+                    sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
                         .color = v4{
                             .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
                             .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
@@ -1252,29 +1388,9 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                         .light_pos = light_pos,
                         .light_color = light_color,
                         .camera_pos = camera_pos,
-                    };
-                    sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                    }));
                     sg.draw(0, cube_indices.len, 1);
                 }
-
-                // {
-                //     sg.applyPipeline(offscreen_3d.pip);
-                //     sg.applyBindings(bind_cube_model);
-                //     const uniforms = Uniforms{
-                //         //.mvp = m4.transpose(m4.mul(vp, m4.model(.{.x=0,.y=0,.z=10}, .{.x=10,.y=10,.z=10}))),
-                //         //.mvp = m4.transpose(m4.mul(vp, cube.model)),
-                //         .mvp = m4.transpose(m4.mul(vp, m4.mul(cube.model, m4.model(.{ .x = 0, .y = 0, .z = 0 }, .{ .x = 0.5, .y = 0.5, .z = 0.5 })))),
-                //
-                //         .color = v4{
-                //             .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                //             .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                //             .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                //             .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                //         },
-                //     };
-                //     sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                //     sg.draw(0, @intCast(cube_model.indices.?.len / 2), 1);
-                // }
             },
             .CubeOutline => {
                 const cube = b.pop(primitive.CubeOutline);
@@ -1305,11 +1421,13 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                         .z = @as([3]f32, @bitCast(pos[index]))[inds[group][2]],
                     };
                     const m = math.m4.model(pp, ss);
-                    sg.applyPipeline(offscreen_3d.pip);
+                    sg.applyPipeline(pipeline_3d);
                     sg.applyBindings(cube_bind);
-                    const uniforms = Uniforms3d{
+                    sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
                         .mvp = m4.transpose(m4.mul(vp, m4.mul(cube.model, m))),
                         .model = m4.transpose(cube.model),
+                    }));
+                    sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
                         .color = v4{
                             .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
                             .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
@@ -1319,101 +1437,80 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                         .light_pos = light_pos,
                         .light_color = light_color,
                         .camera_pos = camera_pos,
-                    };
-                    sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
+                    }));
                     sg.draw(0, cube_indices.len, 1);
                 }
             },
-            .Plane => {
-                const p = b.pop(primitive.Plane);
-                _ = p;
-                //{
-                //    sg.applyPipeline(offscreen_3d.pip);
-                //    sg.applyBindings(cube_bind);
-                //    const uniforms = Uniforms{
-                //        .mvp = m4.transpose(m4.mul(vp, p.model)),
-                //        .color = v4{
-                //            .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                //            .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                //            .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                //            .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                //        },
-                //    };
+            .VoxelChunk => {
+                const chunk = b.pop(primitive.VoxelChunk);
 
-                //    sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                //    sg.draw(0, cube_indices.len, 1);
-                //}
-            },
-            .Vector => {
-                const vector = b.pop(primitive.Vector);
-                _ = vector;
+                const data_ptr: [*]u8 = @ptrCast(chunk.voxels.ptr);
+                const data_slice = data_ptr[0..4*chunk.voxels.len];
+                //std.debug.assert(4*@sizeOf(f32)*data_slice.len == @sizeOf(primitive.VoxelTransform)*chunk.voxels.len);
+                temp_vertex_buffers.append(sg.makeBuffer(.{
+                    .data = sg.asRange(&voxel_face_vertices),
+                })) catch unreachable;
+                temp_vertex_buffers.append(sg.makeBuffer(.{
+                    .data = sg.asRange(&voxel_face_normals),
+                })) catch unreachable;
+                temp_vertex_buffers.append(sg.makeBuffer(.{
+                    .data = sg.asRange(data_slice),
+                })) catch unreachable;
+                temp_vertex_buffers.append(sg.makeBuffer(.{
+                    .type = .INDEXBUFFER,
+                    .data = sg.asRange(&voxel_face_indices),
+                })) catch unreachable;
+                var bind = sg.Bindings{};
+                bind.vertex_buffers[0] = temp_vertex_buffers.items[0];
+                bind.vertex_buffers[1] = temp_vertex_buffers.items[1];
+                bind.vertex_buffers[2] = temp_vertex_buffers.items[2];
+                bind.index_buffer = temp_vertex_buffers.items[3];
 
-                //const thickness = 0.5;
-                //const model = m4.modelFromZDir(v3.add(vector.pos, v3.scale(0.5 * vector.scale, vector.dir)), .{
-                //    .x = thickness,
-                //    .y = thickness,
-                //    .z = vector.scale,
-                //}, vector.dir);
-                //const uniforms = Uniforms{
-                //    .mvp = m4.transpose(m4.mul(vp, model)),
-                //    .color = v4{
-                //        .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                //        .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                //        .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                //        .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                //    },
-                //};
-
-                //switch (header.pipeline) {
-                //    .depth => sg.applyPipeline(pip_3d),
-                //}
-                //sg.applyBindings(cube_bind);
-                //sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                //sg.draw(0, cube_indices.len, 1);
+                sg.applyPipeline(pipeline_voxel);
+                sg.applyBindings(bind);
+                uniforms_voxel.vp = m4.transpose(vp);
+                sg.applyUniforms(0, sg.asRange(&uniforms_voxel));
+                sg.applyUniforms(1, sg.asRange(&UniformsFragmentVoxelChunk{
+                    .color = v4{
+                        .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                        .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                        .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                        .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                    },
+                    .light_pos = light_pos,
+                    .light_color = light_color,
+                    .camera_pos = camera_pos,
+                }));
+                sg.draw(0, cube_indices.len, @intCast(chunk.voxels.len));
             },
-            .Circle => {
-                const circle = b.pop(primitive.Circle);
-                _ = circle;
-                //const uniforms = Uniforms{
-                //    .mvp = m4.transpose(m4.mul(vp, circle.model)),
-                //    .color = v4{
-                //        .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                //        .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                //        .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                //        .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                //    },
-                //};
-                //sg.applyPipeline(pip_triangle_strip);
-                //sg.applyBindings(circle_bind);
-                //sg.applyUniforms(.VS, 0, sg.asRange(&uniforms));
-                //sg.draw(0, circle_vertices.len, 1);
-                //sg.applyPipeline(pip_2d);
-            },
-            .Color => {},
-            .VoxelChunk => {},
             .VoxelTransform => {},
+            else => {},
         }
     }
 
     {
-        postprocess.bind.fs.images[0] = offscreen_3d.color;
-        sg.beginPass(postprocess.pass);
-        sg.applyPipeline(postprocess.pip);
-        sg.applyBindings(postprocess.bind);
+        binding_textured_rectangle.images[0] = image_3d_framebuffer;
+        sg.beginPass(pass_load_swapchain);
+        sg.applyPipeline(pipeline_postprocess);
+        sg.applyBindings(binding_textured_rectangle);
         sg.draw(0, textured_rectangle_indices.len, 1);
         sg.endPass();
     }
 
+    // TODO(anjo): Move 2d to separate buffer and process here, get rid of this
+    // shader
     {
-        display.bind.fs.images[0] = offscreen_2d.color;
-        sg.beginPass(display.pass);
-        sg.applyPipeline(display.pip);
-        sg.applyBindings(display.bind);
+        binding_textured_rectangle.images[0] = image_2d_framebuffer;
+        sg.beginPass(pass_load_swapchain);
+        sg.applyPipeline(pipeline_overlay_2d);
+        sg.applyBindings(binding_textured_rectangle);
         sg.draw(0, textured_rectangle_indices.len, 1);
         sg.endPass();
     }
 
     sg.commit();
 
-    b.bytes.clear();
+    for (temp_vertex_buffers.items) |buf| {
+        sg.destroyBuffer(buf);
+    }
 }

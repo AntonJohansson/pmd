@@ -6,11 +6,10 @@ pub const stat = @import("stat.zig");
 pub const config = @import("config.zig");
 pub const primitive = @import("primitive.zig");
 pub const code_module = @import("code_module.zig");
-pub const logging = @import("logging.zig");
+pub const log = @import("logging.zig");
 pub const command = @import("command.zig");
 pub const draw_meta = @import("draw_meta.zig");
 pub const draw_api = @import("draw_api.zig");
-pub const threadpool = @import("threadpool.zig");
 pub const goosepack = @import("pack.zig");
 pub const res = @import("res.zig");
 pub const Profile = @import("profile.zig");
@@ -23,6 +22,10 @@ const m4 = math.m4;
 const Camera3d = primitive.Camera3d;
 
 pub const connect_packet_repeat_count = 10;
+pub const target_fps = 165;
+pub const target_tickrate = 165;
+
+const debug_num_frames_to_record = 64;
 
 pub const InputName = enum(u8) {
     // Movement
@@ -43,9 +46,10 @@ pub const InputName = enum(u8) {
     Editor,
     Console,
     Enter,
-    InMenu,
     Save,
     Load,
+    pause,
+    unpause,
 
     // Combat
     SwitchWeapon,
@@ -53,6 +57,10 @@ pub const InputName = enum(u8) {
     // Debug
     DebugIncGamepadOffset,
     DebugDecGamepadOffset,
+    DebugFramePauseDataCollection,
+    DebugFrameBack,
+    DebugFrameForward,
+    DebugShowData,
 };
 
 pub const Input = extern struct {
@@ -328,28 +336,69 @@ pub const WindowItem = union(enum) {
     },
 };
 
-pub const Window = struct {
+pub const WindowPersistentState = struct {
     title: []const u8,
     x: f32,
     y: f32,
     w: f32,
     h: f32,
-    parent: ?u8 = null,
-    children: std.ArrayList(WindowItem),
-    cursor_x: f32 = 0,
-    cursor_y: f32 = 0,
     moving: bool = false,
-    hover: bool = false,
-    color: v3 = .{ .x = 60, .y = 0.5, .z = 0.5 },
 };
 
+pub const WindowState = struct {
+    persistent: *WindowPersistentState,
+    cursor_x: f32 = 0,
+    cursor_y: f32 = 0,
+    color: v3 = .{ .x = 60, .y = 0.5, .z = 0.5 },
+    hover: bool = false,
+};
+
+pub const State = enum {
+    gameplay,
+    editor,
+    pause,
+    mainmenu,
+};
+
+pub fn update_game_state(memory: *Memory, input: *const Input) void {
+    switch (memory.state) {
+        .gameplay => {
+            if (input.isset(.pause)) {
+                memory.state = .pause;
+            }
+        },
+        .editor => {
+            if (input.isset(.pause)) {
+                memory.state = .pause;
+            } else if (input.isset(.Editor)) {
+                memory.state = .gameplay;
+            }
+        },
+        .pause => {
+            if (input.isset(.unpause)) {
+                memory.state = .gameplay;
+            }
+        },
+        .mainmenu => {
+        },
+    }
+}
+
 pub const Memory = struct {
+    // System, things not relevant to gamestate
     pack: goosepack.Pack = undefined,
+    mem: MemoryAllocators = .{},
+    threadpool: std.Thread.Pool = undefined,
+    log_memory: log.LogMemory = undefined,
+
     // game state
+    state: State = .gameplay,
     players: std.BoundedArray(Player, max_players) = .{},
     entities: std.BoundedArray(Entity, 64) = .{},
 
-    windows: ?std.ArrayList(Window) = null,
+    windows_persistent: std.ArrayList(WindowPersistentState) = undefined,
+    windows: std.ArrayList(WindowState) = undefined,
+
     current_window: ?usize = null,
     window_moving_offset: v2 = .{},
 
@@ -385,11 +434,9 @@ pub const Memory = struct {
     selected_entity: ?u32 = null,
     widget: WidgetModel = .{},
 
-    // Memory
-    mem: MemoryAllocators = .{},
-
-    stat_data: stat.StatData = .{},
     profile: Profile = .{},
+    debug_frame_data: bb.CircularBuffer(DebugFrameData, debug_num_frames_to_record) = .{},
+    debug_data_collection_paused: bool = false,
 
     ray_model: ?m4 = null,
 
@@ -412,4 +459,9 @@ pub const Memory = struct {
 
     // in in ns
     time: u64 = 0,
+};
+
+pub const DebugFrameData = struct {
+    profile: *Profile,
+    used: bool = false,
 };

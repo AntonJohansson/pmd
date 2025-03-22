@@ -4,12 +4,24 @@ const v3 = math.v3;
 const m4 = math.m4;
 
 pub const VoxelTransform = struct {
-    pos: v3,
+    pub const FaceDir = enum(u8) {
+        up,
+        down,
+        back,
+        front,
+        left,
+        right
+    };
+
+    x: u8,
+    y: u8,
+    z: u8,
+    face: FaceDir,
 };
 
 pub const VoxelChunk = struct {
     dim: u8 = 16,
-    voxels: []u1,
+    voxels: []VoxelTransform,
 };
 
 pub const Color = struct {
@@ -62,8 +74,8 @@ pub const Mesh = struct {
 pub const Camera3d = extern struct {
     pos: v3 = .{},
     dir: v3 = .{},
-    proj: m4 = math.identity,
-    view: m4 = math.identity,
+    proj: m4 = math.m4_identity,
+    view: m4 = math.m4_identity,
 };
 
 pub const Camera2d = struct {

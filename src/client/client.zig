@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const build_options = @import("build_options");
+
 const common = @import("common");
 const bb = common.bb;
 const stat = common.stat;
@@ -16,6 +18,7 @@ const InputName = common.InputName;
 const goosepack = common.goosepack;
 const draw_api = common.draw_api;
 const draw = @import("draw.zig");
+const disk = if (build_options.debug) @import("pack-disk") else struct {};
 
 const cl = @import("command_meta.zig");
 
@@ -32,11 +35,6 @@ const headers = net.headers;
 const packet = net.packet;
 const packet_meta = net.packet_meta;
 
-const logging = common.logging;
-var log: logging.Log = .{
-    .mirror_to_stdio = false,
-};
-
 const sokol = @import("sokol");
 const sa = sokol.audio;
 const slog = sokol.log;
@@ -46,6 +44,8 @@ const Key = glfw.Key;
 const MouseButton = glfw.MouseButton;
 const GamepadButton = glfw.GamepadButton;
 const GamepadAxis = glfw.GamepadAxis;
+
+var log: common.log.GroupLog(.general) = undefined;
 
 //
 // Input
@@ -117,7 +117,6 @@ const InputType = union(enum) {
     mouse_scroll: MouseScroll,
     gamepad_button: GamepadButton,
     gamepad_axis_abs: GamepadAxisAbs,
-    gamepad_axis: GamepadAxis,
 };
 
 const InputState = struct {
@@ -175,6 +174,124 @@ const InputMap = struct {
     }
 };
 
+const InputMaps = struct {
+    const num_states = @typeInfo(common.State).Enum.fields.len;
+    maps: [num_states]InputMap = [_]InputMap{.{}} ** num_states,
+
+    fn get(self: *@This(), state: common.State) *InputMap {
+        return &self.maps[@intFromEnum(state)];
+    }
+};
+
+fn setup_keyboard_mouse_input(im: *InputMaps) void {
+    const gameplay = im.get(.gameplay);
+    gameplay.map_key(.MoveForward, .state, .w);
+    gameplay.map_key(.MoveLeft, .state, .a);
+    gameplay.map_key(.MoveBack, .state, .s);
+    gameplay.map_key(.MoveRight, .state, .d);
+    gameplay.map_mouse_scroll(.Jump, .scroll_down);
+    gameplay.map_key(.Crouch, .state, .left_control);
+    gameplay.map_key(.Sprint, .state, .left_shift);
+    gameplay.map_key(.ResetCamera, .rising_edge, .r);
+    gameplay.map_key(.Console, .toggle, .grave_accent);
+    gameplay.map_key(.Enter, .rising_edge, .enter);
+    gameplay.map_key(.Save, .rising_edge, .o);
+    gameplay.map_key(.Load, .rising_edge, .p);
+    gameplay.map_mouse_button(.MoveUp, .state, .five);
+    gameplay.map_mouse_button(.MoveDown, .state, .four);
+    gameplay.map_mouse_button(.Interact, .rising_edge, .left);
+    gameplay.map_mouse_button(.AltInteract, .state, .right);
+    gameplay.map_key(.SwitchWeapon, .rising_edge, .q);
+    gameplay.map_key(.DebugFramePauseDataCollection, .rising_edge, .b);
+    gameplay.map_key(.DebugFrameBack, .rising_edge, .c);
+    gameplay.map_key(.DebugFrameForward, .rising_edge, .v);
+    gameplay.map_key(.DebugShowData, .toggle, .x);
+    gameplay.map_key(.pause, .falling_edge, .escape);
+    gameplay.map_key(.Editor, .rising_edge, .F1);
+
+    serialize_input_map("gameplay.conf", gameplay) catch {};
+
+    const editor = im.get(.editor);
+    editor.map_key(.MoveForward, .state, .w);
+    editor.map_key(.MoveLeft, .state, .a);
+    editor.map_key(.MoveBack, .state, .s);
+    editor.map_key(.MoveRight, .state, .d);
+    editor.map_key(.MoveUp, .state, .space);
+    editor.map_key(.MoveDown, .state, .left_control);
+    editor.map_key(.Sprint, .state, .left_shift);
+    editor.map_key(.ResetCamera, .rising_edge, .r);
+    editor.map_key(.Console, .toggle, .grave_accent);
+    editor.map_key(.Enter, .rising_edge, .enter);
+    editor.map_key(.Save, .rising_edge, .o);
+    editor.map_key(.Load, .rising_edge, .p);
+    editor.map_mouse_button(.Interact, .rising_edge, .left);
+    editor.map_mouse_button(.AltInteract, .rising_edge, .right);
+    editor.map_key(.pause, .falling_edge, .escape);
+    editor.map_key(.Editor, .falling_edge, .F1);
+
+    const pause = im.get(.pause);
+    pause.map_key(.MoveForward, .state, .w);
+    pause.map_key(.MoveLeft, .state, .a);
+    pause.map_key(.MoveBack, .state, .s);
+    pause.map_key(.MoveRight, .state, .d);
+    pause.map_key(.MoveUp, .state, .space);
+    pause.map_key(.MoveDown, .state, .left_control);
+    pause.map_key(.Sprint, .state, .left_shift);
+    pause.map_key(.ResetCamera, .rising_edge, .r);
+    pause.map_key(.Console, .toggle, .grave_accent);
+    pause.map_key(.Enter, .rising_edge, .enter);
+    pause.map_key(.Save, .rising_edge, .o);
+    pause.map_key(.Load, .rising_edge, .p);
+    pause.map_mouse_button(.Interact, .rising_edge, .left);
+    pause.map_mouse_button(.AltInteract, .rising_edge, .right);
+    pause.map_key(.unpause, .falling_edge, .escape);
+
+}
+
+fn setup_gamepad_input(im: *InputMaps) void {
+    const gameplay = im.get(.gameplay);
+    gameplay.map_gamepad_axis_abs(.MoveForward, .state, .{ .axis = .left_y, .dir = .smaller_than_zero });
+    gameplay.map_gamepad_axis_abs(.MoveBack, .state, .{ .axis = .left_y, .dir = .larger_than_zero });
+    gameplay.map_gamepad_axis_abs(.MoveRight, .state, .{ .axis = .left_x, .dir = .larger_than_zero });
+    gameplay.map_gamepad_axis_abs(.MoveLeft, .state, .{ .axis = .left_x, .dir = .smaller_than_zero });
+    gameplay.map_gamepad_button(.Jump, .rising_edge, .right_bumper);
+    gameplay.map_gamepad_button(.Crouch, .state, .left_bumper);
+    //gameplay.map_key(.Sprint,                    .state,       .left_shift);
+    gameplay.map_gamepad_button(.Editor, .rising_edge, .start);
+    gameplay.map_gamepad_axis_abs(.Interact, .rising_edge, .{ .axis = .right_trigger, .dir = .larger_than_zero });
+    gameplay.map_gamepad_button(.AltInteract, .state, .right_bumper);
+    gameplay.map_gamepad_button(.SwitchWeapon, .rising_edge, .y);
+    gameplay.map_gamepad_button(.DebugIncGamepadOffset, .rising_edge, .dpad_up);
+    gameplay.map_gamepad_button(.DebugDecGamepadOffset, .rising_edge, .dpad_down);
+
+    const editor = im.get(.editor);
+    editor.map_gamepad_axis_abs(.MoveForward, .state, .{ .axis = .left_y, .dir = .smaller_than_zero });
+    editor.map_gamepad_axis_abs(.MoveBack, .state, .{ .axis = .left_y, .dir = .larger_than_zero });
+    editor.map_gamepad_axis_abs(.MoveRight, .state, .{ .axis = .left_x, .dir = .larger_than_zero });
+    editor.map_gamepad_axis_abs(.MoveLeft, .state, .{ .axis = .left_x, .dir = .smaller_than_zero });
+    editor.map_gamepad_button(.MoveUp, .state, .a);
+    editor.map_gamepad_button(.MoveDown, .state, .b);
+    editor.map_gamepad_button(.Editor, .toggle, .start);
+    editor.map_gamepad_button(.Interact, .rising_edge, .x);
+    editor.map_gamepad_button(.AltInteract, .state, .right_bumper);
+}
+
+fn serialize_input_map(filename: []const u8, input_map: *InputMap) !void {
+    const file = try std.fs.cwd().createFile(filename, .{});
+    defer file.close();
+    const writer = file.writer();
+
+    for (input_map.map, 0..) |state, i| {
+        const e: InputName = @enumFromInt(i);
+        try writer.writeAll(@tagName(e));
+        try writer.writeAll(" ");
+        try writer.writeAll(@tagName(state.input_type));
+        try writer.writeAll(" ");
+        try writer.writeAll(@tagName(state.trigger));
+        try writer.writeAll("\n");
+    }
+}
+
 //
 // LocalPlayer represents a player on the local game. This is to support
 // splitscreen/couch co-op.
@@ -182,8 +299,7 @@ const InputMap = struct {
 const LocalPlayer = struct {
     input_device: ?InputDevice = null,
     input_device_id: ?usize = null,
-    gameplay_input_map: ?*InputMap = null,
-    editor_input_map: ?*InputMap = null,
+    input_maps: ?InputMaps = null,
     input: Input = undefined,
 
     // TODO: We only need to allocate this when on network
@@ -297,35 +413,52 @@ pub fn main() !void {
     // 2. ArenaAllocator for temporary data that during a frame
     var general_purpose_allocator: std.heap.GeneralPurposeAllocator(.{}) = .{};
     var fixed_allocator = std.heap.FixedBufferAllocator.init(try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, 128000 * std.mem.page_size));
-    log.info("{}", .{fixed_allocator.buffer.len});
     defer std.heap.page_allocator.free(fixed_allocator.buffer);
     //var fixed_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    memory.mem.frame = fixed_allocator.allocator();
+    memory.mem.frame = fixed_allocator.threadSafeAllocator();
     memory.mem.persistent = general_purpose_allocator.allocator();
+
+    memory.log_memory = try common.log.LogMemory.init(memory.mem.persistent, memory.mem.frame, null, false);
+    log = memory.log_memory.group_log(.general);
+
+    if (build_options.debug) {
+        disk.frame = memory.mem.frame;
+        disk.persistent = memory.mem.persistent;
+    }
 
     memory.profile.init(memory.mem.persistent);
     defer memory.profile.deinit();
-    defer memory.profile.print();
 
-    try common.threadpool.start(memory.mem.persistent);
+    const num_cpus = std.Thread.getCpuCount() catch 1;
+    try memory.threadpool.init(.{
+        .allocator = memory.mem.persistent,
+        .n_jobs = @intCast(num_cpus-1),
+    });
+    defer memory.threadpool.deinit();
 
     net.mem = memory.mem;
     res.mem = memory.mem;
+    net.init(&memory.log_memory);
 
-    memory.windows = std.ArrayList(common.Window).init(memory.mem.persistent);
+    memory.windows_persistent = std.ArrayList(common.WindowPersistentState).init(memory.mem.persistent);
 
     //
     // Load pack
     //
 
-    const pack_in_memory: ?[]u8 = res.readFileToMemory(memory.mem.persistent, "res.gp") catch null;
+    goosepack.setAllocators(memory.mem.frame, memory.mem.persistent);
+
+    var pack_in_memory: ?[]u8 = undefined;
     defer {
         if (pack_in_memory) |bytes| memory.mem.persistent.free(bytes);
     }
-    goosepack.setAllocators(memory.mem.frame, memory.mem.persistent);
-    memory.pack = goosepack.init();
-    if (pack_in_memory) |bytes| {
-        try goosepack.load(&memory.pack, bytes);
+
+    {
+        pack_in_memory = res.readFileToMemory(memory.mem.persistent, "res.gp") catch null;
+        memory.pack = goosepack.init();
+        if (pack_in_memory) |bytes| {
+            try goosepack.load(&memory.pack, bytes);
+        }
     }
 
     //
@@ -338,15 +471,10 @@ pub fn main() !void {
     // Simulation state
     //
 
-    const fps = 165;
-    const desired_frame_time = std.time.ns_per_s / fps;
-    const dt: f32 = 1.0 / @as(f32, @floatFromInt(fps));
+    const desired_frame_time = std.time.ns_per_s / common.target_fps;
+    const dt: f32 = 1.0 / @as(f32, @floatFromInt(common.target_fps));
 
     var tick: u64 = 0;
-
-    //
-    // Network state
-    //
 
     //
     // GLFW init
@@ -370,7 +498,7 @@ pub fn main() !void {
     };
     defer window.destroy();
     glfw.makeContextCurrent(window);
-    glfw.swapInterval(1);
+    glfw.swapInterval(0);
     window.setInputMode(.cursor, .disabled);
     window.setInputModeRawMouseMotion(true);
     window.setCharCallback(charCallback);
@@ -383,7 +511,7 @@ pub fn main() !void {
     }
 
     // initialize renderer
-    draw.init(memory.mem, &memory.pack);
+    draw.init(&memory.log_memory, memory.mem, &memory.pack);
     defer draw.deinit();
 
     //
@@ -403,6 +531,8 @@ pub fn main() !void {
     // Modules
     //
     var module = try code_module.CodeModule(struct {
+        init: *fn (memory: *Memory) bool,
+        deinit: *fn (memory: *Memory) void,
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
         authorizedPlayerUpdate: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
         authorizedUpdate: *fn (vars: *const Vars, memory: *Memory, dt: f32) void,
@@ -411,6 +541,10 @@ pub fn main() !void {
 
     try module.open(memory.mem.persistent);
     defer module.close();
+    if (!module.function_table.init(&memory)) {
+        return;
+    }
+    defer module.function_table.deinit(&memory);
 
     //
     // Input state
@@ -419,75 +553,7 @@ pub fn main() !void {
     const max_num_gamepads = @intFromEnum(glfw.Joystick.Id.last) + 1;
     const keyboard_input_device_id = @intFromEnum(glfw.Joystick.Id.last) + 1;
     var occupied_input_devices = [_]InputDeviceState{.connected} ** (keyboard_input_device_id + 1);
-
-    var default_keyboard_input_map_gameplay = InputMap{};
-    default_keyboard_input_map_gameplay.map_key(.MoveForward, .state, .w);
-    default_keyboard_input_map_gameplay.map_key(.MoveLeft, .state, .a);
-    default_keyboard_input_map_gameplay.map_key(.MoveBack, .state, .s);
-    default_keyboard_input_map_gameplay.map_key(.MoveRight, .state, .d);
-    default_keyboard_input_map_gameplay.map_mouse_scroll(.Jump, .scroll_down);
-    default_keyboard_input_map_gameplay.map_key(.Crouch, .state, .left_control);
-    default_keyboard_input_map_gameplay.map_key(.Sprint, .state, .left_shift);
-    default_keyboard_input_map_gameplay.map_key(.ResetCamera, .rising_edge, .r);
-    default_keyboard_input_map_gameplay.map_key(.Console, .toggle, .grave_accent);
-    default_keyboard_input_map_gameplay.map_key(.Enter, .rising_edge, .enter);
-    default_keyboard_input_map_gameplay.map_key(.Editor, .toggle, .x);
-    default_keyboard_input_map_gameplay.map_key(.Save, .rising_edge, .o);
-    default_keyboard_input_map_gameplay.map_key(.Load, .rising_edge, .p);
-    default_keyboard_input_map_gameplay.map_mouse_button(.MoveUp, .state, .five);
-    default_keyboard_input_map_gameplay.map_mouse_button(.MoveDown, .state, .four);
-    default_keyboard_input_map_gameplay.map_mouse_button(.Interact, .rising_edge, .left);
-    default_keyboard_input_map_gameplay.map_mouse_button(.AltInteract, .state, .right);
-    default_keyboard_input_map_gameplay.map_key(.SwitchWeapon, .rising_edge, .q);
-
-    var default_keyboard_input_map_editor = InputMap{};
-    default_keyboard_input_map_editor.map_key(.MoveForward, .state, .w);
-    default_keyboard_input_map_editor.map_key(.MoveLeft, .state, .a);
-    default_keyboard_input_map_editor.map_key(.MoveBack, .state, .s);
-    default_keyboard_input_map_editor.map_key(.MoveRight, .state, .d);
-    default_keyboard_input_map_editor.map_key(.MoveUp, .state, .space);
-    default_keyboard_input_map_editor.map_key(.MoveDown, .state, .left_control);
-    default_keyboard_input_map_editor.map_key(.Sprint, .state, .left_shift);
-    default_keyboard_input_map_editor.map_key(.ResetCamera, .rising_edge, .r);
-    default_keyboard_input_map_editor.map_key(.Console, .toggle, .grave_accent);
-    default_keyboard_input_map_editor.map_key(.Enter, .rising_edge, .enter);
-    default_keyboard_input_map_editor.map_key(.InMenu, .toggle, .escape);
-    default_keyboard_input_map_editor.map_key(.Editor, .toggle, .x);
-    default_keyboard_input_map_editor.map_key(.Save, .rising_edge, .o);
-    default_keyboard_input_map_editor.map_key(.Load, .rising_edge, .p);
-    default_keyboard_input_map_editor.map_mouse_button(.Interact, .rising_edge, .left);
-    default_keyboard_input_map_editor.map_mouse_button(.AltInteract, .rising_edge, .right);
-
-    var default_gamepad_input_map_gameplay = InputMap{};
-    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveForward, .state, .{ .axis = .left_y, .dir = .smaller_than_zero });
-    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveBack, .state, .{ .axis = .left_y, .dir = .larger_than_zero });
-    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveRight, .state, .{ .axis = .left_x, .dir = .larger_than_zero });
-    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.MoveLeft, .state, .{ .axis = .left_x, .dir = .smaller_than_zero });
-    default_gamepad_input_map_gameplay.map_gamepad_button(.Jump, .rising_edge, .right_bumper);
-    default_gamepad_input_map_gameplay.map_gamepad_button(.Crouch, .state, .left_bumper);
-    //default_gamepad_input_map_gameplay.map_key(.Sprint,                    .state,       .left_shift);
-    default_gamepad_input_map_gameplay.map_gamepad_button(.Editor, .rising_edge, .start);
-    default_gamepad_input_map_gameplay.map_gamepad_axis_abs(.Interact, .rising_edge, .{ .axis = .right_trigger, .dir = .larger_than_zero });
-    default_gamepad_input_map_gameplay.map_gamepad_button(.AltInteract, .state, .right_bumper);
-    default_gamepad_input_map_gameplay.map_gamepad_button(.SwitchWeapon, .rising_edge, .y);
-
     var debug_gamepad_off: usize = 0;
-    default_gamepad_input_map_gameplay.map_gamepad_button(.DebugIncGamepadOffset, .rising_edge, .dpad_up);
-    default_gamepad_input_map_gameplay.map_gamepad_button(.DebugDecGamepadOffset, .rising_edge, .dpad_down);
-
-    var default_gamepad_input_map_editor = InputMap{};
-    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveForward, .state, .{ .axis = .left_y, .dir = .smaller_than_zero });
-    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveBack, .state, .{ .axis = .left_y, .dir = .larger_than_zero });
-    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveRight, .state, .{ .axis = .left_x, .dir = .larger_than_zero });
-    default_gamepad_input_map_editor.map_gamepad_axis_abs(.MoveLeft, .state, .{ .axis = .left_x, .dir = .smaller_than_zero });
-    default_gamepad_input_map_editor.map_gamepad_button(.MoveUp, .state, .a);
-    default_gamepad_input_map_editor.map_gamepad_button(.MoveDown, .state, .b);
-    //default_gamepad_input_map_editor.map_key(.Sprint,                    .state,       .left_shift);
-    default_gamepad_input_map_editor.map_gamepad_button(.Editor, .toggle, .start);
-    default_gamepad_input_map_editor.map_gamepad_button(.Interact, .rising_edge, .x);
-    default_gamepad_input_map_editor.map_gamepad_button(.AltInteract, .state, .right_bumper);
-
-    memory.vel_graph.data = try memory.mem.persistent.alloc(f32, 2 * fps);
 
     var command_buffer: draw_api.CommandBuffer = .{};
 
@@ -515,11 +581,12 @@ pub fn main() !void {
     var running = true;
     while (running) {
         memory.profile.begin_frame();
-        defer memory.profile.end_frame();
 
         frame_start_time = timer.read();
 
         log.info("---- Starting tick {}", .{tick});
+
+        memory.windows = std.ArrayList(common.WindowState).init(memory.mem.frame);
 
         {
             scroll_delta = 0.0;
@@ -651,7 +718,7 @@ pub fn main() !void {
                                         var auth_memory = memory;
                                         while (offset <= 0) : (offset += 1) {
                                             const old_input = local_player.?.input_buffer.peekRelative(offset);
-                                            module.function_table.update(&config.vars, &auth_memory, &auth_player, &old_input, dt);
+                                            module.function_table.update(&config.vars, &auth_memory, &auth_player, old_input, dt);
                                         }
 
                                         if (!v3.eql(auth_player.pos, player.?.pos)) {
@@ -750,7 +817,6 @@ pub fn main() !void {
                 memory.profile.end(block_process);
             }
 
-
             //
             // Handle client input
             //
@@ -778,7 +844,6 @@ pub fn main() !void {
                                     const mouse_moved = pos.xpos > 0 or pos.ypos > 0;
                                     if (key_pressed or mouse_moved) {
                                         occupied_input_devices[i] = .occupied;
-                                        log.info("Mouse/keyboard", .{});
 
                                         // add a player so we can play locally
                                         // TODO: don't perform attempts to read/write net
@@ -791,8 +856,8 @@ pub fn main() !void {
                                                 lp.id = null;
                                             }
                                             lp.input_device_id = i;
-                                            lp.gameplay_input_map = &default_keyboard_input_map_gameplay;
-                                            lp.editor_input_map = &default_keyboard_input_map_editor;
+                                            lp.input_maps = .{};
+                                            setup_keyboard_mouse_input(&lp.input_maps.?);
 
                                             if (server_index) |index| {
                                                 net.pushMessage(index, packet.PlayerJoinRequest{});
@@ -847,8 +912,8 @@ pub fn main() !void {
                                                         lp.id = null;
                                                     }
                                                     lp.input_device_id = i;
-                                                    lp.gameplay_input_map = &default_gamepad_input_map_gameplay;
-                                                    lp.editor_input_map = &default_gamepad_input_map_editor;
+                                                    lp.input_maps = .{};
+                                                    setup_gamepad_input(&lp.input_maps.?);
 
                                                     if (!connected) {
                                                         const player = Player{
@@ -886,12 +951,39 @@ pub fn main() !void {
                         defer memory.profile.end(block);
 
                         for (local_players.slice()) |*lp| {
-                            if (lp.input_device_id == null or lp.id == null)
-                            continue;
+                            if (lp.input_device_id == null or lp.id == null) {
+                                continue;
+                            }
+                            //{
+                            //    inline for (@typeInfo(Key).Enum.fields) |ef| {
+                            //        if (ef.value == -1) {
+                            //            continue;
+                            //        }
+                            //        const key: Key = @enumFromInt(ef.value);
+                            //        std.log.info("{} - {s} - {}", .{ef.value, ef.name, window.getKey(key)});
+                            //    }
+                            //    inline for (@typeInfo(MouseButton).Enum.fields) |ef| {
+                            //        const mb: MouseButton = @enumFromInt(ef.value);
+                            //        std.log.info("{} - {s} - {}", .{ef.value, ef.name, window.getMouseButton(mb)});
+                            //    }
+                            //    inline for (@typeInfo(GamepadButton).Enum.fields) |ef| {
+                            //        const gb: GamepadButton = @enumFromInt(ef.value);
+                            //        const index: glfw.Joystick.Id = @enumFromInt((lp.input_device_id.? + max_num_gamepads - debug_gamepad_off) % max_num_gamepads);
+                            //        const gamepad = glfw.Joystick.getGamepadState(.{ .jid = index }) orelse {
+                            //            continue;
+                            //        };
+                            //        std.log.info("{} - {s} - {}", .{ef.value, ef.name, gamepad.getButton(gb)});
+                            //    }
+                            //    if (scroll_delta > 0) {
+                            //    }
+                            //    if (scroll_delta < 0) {
+                            //    }
+                            //}
 
                             // Collect inputs if we're not in the console
                             {
-                                const input_map = if (lp.input.isset(.Editor)) lp.editor_input_map.? else lp.gameplay_input_map.?;
+                                common.update_game_state(&memory, &lp.input);
+                                const input_map = lp.input_maps.?.get(memory.state);
 
                                 for (&input_map.map, 0..) |*state, i| {
                                     const input_name: InputName = @enumFromInt(i);
@@ -960,7 +1052,7 @@ pub fn main() !void {
                                 lp.input.scroll = scroll_delta;
 
                                 var delta: v2 = .{};
-                            {
+                                {
                                     const pos = window.getCursorPos();
                                     delta.x = @as(f32, @floatCast(pos.xpos)) - old_mouse_pos.x;
                                     delta.y = @as(f32, @floatCast(pos.ypos)) - old_mouse_pos.y;
@@ -1192,6 +1284,46 @@ pub fn main() !void {
             // End of frame
             //
 
+            // In debug mode, check for updates to the pack
+            if (build_options.debug) {
+                if (tick % config.Vars.pack_update_check_interval_ns == 0) {
+                    const block = memory.profile.begin("pack update", 0);
+                    memory.profile.end(block);
+
+                    const entries = disk.collect_and_update_entries(&memory.pack) catch unreachable;
+                    for (entries) |e| {
+                        std.log.info("- {s}", .{e.name});
+                    }
+                    if (entries.len > 0) {
+
+                        // builder will be .deinit() from thread which writes to the pack file
+                        var builder = try goosepack.saveToMemory(&memory.pack);
+                        pack_in_memory = try builder.dumpToBuffer(memory.mem.persistent);
+                        memory.pack = goosepack.init();
+                        try goosepack.load(&memory.pack, pack_in_memory.?);
+                        // Swawn thread which writes to disk
+                        try memory.threadpool.spawn(write_pack_to_file.run, .{&builder, "res.gp"});
+
+                        // Force recompilation of shaders and etc.
+                        draw.resources_update(entries);
+                    }
+                }
+            }
+
+            // Debug profiling data collection
+            memory.profile.end_frame();
+            if (!memory.debug_data_collection_paused) {
+                const next = memory.debug_frame_data.peekRelative(1);
+                if (next.used) {
+                    next.profile.free_anchors();
+                }
+
+                memory.debug_frame_data.push(.{
+                    .profile = memory.profile.duplicate() catch unreachable,
+                    .used = true,
+                });
+            }
+
             tick += 1;
 
             frame_end_time = timer.read();
@@ -1210,13 +1342,11 @@ pub fn main() !void {
                 while (timer.read() - start_sleep < time_left) {}
             }
 
-            //_ = fixed_allocator.reset(.free_all);
             fixed_allocator.reset();
         }
     }
 
     std.posix.close(host.fd);
-    common.threadpool.join();
 }
 
 fn appendSliceAssumeForceDstAlignment(comptime alignment: usize, comptime T: type, bounded_array: anytype, src: []align(alignment) const T) void {
@@ -1224,3 +1354,14 @@ fn appendSliceAssumeForceDstAlignment(comptime alignment: usize, comptime T: typ
     bounded_array.len = @intCast(bounded_array.len + src.len);
     @memcpy(@as([]align(alignment) T, @ptrCast(bounded_array.slice()[old_len..][0..src.len])), src);
 }
+
+const write_pack_to_file =
+    if (build_options.debug)
+        struct {
+            fn run(builder: *goosepack.StringBuilder, file: []const u8) void {
+                builder.dumpToFile(file) catch {};
+                builder.deinit();
+            }
+        }
+    else
+        struct {};

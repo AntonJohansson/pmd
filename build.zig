@@ -5,10 +5,31 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const sokol_dep = b.dependency("sokol-zig", .{
+    const sokol_dep = b.dependency("sokol", .{
         .target = target,
         .optimize = optimize,
     });
+
+    const zphysics_dep = b.dependency("zphysics", .{
+        .target = target,
+        .optimize = optimize,
+        .use_double_precision = false,
+        .enable_cross_platform_determinism = true,
+    });
+
+
+    //
+    // build_options
+    //
+
+    const options = b.addOptions();
+    const production = b.option(bool, "production", "disables debug engine features (hot reloading, modules, pack recompilation)") orelse false;
+    options.addOption(bool, "debug", !production);
+
+    const build_options = b.createModule(.{
+        .root_source_file = b.path("src/build_options.zig"),
+    });
+    build_options.addOptions("options", options);
 
     //
     // common
@@ -16,8 +37,36 @@ pub fn build(b: *std.Build) !void {
 
     const common = b.createModule(.{
         .root_source_file = b.path("src/common/common.zig"),
-        //.dependencies = &.{.{ .name = "sokol", .module = sokol_module }},
     });
+    common.addImport("build_options", build_options);
+
+    //
+    // pack
+    //
+
+    const pack_disk = b.createModule(.{
+        .root_source_file = b.path("src/tools/pack-disk.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    pack_disk.addImport("common", common);
+    pack_disk.addImport("sokol", sokol_dep.module("sokol"));
+    pack_disk.addIncludePath(b.path("src/tools"));
+    pack_disk.addCSourceFile(.{ .file = b.path("src/tools/stb.c"), .flags = &.{
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    } });
+
+    const pack = b.addExecutable(.{
+        .name = "pack",
+        .root_source_file = b.path("src/tools/pack.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pack.root_module.addImport("common", common);
+    pack.root_module.addImport("pack-disk", pack_disk);
+    b.installArtifact(pack);
 
     //
     // net
@@ -27,6 +76,7 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/net/net.zig"),
         .imports = &.{.{ .name = "common", .module = common }},
     });
+    net.addImport("build_options", build_options);
 
     //
     // lib
@@ -38,18 +88,26 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    // TODO: Remove when renderer is moved to separate library
-    //libgame.addModule("sokol", sokol_module);
     libgame.root_module.addImport("common", common);
     libgame.root_module.addImport("net", net);
-    //libgame.linkLibrary(sokol_build);
+    libgame.root_module.addImport("build_options", build_options);
+    libgame.root_module.addImport("zphysics", zphysics_dep.module("root"));
+    libgame.linkLibrary(zphysics_dep.artifact("joltc"));
     _ = b.installArtifact(libgame);
+
+    //
+    // mach glfw dependency
+    //
+    const glfw_dep = b.dependency("mach-glfw", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     //
     // client
     //
-    const client_dir = try std.fs.cwd().openDir("src/client", .{});
-    try std.fs.cwd().copyFile("third_party/SDL_GameControllerDB/gamecontrollerdb.txt", client_dir, "gamecontrollerdb.txt", .{});
+    //const client_dir = try std.fs.cwd().openDir("src/client", .{});
+    //try std.fs.cwd().copyFile("third_party/SDL_GameControllerDB/gamecontrollerdb.txt", client_dir, "gamecontrollerdb.txt", .{});
 
     const client = b.addExecutable(.{
         .name = "client",
@@ -57,26 +115,15 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    client.addCSourceFile(.{ .file = b.path("src/client/stb.c"), .flags = &.{
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-    } });
     client.addIncludePath(b.path("src/client"));
     client.linkLibC();
     client.root_module.addImport("sokol", sokol_dep.module("sokol"));
     client.root_module.addImport("common", common);
     client.root_module.addImport("net", net);
-    //client.linkLibrary(sokol_build);
-    b.installArtifact(client);
-
-    // Use mach-glfw
-    const glfw_dep = b.dependency("mach-glfw", .{
-        .target = target,
-        .optimize = optimize,
-    });
     client.root_module.addImport("mach-glfw", glfw_dep.module("mach-glfw"));
-    //@import("mach_glfw").link(glfw_dep.builder, client);
+    client.root_module.addImport("pack-disk", pack_disk);
+    client.root_module.addImport("build_options", build_options);
+    b.installArtifact(client);
 
     const run_client_cmd = b.addRunArtifact(client);
     run_client_cmd.step.dependOn(b.getInstallStep());
@@ -98,6 +145,8 @@ pub fn build(b: *std.Build) !void {
     });
     server.root_module.addImport("common", common);
     server.root_module.addImport("net", net);
+    client.root_module.addImport("pack-disk", pack_disk);
+    server.root_module.addImport("build_options", build_options);
     server.linkLibC();
     b.installArtifact(server);
 
@@ -110,28 +159,8 @@ pub fn build(b: *std.Build) !void {
     run_server_step.dependOn(&run_server_cmd.step);
 
     //
-    // pack
+    // Run step
     //
-
-    const pack_dir = try std.fs.cwd().openDir("src/tools", .{});
-    try std.fs.cwd().copyFile("third_party/SDL_GameControllerDB/gamecontrollerdb.txt", pack_dir, "gamecontrollerdb.txt", .{});
-
-    const pack = b.addExecutable(.{
-        .name = "pack",
-        .root_source_file = b.path("src/tools/pack.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    pack.addCSourceFile(.{ .file = b.path("src/tools/stb.c"), .flags = &.{
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-    } });
-    pack.root_module.addImport("common", common);
-    pack.root_module.addImport("sokol", sokol_dep.module("sokol"));
-    pack.addIncludePath(b.path("src/tools"));
-    pack.linkLibC();
-    b.installArtifact(pack);
 
     const run_pack_cmd = b.addRunArtifact(pack);
     run_pack_cmd.step.dependOn(b.getInstallStep());

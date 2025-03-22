@@ -1,21 +1,12 @@
 const std = @import("std");
-//const raylib = @cImport({
-//    @cInclude("raylib.h");
-//});
+const build_options = @import("build_options");
 
 pub const Vars = struct {
     draw_fps: bool = false,
     draw_perf: bool = false,
     draw_net: bool = false,
-    mode2d: bool = false,
 
     bloom: bool = false,
-
-    //rt: raylib.RenderTexture = undefined,
-    bloom_scale: u32 = 2,
-    //bloom_mode: c_int = raylib.TEXTURE_FILTER_POINT,
-    //bloom_downscale: raylib.RenderTexture = undefined,
-    //bloom_upscale: raylib.RenderTexture = undefined,
 
     maxspeed: f32 = 2000,
     friction: f32 = 4,
@@ -49,7 +40,7 @@ pub const Vars = struct {
 
     // camera stuffs
     fov: f32 = 80.0,
-    fov_zoom: f32 = 40.0,
+    fov_zoom: f32 = 20.0,
     aspect: f32 = 16.0 / 9.0,
 
     // weapon model stuff
@@ -87,6 +78,14 @@ pub const Vars = struct {
     pistol_handle_off_x: f32 = -2.0,
     pistol_handle_off_y: f32 = 0.0,
     pistol_handle_off_z: f32 = -1.2,
+
+    pub usingnamespace if (build_options.debug) struct {
+        pub const pack_update_check_interval_ns: u64 = 165;
+    } else struct {};
+};
+
+pub const DebugVars = struct {
+    pack_update_check_interval_sec: f32 = 1.0,
 };
 
 pub var vars: Vars = .{};

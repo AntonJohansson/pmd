@@ -23,10 +23,7 @@ const vars = &config.vars;
 const math = common.math;
 const v3 = math.v3;
 
-const logging = common.logging;
-var log: logging.Log = .{
-    .mirror_to_stdio = true,
-};
+var log: common.log.GroupLog(.general) = undefined;
 
 const PeerData = struct {
     ids: std.BoundedArray(EntityId, 4) = .{},
@@ -56,7 +53,11 @@ pub fn main() !void {
     memory.mem.frame = arena_allocator.allocator();
     memory.mem.persistent = general_purpose_allocator.allocator();
 
+    memory.log_memory = try common.log.LogMemory.init(memory.mem.persistent, memory.mem.frame, null, false);
+    log = memory.log_memory.group_log(.general);
+
     net.mem = memory.mem;
+    net.init(&memory.log_memory);
 
     var module = try code_module.CodeModule(struct {
         update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
@@ -78,12 +79,10 @@ pub fn main() !void {
 
     const new_connections: std.BoundedArray(NewConnectionData, 4) = .{};
 
-    const fps = 165;
-    const desired_frame_time = std.time.ns_per_s / fps;
-    const dt: f32 = 1.0 / @as(f32, @floatFromInt(fps));
+    const desired_frame_time = std.time.ns_per_s / common.target_fps;
+    const dt: f32 = 1.0 / @as(f32, @floatFromInt(common.target_fps));
 
     var tick: u64 = 0;
-    //const dt: f32 = 1.0/@intToFloat(f32, fps);
     const running = true;
 
     const crand = std.crypto.random;

@@ -1,5 +1,7 @@
 const std = @import("std");
 const res = @import("res.zig");
+const build_options = @import("build_options");
+const disk = if (build_options.debug) @import("pack-disk") else struct {};
 
 const format_version = 1;
 const magic: u32 = 'g' | ('o' << 8) | ('s' << 16) | ('e' << 24);
@@ -26,8 +28,8 @@ pub const Entry = struct {
     offset: u32,
     size: u32 = 0,
     name: []const u8,
-    children: ?[]u32 = null,
-    parent: ?u32 = null,
+    children: ?[]i32 = null,
+    parent: ?i32 = null,
 
     srcs: []EntrySrc,
 };
@@ -56,6 +58,11 @@ pub const ResourceType = enum(u8) {
     directory,
 };
 
+const DiskError = error{
+    EmptyFile,
+    InvalidMagic,
+};
+
 pub const Pack = struct {
     header: Header = .{},
     resources: ?std.ArrayList(Resource) = null,
@@ -78,11 +85,6 @@ pub fn init() Pack {
     pack.resource_dirty = std.ArrayList(bool).init(persistent);
     return pack;
 }
-
-const DiskError = error{
-    EmptyFile,
-    InvalidMagic,
-};
 
 pub fn load(pack: *Pack, bytes: []u8) !void {
     var offset: usize = 0;
@@ -206,7 +208,7 @@ pub const EntryInfo = struct {
     entry: Entry,
 };
 
-pub fn lookupEntry(pack: *Pack, name: []const u8) ?EntryInfo {
+pub fn entry_lookup(pack: *Pack, name: []const u8) ?EntryInfo {
     // TODO: Use stringmap lookup
     for (pack.entries.?.items, 0..) |e, i| {
         if (std.mem.eql(u8, e.name, name)) {
@@ -216,12 +218,12 @@ pub fn lookupEntry(pack: *Pack, name: []const u8) ?EntryInfo {
     return null;
 }
 
-pub fn lookup(pack: *Pack, name: []const u8) ?Resource {
-    const ei = lookupEntry(pack, name) orelse return null;
+pub fn resource_lookup(pack: *Pack, name: []const u8) ?Resource {
+    const ei = entry_lookup(pack, name) orelse return null;
     return getResource(pack, ei.index);
 }
 
-pub fn addResource(pack: *Pack, srcs: []EntrySrc, name: []const u8, res_type: ResourceType, resource: Resource, parent: ?u32, children: ?[]u32) !void {
+pub fn resource_append(pack: *Pack, srcs: []EntrySrc, name: []const u8, res_type: ResourceType, resource: Resource, parent: ?i32, children: ?[]i32) !Entry {
     const index = pack.entries.?.items.len;
     const entry = try pack.entries.?.addOne();
     entry.offset = @intCast(pack.resources.?.items.len);
@@ -246,19 +248,80 @@ pub fn addResource(pack: *Pack, srcs: []EntrySrc, name: []const u8, res_type: Re
     }
 
     try pack.resources.?.append(resource);
+
+    return entry.*;
 }
 
-pub fn deleteEntry(pack: *Pack, entry: Entry) void {
+pub fn entry_delete(pack: *Pack, entry: Entry) void {
     var i: usize = 0;
     while (i < pack.entries.?.items.len) {
         const e = pack.entries.?.items[i];
         if (std.mem.eql(u8, e.name, entry.name)) {
             _ = pack.entries.?.orderedRemove(i);
+            return;
         } else {
             i += 1;
         }
     }
 }
+
+pub fn entry_delete_child_tree(p: *Pack, start_id: usize) !void {
+    var entry = p.entries.?.items[start_id];
+
+    // If the selected node has a parent, find the parent so we can
+    // properly delete the entire tree of nodes. Child offsets of
+    // other nodes in the same tree would be incorrect, and it
+    // doesn't make much sense to add residual nodes.
+    var root_id: i64 = @intCast(start_id);
+    var delete_original_entry = false;
+    if (entry.parent != null) {
+        var parent: ?i32 = entry.parent;
+        while (parent != null) {
+            root_id = root_id + parent.?;
+            const parent_entry = p.entries.?.items[@intCast(root_id)];
+            parent = parent_entry.parent;
+        }
+
+        entry = p.entries.?.items[@intCast(root_id)];
+    } else {
+        // If we don't have a parent, go ahead and delete the current entry,
+        // if we had a parent and updated the root entry the selected entry
+        // would be handled by the child loop below.
+        delete_original_entry = true;
+    }
+
+
+    // If the entry has children we need to make sure to recursively
+    // delete them as well, as to not leave entries behind that
+    // originated from the same file.
+    if (entry.children) |root_children| {
+        var child_queue = std.ArrayList(i32).init(frame);
+        defer child_queue.deinit();
+
+        for (root_children) |rc| {
+            try child_queue.append(@intCast(root_id + @as(i64, @intCast(rc))));
+        }
+
+        while (child_queue.items.len > 0) {
+            const child_id = child_queue.pop();
+            const child_entry = p.entries.?.items[@intCast(child_id)];
+
+            if (child_entry.children) |entry_children| {
+                for (entry_children) |ec| {
+                    try child_queue.append(@intCast(child_id + @as(i64, @intCast(ec))));
+                }
+            }
+
+            entry_delete(p, child_entry);
+        }
+
+    }
+
+    if (delete_original_entry) {
+        entry_delete(p, entry);
+    }
+}
+
 
 pub fn getFileMTime(path: []const u8) !u64 {
     const f = try std.fs.cwd().openFile(path, .{});
@@ -267,7 +330,7 @@ pub fn getFileMTime(path: []const u8) !u64 {
     return @intCast(@divTrunc(stat.mtime, 1000000));
 }
 
-pub fn hasEntryBeenModified(entry: Entry) bool {
+pub fn has_entry_been_modified(entry: Entry) bool {
     for (entry.srcs) |s| {
         const new_mtime = getFileMTime(s.path) catch return false;
         if (new_mtime != s.mtime) {
@@ -286,7 +349,7 @@ const Segment = struct {
     data: []u8 = undefined,
 };
 
-const StringBuilder = struct {
+pub const StringBuilder = struct {
     segments: std.ArrayList(Segment),
     arena: std.heap.ArenaAllocator,
     insert: usize = 0,
@@ -301,7 +364,7 @@ const StringBuilder = struct {
         };
     }
 
-    fn deinit(self: *StringBuilder) void {
+    pub fn deinit(self: *StringBuilder) void {
         self.segments.deinit();
         self.arena.deinit();
     }
@@ -417,9 +480,12 @@ const StringBuilder = struct {
         _ = self;
     }
 
-    fn dumpToBuffer(self: *StringBuilder) ![]u8 {
-        const offset = self.getOffset();
-        const slice = try self.arena.allocator().alloc(u8, offset);
+    pub fn dumpToBuffer(self: *StringBuilder, allocator: std.mem.Allocator) ![]u8 {
+        var size: usize = 0;
+        for (self.segments.items) |s| {
+            size += s.used;
+        }
+        const slice = try allocator.alloc(u8, size);
         var i: usize = 0;
         for (self.segments.items) |s| {
             @memcpy(slice[i..(s.used + i)], s.data[0..s.used]);
@@ -428,7 +494,7 @@ const StringBuilder = struct {
         return slice;
     }
 
-    fn dumpToFile(self: *StringBuilder, path: []const u8) !void {
+    pub fn dumpToFile(self: *StringBuilder, path: []const u8) !void {
         const file = try std.fs.cwd().createFile(path, .{});
         const writer = file.writer();
         defer file.close();
@@ -482,6 +548,11 @@ fn memorySizeOfType(value: anytype) usize {
 fn memoryReadType(comptime T: type, bytes: []u8, offset: *usize, value: anytype) void {
     const ti = @typeInfo(T);
     switch (ti) {
+        .Bool => {
+            const b: *u8 = @ptrCast(bytes.ptr + offset.*);
+            value.* = (b.* != 0);
+            offset.* += memorySizeOfIntType(u8);
+        },
         .Int => {
             const b: *[@sizeOf(T)]u8 = @ptrCast(bytes.ptr + offset.*);
             value.* = std.mem.readInt(T, b, .little);
@@ -546,7 +617,11 @@ fn memoryReadType(comptime T: type, bytes: []u8, offset: *usize, value: anytype)
 fn memoryWriteType(builder: *StringBuilder, value: anytype) !void {
     const base_type = @TypeOf(value);
     const ti = @typeInfo(base_type);
+
     switch (ti) {
+        .Bool => {
+            try builder.writeInt(u8, @intFromBool(value));
+        },
         .Int => {
             try builder.writeInt(base_type, value);
         },
@@ -595,20 +670,4 @@ fn memoryWriteType(builder: *StringBuilder, value: anytype) !void {
 
 fn alignIntTo(value: usize, alignment: u8) usize {
     return alignment * @divFloor(value + alignment - 1, alignment);
-}
-const TS = struct {
-    n: []const u8 = "/a/b/c/d/e/f",
-    a: u32 = 0,
-    b: ?[]const u64 = &[4]u64{ 1, 2, 3, 4 },
-};
-pub fn tttt() !void {
-    var builder = StringBuilder.init(persistent);
-    const ts = TS{};
-    try memoryWriteType(&builder, ts);
-    const bytes = try builder.dumpToBuffer();
-    var ts2 = TS{};
-    var offset: usize = 0;
-    memoryReadType(TS, bytes, &offset, &ts2);
-    std.log.info("{}", .{ts2});
-    std.log.info("--------------------------------\n", .{});
 }
