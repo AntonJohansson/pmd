@@ -11,5 +11,5 @@ out vec4 frag_color;
 
 void main() {
     float c = texture(tex, scale*v_texcoords + off).r;
-    frag_color = vec4(0,0,0,0) + fg*c;
+    frag_color = bg + vec4(0,0,0,0) + fg*c;
 }

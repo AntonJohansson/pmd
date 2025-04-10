@@ -13,6 +13,7 @@ const v3 = math.v3;
 const v4 = math.v4;
 const m4 = math.m4;
 const m3 = math.m3;
+const BoundedArray = common.BoundedArray;
 
 const sokol = @import("sokol");
 const sg = sokol.gfx;
@@ -45,8 +46,8 @@ var circle_bind = sg.Bindings{};
 var rectangle_bind = sg.Bindings{};
 var cube_bind = sg.Bindings{};
 
-var pipelines: std.BoundedArray(sg.Pipeline, 16) = .{};
-var binds: std.BoundedArray(BindInfo, 64) = .{};
+var pipelines: BoundedArray(sg.Pipeline, 16) = .{};
+var binds: BoundedArray(BindInfo, 64) = .{};
 
 const MeshBindings = struct {
     bind: sg.Bindings = undefined,
@@ -64,9 +65,7 @@ const BindInfo = struct {
     mesh_binds: MeshBindings,
 };
 
-fn buildBindForMesh(model: res.Model, material: res.Material, mesh_index: u32, prim_index: u32) MeshBindings {
-    const mesh = model.meshes[mesh_index];
-    const prim = mesh.primitives[prim_index];
+fn build_bind_for_primitive(prim: res.MeshPrimitive, material: res.Material) MeshBindings {
     var bind: sg.Bindings = .{};
     if ((prim.buffer_types & res.bt_position) != 0) {
         bind.vertex_buffers[0] = sg.makeBuffer(.{
@@ -78,20 +77,20 @@ fn buildBindForMesh(model: res.Model, material: res.Material, mesh_index: u32, p
             .data = sg.asRange(prim.normals.?),
         });
     }
-    if (material.has_image and (prim.buffer_types & res.bt_texcoords) != 0) {
+    if (material.image != null and (prim.buffer_types & res.bt_texcoords) != 0) {
         bind.vertex_buffers[2] = sg.makeBuffer(.{
             .data = sg.asRange(prim.texcoords.?),
         });
     }
     if ((prim.buffer_types & res.bt_indices) != 0) {
         bind.index_buffer = sg.makeBuffer(.{
-            .type = .INDEXBUFFER,
+            .usage = .{ .index_buffer = true },
             .data = sg.asRange(prim.indices.?),
         });
     }
 
     var pip: sg.Pipeline = undefined;
-    if (material.has_image and (prim.buffer_types & res.bt_texcoords) != 0) {
+    if (material.image != null and (prim.buffer_types & res.bt_texcoords) != 0) {
         pip = pipeline_texture;
     } else {
         pip = pipeline_3d;
@@ -100,19 +99,19 @@ fn buildBindForMesh(model: res.Model, material: res.Material, mesh_index: u32, p
     var image: sg.Image = undefined;
     var smp: sg.Sampler = undefined;
     if ((prim.buffer_types & res.bt_texcoords) != 0) {
-        if (material.has_image) {
-            const format: sg.PixelFormat = switch (material.image.channels) {
+        if (material.image) |mat_image| {
+            const format: sg.PixelFormat = switch (mat_image.channels) {
                 4 => .RGBA8,
                 else => unreachable,
             };
             var desc = sg.ImageDesc{
-                .width = @intCast(material.image.width),
-                .height = @intCast(material.image.height),
+                .width = @intCast(mat_image.width),
+                .height = @intCast(mat_image.height),
                 .pixel_format = format,
                 .sample_count = 1,
             };
-            std.log.info("{} {} {}", .{material.image.width, material.image.height, material.image.channels});
-            desc.data.subimage[0][0] = sg.asRange(material.image.pixels);
+            std.log.info("{} {} {}", .{ mat_image.width, mat_image.height, mat_image.channels });
+            desc.data.subimage[0][0] = sg.asRange(mat_image.pixels);
             image = sg.makeImage(desc);
 
             smp = sg.makeSampler(.{
@@ -130,17 +129,18 @@ fn buildBindForMesh(model: res.Model, material: res.Material, mesh_index: u32, p
         .image = image,
         .sampler = smp,
         .buffer_types = prim.buffer_types,
-        .has_image = material.has_image,
+        .has_image = material.image != null,
     };
 }
 
-fn bindForMesh(model: res.Model, material: res.Material, mesh_index: u32, prim_index: u32) MeshBindings {
+fn bind_for_mesh(model_id: u64, prim: res.MeshPrimitive, material: res.Material, mesh_index: u32, prim_index: u32) MeshBindings {
     for (binds.buffer) |info| {
-        if (info.id == model.id and info.mesh_index == mesh_index and info.prim_index == prim_index)
+        if (info.id == model_id and info.mesh_index == mesh_index and info.prim_index == prim_index) {
             return info.mesh_binds;
+        }
     }
-    const mesh_binds = buildBindForMesh(model, material, mesh_index, prim_index);
-    binds.appendAssumeCapacity(.{ .id = model.id, .mesh_index = mesh_index, .prim_index = prim_index, .mesh_binds = mesh_binds});
+    const mesh_binds = build_bind_for_primitive(prim, material);
+    binds.appendAssumeCapacity(.{ .id = model_id, .mesh_index = mesh_index, .prim_index = prim_index, .mesh_binds = mesh_binds });
     return mesh_binds;
 }
 
@@ -201,12 +201,11 @@ const UniformsFragment2d = struct {
     color: v4,
 };
 
-
 const UniformsVertexVoxelChunk = struct {
     vp: m4 = undefined,
     chunk_pos: v3 = .{},
     rotations: [6]m4 = undefined,
-    voxel_size: f32 = voxel_width,
+    voxel_size: f32 = primitive.voxel_dim,
 };
 
 const UniformsFragmentVoxelChunk = struct {
@@ -243,13 +242,13 @@ fn specify_uniforms(desc: *sg.ShaderUniformBlock, uniform: anytype, stage: sg.Sh
     desc.size = @sizeOf(uniform);
     desc.stage = stage;
     const ti = @typeInfo(uniform);
-    inline for (ti.Struct.fields, 0..) |field, i| {
+    inline for (ti.@"struct".fields, 0..) |field, i| {
         comptime var base_type = field.type;
         var array_count: u32 = 0;
         const field_ti = @typeInfo(base_type);
-        if (field_ti == .Array) {
-            base_type = field_ti.Array.child;
-            array_count = field_ti.Array.len;
+        if (field_ti == .array) {
+            base_type = field_ti.array.child;
+            array_count = field_ti.array.len;
         }
         desc.glsl_uniforms[i] = .{
             .glsl_name = field.name,
@@ -294,27 +293,27 @@ const textured_rectangle_indices = [_]u16{ 0, 1, 2, 0, 2, 3 };
 
 // TODO: https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques
 
-const voxel_width = 32.0;
-const half_voxel_width = 0.5*voxel_width;
+const voxel_dim_f: f32 = primitive.voxel_dim;
+const half_voxel_dim = 0.5 * voxel_dim_f;
 const voxel_face_vertices = [_]f32{
-    half_voxel_width, -half_voxel_width, half_voxel_width, //   0   x front top left
-    half_voxel_width, half_voxel_width, half_voxel_width, //    3   x front top right
-    -half_voxel_width, -half_voxel_width, half_voxel_width, //  12 -x back top left
-    -half_voxel_width, half_voxel_width, half_voxel_width, //   15 -x back top right
+    half_voxel_dim, -half_voxel_dim, half_voxel_dim, //   0   x front top left
+    half_voxel_dim, half_voxel_dim, half_voxel_dim, //    3   x front top right
+    -half_voxel_dim, -half_voxel_dim, half_voxel_dim, //  12 -x back top left
+    -half_voxel_dim, half_voxel_dim, half_voxel_dim, //   15 -x back top right
 };
 
 const voxel_face_normals = [_]f32{
-    0,  0,  1,
-    0,  0,  1,
-    0,  0,  1,
-    0,  0,  1,
+    0, 0, 1,
+    0, 0, 1,
+    0, 0, 1,
+    0, 0, 1,
 };
 
 const voxel_face_texcoords = [_]f32{
-    0,0,
-    1,0,
-    0,1,
-    1,1,
+    0, 0,
+    1, 0,
+    0, 1,
+    1, 1,
 };
 
 const voxel_face_indices = [_]u16{
@@ -440,7 +439,7 @@ fn rebuild_bindings() void {
         .data = sg.asRange(&textured_rectangle_vertices),
     });
     binding_textured_rectangle.index_buffer = sg.makeBuffer(.{
-        .type = .INDEXBUFFER,
+        .usage = .{ .index_buffer = true },
         .data = sg.asRange(&textured_rectangle_indices),
     });
     binding_textured_rectangle.samplers[0] = sampler_linear_clamped;
@@ -450,7 +449,7 @@ fn rebuild_bindings() void {
         .data = sg.asRange(&cube_vertices),
     });
     binding_cubemap.index_buffer = sg.makeBuffer(.{
-        .type = .INDEXBUFFER,
+        .usage = .{ .index_buffer = true },
         .data = sg.asRange(&cube_indices),
     });
     binding_cubemap.samplers[0] = sampler_linear_clamped;
@@ -467,7 +466,8 @@ var shd_3d: sg.Shader = undefined;
 var shd_voxelchunk: sg.Shader = undefined;
 var shd_texture: sg.Shader = undefined;
 
-fn make_shader_and_write_if_valid(shd: *sg.Shader, desc: sg.ShaderDesc) void {
+fn shader_make_and_write_if_valid(shd: *sg.Shader, desc: sg.ShaderDesc) void {
+    std.log.info("Compiling shader {s}", .{desc.label});
     const tmp = sg.makeShader(desc);
     const state = sg.queryShaderState(tmp);
     const valid = state != .FAILED and state != .INVALID;
@@ -479,7 +479,16 @@ fn make_shader_and_write_if_valid(shd: *sg.Shader, desc: sg.ShaderDesc) void {
     }
 }
 
-fn deinit_shaders() void {
+fn shader_desc_from_pack(name: []const u8) sg.ShaderDesc {
+    var shd_desc = sg.ShaderDesc{};
+    const res_shader = goosepack.resource_lookup(pack, name).?.shader;
+    shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
+    shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+    shd_desc.label = @ptrCast(name);
+    return shd_desc;
+}
+
+fn shaders_deinit() void {
     sg.destroyShader(shd_2d);
     sg.destroyShader(shd_pp);
     sg.destroyShader(shd_text);
@@ -500,32 +509,23 @@ fn rebuild_shaders() void {
 
     // 2d shader
     {
-        var shd_desc = sg.ShaderDesc{};
-        const res_shader = goosepack.resource_lookup(pack, "res/2d-p").?.shader;
-        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
-        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        var shd_desc = shader_desc_from_pack("res/2d-p");
         specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertex2d, .VERTEX);
         specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragment2d, .FRAGMENT);
-        make_shader_and_write_if_valid(&shd_2d, shd_desc);
+        shader_make_and_write_if_valid(&shd_2d, shd_desc);
     }
 
     // 3d shader
     {
-        var shd_desc = sg.ShaderDesc{};
-        const res_shader = goosepack.resource_lookup(pack, "res/3d-pn").?.shader;
-        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
-        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        var shd_desc = shader_desc_from_pack("res/3d-pn");
         specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertex3d, .VERTEX);
         specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragment3d, .FRAGMENT);
-        make_shader_and_write_if_valid(&shd_3d, shd_desc);
+        shader_make_and_write_if_valid(&shd_3d, shd_desc);
     }
 
     // texture shader
     {
-        var shd_desc = sg.ShaderDesc{};
-        const res_shader = goosepack.resource_lookup(pack, "res/3d-pnt").?.shader;
-        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
-        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        var shd_desc = shader_desc_from_pack("res/3d-pnt");
         specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertex3d, .VERTEX);
         specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragment3d, .FRAGMENT);
         shd_desc.images[0] = .{ .stage = .FRAGMENT };
@@ -536,15 +536,12 @@ fn rebuild_shaders() void {
             .sampler_slot = 0,
             .glsl_name = "tex",
         };
-        make_shader_and_write_if_valid(&shd_texture, shd_desc);
+        shader_make_and_write_if_valid(&shd_texture, shd_desc);
     }
 
     // Voxel chunk shader
     {
-        var shd_desc = sg.ShaderDesc{};
-        const res_shader = goosepack.resource_lookup(pack, "res/voxelchunk").?.shader;
-        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
-        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        var shd_desc = shader_desc_from_pack("res/voxelchunk");
         //shd_desc.fs.images[0] = .{ .used = true }
         //shd_desc.fs.samplers[0] = .{ .used = true };
         //shd_desc.fs.image_sampler_pairs[0] = .{
@@ -555,15 +552,12 @@ fn rebuild_shaders() void {
         //};
         specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertexVoxelChunk, .VERTEX);
         specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragmentVoxelChunk, .FRAGMENT);
-        make_shader_and_write_if_valid(&shd_voxelchunk, shd_desc);
+        shader_make_and_write_if_valid(&shd_voxelchunk, shd_desc);
     }
 
     // Postprocess shader
     {
-        var shd_desc = sg.ShaderDesc{};
-        const res_shader = goosepack.resource_lookup(pack, "res/cc").?.shader;
-        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
-        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        var shd_desc = shader_desc_from_pack("res/cc");
         shd_desc.images[0] = .{ .stage = .FRAGMENT };
         shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
         shd_desc.image_sampler_pairs[0] = .{
@@ -572,14 +566,11 @@ fn rebuild_shaders() void {
             .sampler_slot = 0,
             .glsl_name = "tex",
         };
-        make_shader_and_write_if_valid(&shd_pp, shd_desc);
+        shader_make_and_write_if_valid(&shd_pp, shd_desc);
     }
 
     {
-        var shd_desc = sg.ShaderDesc{};
-        const res_shader = goosepack.resource_lookup(pack, "res/text").?.shader;
-        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
-        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        var shd_desc = shader_desc_from_pack("res/text");
         specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertexAtlas, .VERTEX);
         specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragmentAtlas, .FRAGMENT);
         shd_desc.images[0] = .{ .stage = .FRAGMENT };
@@ -590,13 +581,14 @@ fn rebuild_shaders() void {
             .sampler_slot = 0,
             .glsl_name = "tex",
         };
-        make_shader_and_write_if_valid(&shd_text, shd_desc);
+        shader_make_and_write_if_valid(&shd_text, shd_desc);
     }
 
     // TODO(anjo): We can get rid of this shader after moving 2d to separate buffer
     // Display shader
     {
         var shd_desc = sg.ShaderDesc{};
+        shd_desc.label = "display";
         shd_desc.vertex_func.source =
             \\ #version 330
             \\ layout(location=0) in vec2 position;
@@ -625,15 +617,12 @@ fn rebuild_shaders() void {
             .sampler_slot = 0,
             .glsl_name = "tex",
         };
-        make_shader_and_write_if_valid(&shd_display, shd_desc);
+        shader_make_and_write_if_valid(&shd_display, shd_desc);
     }
 
     // Cubemap shader
     {
-        var shd_desc = sg.ShaderDesc{};
-        const res_shader = goosepack.resource_lookup(pack, "res/cubemap").?.shader;
-        shd_desc.vertex_func.source = @ptrCast(res_shader.vs_bytes);
-        shd_desc.fragment_func.source = @ptrCast(res_shader.fs_bytes);
+        var shd_desc = shader_desc_from_pack("res/cubemap");
         specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertex2d, .VERTEX);
         specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragment2d, .FRAGMENT);
         shd_desc.images[0] = .{ .stage = .FRAGMENT, .image_type = .CUBE };
@@ -644,7 +633,7 @@ fn rebuild_shaders() void {
             .sampler_slot = 0,
             .glsl_name = "cube",
         };
-        make_shader_and_write_if_valid(&shd_cm, shd_desc);
+        shader_make_and_write_if_valid(&shd_cm, shd_desc);
     }
 }
 
@@ -667,7 +656,7 @@ fn rebuild_images(width: u32, height: u32) void {
     }
 
     image_3d_framebuffer = sg.makeImage(.{
-        .render_target = true,
+        .usage = .{ .render_attachment = true },
         .width = @intCast(width),
         .height = @intCast(height),
         .pixel_format = .RGBA8,
@@ -675,7 +664,7 @@ fn rebuild_images(width: u32, height: u32) void {
     });
 
     image_3d_depthbuffer = sg.makeImage(.{
-        .render_target = true,
+        .usage = .{ .render_attachment = true },
         .width = @intCast(width),
         .height = @intCast(height),
         .pixel_format = .DEPTH,
@@ -683,7 +672,7 @@ fn rebuild_images(width: u32, height: u32) void {
     });
 
     image_2d_framebuffer = sg.makeImage(.{
-        .render_target = true,
+        .usage = .{ .render_attachment = true },
         .width = @intCast(width),
         .height = @intCast(height),
         .pixel_format = .RGBA8,
@@ -740,7 +729,6 @@ fn rebuild_passes(width: u32, height: u32) void {
         pass_load_swapchain.swapchain.width = @intCast(width);
         pass_load_swapchain.swapchain.height = @intCast(height);
     }
-
 }
 
 var pipelines_initialized = false;
@@ -943,9 +931,10 @@ fn rebuild_pipelines() void {
         pip_desc.layout.attrs[0].buffer_index = 0;
         pip_desc.layout.attrs[1].format = .FLOAT3;
         pip_desc.layout.attrs[1].buffer_index = 1;
-        pip_desc.layout.attrs[2].format = .UBYTE4;
+        pip_desc.layout.attrs[2].format = .SHORT4;
         pip_desc.layout.attrs[2].buffer_index = 2;
         pip_desc.layout.buffers[2].step_func = .PER_INSTANCE;
+
         pipeline_voxel = sg.makePipeline(pip_desc);
     }
 
@@ -1036,17 +1025,29 @@ fn rebuild_pipelines() void {
     }
 }
 
+const ChunkRenderInfo = struct {
+    v0: sg.Buffer = undefined,
+    v1: sg.Buffer = undefined,
+    v2: sg.Buffer = undefined,
+    i0: sg.Buffer = undefined,
+    bind: sg.Bindings = .{},
+};
+
+var voxel_chunk_map: std.AutoHashMap(i64, ChunkRenderInfo) = undefined;
+
 pub fn init(log_memory: *common.log.LogMemory, _mem: common.MemoryAllocators, _pack: *goosepack.Pack) void {
     mem = _mem;
+
+    voxel_chunk_map = std.AutoHashMap(i64, ChunkRenderInfo).init(mem.persistent);
 
     log = log_memory.group_log(.draw);
 
     uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.up)] = math.m4_identity;
     uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.down)] = m4.transpose(m4.modelRotX(std.math.pi));
-    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.back)] = m4.transpose(m4.modelRotY(-std.math.pi/2.0));
-    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.front)] = m4.transpose(m4.modelRotY(std.math.pi/2.0));
-    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.left)] = m4.transpose(m4.modelRotX(std.math.pi/2.0));
-    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.right)] = m4.transpose(m4.modelRotX(-std.math.pi/2.0));
+    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.back)] = m4.transpose(m4.modelRotY(-std.math.pi / 2.0));
+    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.front)] = m4.transpose(m4.modelRotY(std.math.pi / 2.0));
+    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.left)] = m4.transpose(m4.modelRotX(std.math.pi / 2.0));
+    uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.right)] = m4.transpose(m4.modelRotX(-std.math.pi / 2.0));
 
     sg.setup(.{
         .logger = .{ .func = slog.func },
@@ -1063,7 +1064,7 @@ pub fn init(log_memory: *common.log.LogMemory, _mem: common.MemoryAllocators, _p
         .data = sg.asRange(&rectangle_vertices),
     });
     rectangle_bind.index_buffer = sg.makeBuffer(.{
-        .type = .INDEXBUFFER,
+        .usage = .{ .index_buffer = true },
         .data = sg.asRange(&rectangle_indices),
     });
 
@@ -1074,7 +1075,7 @@ pub fn init(log_memory: *common.log.LogMemory, _mem: common.MemoryAllocators, _p
         .data = sg.asRange(&cube_normals),
     });
     cube_bind.index_buffer = sg.makeBuffer(.{
-        .type = .INDEXBUFFER,
+        .usage = .{ .index_buffer = true },
         .data = sg.asRange(&cube_indices),
     });
 
@@ -1090,6 +1091,15 @@ pub fn init(log_memory: *common.log.LogMemory, _mem: common.MemoryAllocators, _p
 }
 
 pub fn deinit() void {
+    {
+        var it = voxel_chunk_map.valueIterator();
+        while (it.next()) |v| {
+            sg.destroyBuffer(v.v0);
+            sg.destroyBuffer(v.v1);
+            sg.destroyBuffer(v.v2);
+            sg.destroyBuffer(v.i0);
+        }
+    }
     sg.shutdown();
 }
 
@@ -1134,8 +1144,6 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
     pass_load_clear.action.colors[0].load_action = .CLEAR;
     sg.beginPass(pass_load_clear);
     sg.endPass();
-
-    var temp_vertex_buffers = std.ArrayList(sg.Buffer).init(mem.frame);
 
     while (b.bytes.hasData()) {
         const header = b.pop(draw_api.Header);
@@ -1237,21 +1245,12 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     const scale: f32 = 2.0 * text.size / (@as(f32, @floatFromInt(font.size)) / atlas_h);
 
                     sg.applyUniforms(0, sg.asRange(&UniformsVertexAtlas{
-                        .vs_off = .{
-                            .x = x + xoff + scale * char.xoff / atlas_w,
-                            .y = y - scale * char.yoff / atlas_h - scale * vsy
-                        },
+                        .vs_off = .{ .x = x + xoff + scale * char.xoff / atlas_w, .y = y - scale * char.yoff / atlas_h - scale * vsy },
                         .vs_scale = .{ .x = scale * vsx, .y = scale * vsy },
                     }));
                     sg.applyUniforms(1, sg.asRange(&UniformsFragmentAtlas{
-                        .off = .{
-                            .x = @as(f32, @floatFromInt(char.x0)) / atlas_w,
-                            .y = @as(f32, @floatFromInt(char.y0)) / atlas_h
-                        },
-                        .scale = .{
-                            .x = sx,
-                            .y = sy
-                        },
+                        .off = .{ .x = @as(f32, @floatFromInt(char.x0)) / atlas_w, .y = @as(f32, @floatFromInt(char.y0)) / atlas_h },
+                        .scale = .{ .x = sx, .y = sy },
                         .fg = text.fg,
                         .bg = text.bg,
                     }));
@@ -1283,90 +1282,128 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
             .Mesh => {
                 const cmd = b.pop(primitive.Mesh);
 
-                const node_entry_info = goosepack.entry_lookup(pack, cmd.name);
-                const node = goosepack.getResource(pack, node_entry_info.?.index).model_node;
-                const model = goosepack.getResource(pack, @intCast(@as(i32, @intCast(node_entry_info.?.index)) + node.root_entry_relative_index)).model;
+                const model_entry_info = goosepack.entry_lookup_id(pack, cmd.model_id) orelse {
+                    continue;
+                };
+                const model = goosepack.getResource(pack, model_entry_info.index).model;
+                const mesh = model.meshes[cmd.mesh_index];
 
-                if (cmd.draw_children and node_entry_info.?.entry.children != null) {
-                    var stack = std.ArrayList(struct {
-                        info: goosepack.EntryInfo,
-                        parent_transform: m4,
-                    }).initCapacity(mem.frame, 128) catch unreachable;
-                    stack.appendAssumeCapacity(.{ .info = node_entry_info.?, .parent_transform = cmd.model });
-                    while (stack.popOrNull()) |item| {
-                        const mesh_node = goosepack.getResource(pack, item.info.index).model_node;
-
-                        const transform = m4.mul(item.parent_transform, mesh_node.transform);
-                        if (mesh_node.mesh_index) |mesh_index| {
-                            const mesh = model.meshes[mesh_index];
-                            for (mesh.primitives, 0..) |p, prim_index| {
-                                const material = model.materials[p.material_index];
-                                var mesh_binds = bindForMesh(model, material, mesh_index, @intCast(prim_index));
-                                if (material.has_image) {
-                                    mesh_binds.bind.images[0] = mesh_binds.image;
-                                    mesh_binds.bind.samplers[0] = mesh_binds.sampler;
-                                }
-                                sg.applyPipeline(mesh_binds.pip);
-                                sg.applyBindings(mesh_binds.bind);
-                                sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
-                                    .mvp = m4.transpose(m4.mul(vp, transform)),
-                                    .model = m4.transpose(transform),
-                                }));
-                                sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
-                                    .color = v4{
-                                        .x = material.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                                        .y = material.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                                        .z = material.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                                        .w = material.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                                    },
-                                    .light_pos = light_pos,
-                                    .light_color = light_color,
-                                    .camera_pos = camera_pos,
-                                }));
-                                sg.draw(0, @intCast(p.indices.?.len / 2), 1);
-                            }
-                        }
-
-                        if (item.info.entry.children) |children| {
-                            for (children) |c| {
-                                const index: u32 = @intCast(@as(i32, @intCast(item.info.index)) + c);
-                                const entry = pack.entries.?.items[index];
-                                stack.appendAssumeCapacity(.{ .info = .{ .entry = entry, .index = index }, .parent_transform = transform });
-                            }
-                        }
+                for (mesh.primitives, 0..) |p, prim_index| {
+                    var material = res.Material{};
+                    if (model.materials != null) {
+                        material = model.materials.?[p.material_index];
                     }
-                } else {
-                    if (node.mesh_index) |mesh_index| {
-                        const mesh = model.meshes[mesh_index];
-                        for (mesh.primitives, 0..) |p, prim_index| {
-                            const material = model.materials[p.material_index];
-                            var mesh_binds = bindForMesh(model, material, mesh_index, @intCast(prim_index));
-                            if (material.has_image) {
-                                mesh_binds.bind.images[0] = mesh_binds.image;
-                                mesh_binds.bind.samplers[0] = mesh_binds.sampler;
-                            }
-                            sg.applyPipeline(mesh_binds.pip);
-                            sg.applyBindings(mesh_binds.bind);
-                            const transform = m4.mul(cmd.model, node.transform);
-                            sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
-                                .mvp = m4.transpose(m4.mul(vp, transform)),
-                                .model = m4.transpose(transform),
-                            }));
-                            sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
-                                .color = v4{
-                                    .x = material.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                                    .y = material.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                                    .z = material.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                                    .w = material.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                                },
-                                .light_pos = light_pos,
-                                .light_color = light_color,
-                                .camera_pos = camera_pos,
-                            }));
-                            sg.draw(0, @intCast(p.indices.?.len / 2), 1);
-                        }
+                    var mesh_binds = bind_for_mesh(cmd.model_id, p, material, cmd.mesh_index, @intCast(prim_index));
+                    if (material.image != null) {
+                        mesh_binds.bind.images[0] = mesh_binds.image;
+                        mesh_binds.bind.samplers[0] = mesh_binds.sampler;
                     }
+                    sg.applyPipeline(mesh_binds.pip);
+                    sg.applyBindings(mesh_binds.bind);
+                    sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
+                        .mvp = m4.transpose(m4.mul(vp, cmd.transform)),
+                        .model = m4.transpose(cmd.transform),
+                    }));
+                    sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
+                        .color = v4{
+                            .x = material.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                            .y = material.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                            .z = material.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                            .w = material.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                        },
+                        .light_pos = light_pos,
+                        .light_color = light_color,
+                        .camera_pos = camera_pos,
+                    }));
+                    sg.draw(0, @intCast(p.indices.?.len / 2), 1);
                 }
+
+                //if (cmd.draw_children and node_entry_info.entry.children != null) {
+                //    var stack = std.ArrayList(struct {
+                //        info: goosepack.EntryInfo,
+                //        parent_transform: m4,
+                //    }).initCapacity(mem.frame, 128) catch unreachable;
+                //    stack.appendAssumeCapacity(.{ .info = node_entry_info, .parent_transform = cmd.model });
+                //    while (stack.popOrNull()) |item| {
+                //        const mesh_node = goosepack.getResource(pack, item.info.index).model_node;
+
+                //        const transform = m4.mul(item.parent_transform, mesh_node.transform);
+                //        if (mesh_node.mesh_index) |mesh_index| {
+                //            const mesh = model.meshes[mesh_index];
+                //            for (mesh.primitives, 0..) |p, prim_index| {
+                //                var material = res.Material{};
+                //                if (model.materials != null) {
+                //                    material = model.materials.?[p.material_index];
+                //                }
+                //                var mesh_binds = bindForMesh(model, material, mesh_index, @intCast(prim_index));
+                //                if (material.image != null) {
+                //                    mesh_binds.bind.images[0] = mesh_binds.image;
+                //                    mesh_binds.bind.samplers[0] = mesh_binds.sampler;
+                //                }
+                //                sg.applyPipeline(mesh_binds.pip);
+                //                sg.applyBindings(mesh_binds.bind);
+                //                sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
+                //                    .mvp = m4.transpose(m4.mul(vp, transform)),
+                //                    .model = m4.transpose(transform),
+                //                }));
+                //                sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
+                //                    .color = v4{
+                //                        .x = material.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                //                        .y = material.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                //                        .z = material.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                //                        .w = material.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                //                    },
+                //                    .light_pos = light_pos,
+                //                    .light_color = light_color,
+                //                    .camera_pos = camera_pos,
+                //                }));
+                //                sg.draw(0, @intCast(p.indices.?.len / 2), 1);
+                //            }
+                //        }
+
+                //        if (item.info.entry.children) |children| {
+                //            for (children) |c| {
+                //                const index: u32 = @intCast(@as(i32, @intCast(item.info.index)) + c);
+                //                const entry = pack.entries.?.items[index];
+                //                stack.appendAssumeCapacity(.{ .info = .{ .entry = entry, .index = index }, .parent_transform = transform });
+                //            }
+                //        }
+                //    }
+                //} else {
+                //    if (node.mesh_index) |mesh_index| {
+                //        const mesh = model.meshes[mesh_index];
+                //        for (mesh.primitives, 0..) |p, prim_index| {
+                //            var material = res.Material{};
+                //            if (model.materials != null) {
+                //                material = model.materials.?[p.material_index];
+                //            }
+                //            var mesh_binds = bindForMesh(model, material, mesh_index, @intCast(prim_index));
+                //            if (material.image != null) {
+                //                mesh_binds.bind.images[0] = mesh_binds.image;
+                //                mesh_binds.bind.samplers[0] = mesh_binds.sampler;
+                //            }
+                //            sg.applyPipeline(mesh_binds.pip);
+                //            sg.applyBindings(mesh_binds.bind);
+                //            const transform = m4.mul(cmd.model, node.transform);
+                //            sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
+                //                .mvp = m4.transpose(m4.mul(vp, transform)),
+                //                .model = m4.transpose(transform),
+                //            }));
+                //            sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
+                //                .color = v4{
+                //                    .x = material.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                //                    .y = material.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                //                    .z = material.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                //                    .w = material.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                //                },
+                //                .light_pos = light_pos,
+                //                .light_color = light_color,
+                //                .camera_pos = camera_pos,
+                //            }));
+                //            sg.draw(0, @intCast(p.indices.?.len / 2), 1);
+                //        }
+                //    }
+                //}
             },
             .Cube => {
                 const cube = b.pop(primitive.Cube);
@@ -1395,80 +1432,112 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
             .CubeOutline => {
                 const cube = b.pop(primitive.CubeOutline);
 
-                const pos = [4]v3{
-                    .{ .x = 0.5, .y = 0.5, .z = 0 },
-                    .{ .x = 0.5, .y = -0.5, .z = 0 },
-                    .{ .x = -0.5, .y = 0.5, .z = 0 },
-                    .{ .x = -0.5, .y = -0.5, .z = 0 },
-                };
-                const scale = v3{ .x = cube.thickness, .y = cube.thickness, .z = 1 };
-                const inds = [3][3]u8{
-                    .{ 0, 1, 2 },
-                    .{ 0, 2, 1 },
-                    .{ 2, 0, 1 },
-                };
-                for (0..12) |i| {
-                    const group = @divTrunc(i, 4);
-                    const index = i % 4;
-                    const ss = v3{
-                        .x = @as([3]f32, @bitCast(scale))[inds[group][0]],
-                        .y = @as([3]f32, @bitCast(scale))[inds[group][1]],
-                        .z = @as([3]f32, @bitCast(scale))[inds[group][2]],
+                {
+                    const pos = [4]v3{
+                        .{ .x = 0.5, .y = 0.5, .z = 0 },
+                        .{ .x = 0.5, .y = -0.5, .z = 0 },
+                        .{ .x = -0.5, .y = 0.5, .z = 0 },
+                        .{ .x = -0.5, .y = -0.5, .z = 0 },
                     };
-                    const pp = v3{
-                        .x = @as([3]f32, @bitCast(pos[index]))[inds[group][0]],
-                        .y = @as([3]f32, @bitCast(pos[index]))[inds[group][1]],
-                        .z = @as([3]f32, @bitCast(pos[index]))[inds[group][2]],
+                    const sx = v3.len(common.math.v4tov3(m4.mulv(cube.model, .{ .x = 1, .y = 0, .z = 0, .w = 0 })));
+                    const sy = v3.len(common.math.v4tov3(m4.mulv(cube.model, .{ .x = 0, .y = 1, .z = 0, .w = 0 })));
+                    const sz = v3.len(common.math.v4tov3(m4.mulv(cube.model, .{ .x = 0, .y = 0, .z = 1, .w = 0 })));
+                    const scale = v3{ .x = cube.thickness, .y = cube.thickness, .z = 1 };
+
+                    const inds = [3][3]u8{
+                        .{ 0, 1, 2 },
+                        .{ 0, 2, 1 },
+                        .{ 2, 0, 1 },
                     };
-                    const m = math.m4.model(pp, ss);
-                    sg.applyPipeline(pipeline_3d);
-                    sg.applyBindings(cube_bind);
-                    sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
-                        .mvp = m4.transpose(m4.mul(vp, m4.mul(cube.model, m))),
-                        .model = m4.transpose(cube.model),
-                    }));
-                    sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
-                        .color = v4{
-                            .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                            .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                            .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                            .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                        },
-                        .light_pos = light_pos,
-                        .light_color = light_color,
-                        .camera_pos = camera_pos,
-                    }));
-                    sg.draw(0, cube_indices.len, 1);
+                    const remap = [3]u8{ 2, 1, 0 };
+
+                    for (0..12) |i| {
+                        const group = @divTrunc(i, 4);
+                        const index = i % 4;
+                        var model_scale = [3]f32{ sx, sy, sz };
+                        model_scale[remap[group]] = 1;
+                        const ss = v3{
+                            .x = @as([3]f32, @bitCast(scale))[inds[group][0]] / model_scale[0],
+                            .y = @as([3]f32, @bitCast(scale))[inds[group][1]] / model_scale[1],
+                            .z = @as([3]f32, @bitCast(scale))[inds[group][2]] / model_scale[2],
+                        };
+                        const pp = v3{
+                            .x = @as([3]f32, @bitCast(pos[index]))[inds[group][0]],
+                            .y = @as([3]f32, @bitCast(pos[index]))[inds[group][1]],
+                            .z = @as([3]f32, @bitCast(pos[index]))[inds[group][2]],
+                        };
+                        const m = math.m4.model(pp, ss);
+                        sg.applyPipeline(pipeline_3d);
+                        sg.applyBindings(cube_bind);
+                        sg.applyUniforms(0, sg.asRange(&UniformsVertex3d{
+                            .mvp = m4.transpose(m4.mul(vp, m4.mul(cube.model, m))),
+                            .model = m4.transpose(cube.model),
+                        }));
+                        sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
+                            .color = v4{
+                                .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
+                                .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
+                                .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
+                                .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
+                            },
+                            .light_pos = light_pos,
+                            .light_color = light_color,
+                            .camera_pos = camera_pos,
+                        }));
+                        sg.draw(0, cube_indices.len, 1);
+                    }
                 }
             },
             .VoxelChunk => {
                 const chunk = b.pop(primitive.VoxelChunk);
 
-                const data_ptr: [*]u8 = @ptrCast(chunk.voxels.ptr);
-                const data_slice = data_ptr[0..4*chunk.voxels.len];
-                //std.debug.assert(4*@sizeOf(f32)*data_slice.len == @sizeOf(primitive.VoxelTransform)*chunk.voxels.len);
-                temp_vertex_buffers.append(sg.makeBuffer(.{
-                    .data = sg.asRange(&voxel_face_vertices),
-                })) catch unreachable;
-                temp_vertex_buffers.append(sg.makeBuffer(.{
-                    .data = sg.asRange(&voxel_face_normals),
-                })) catch unreachable;
-                temp_vertex_buffers.append(sg.makeBuffer(.{
-                    .data = sg.asRange(data_slice),
-                })) catch unreachable;
-                temp_vertex_buffers.append(sg.makeBuffer(.{
-                    .type = .INDEXBUFFER,
-                    .data = sg.asRange(&voxel_face_indices),
-                })) catch unreachable;
-                var bind = sg.Bindings{};
-                bind.vertex_buffers[0] = temp_vertex_buffers.items[0];
-                bind.vertex_buffers[1] = temp_vertex_buffers.items[1];
-                bind.vertex_buffers[2] = temp_vertex_buffers.items[2];
-                bind.index_buffer = temp_vertex_buffers.items[3];
+                const index: i64 = @as(i64, @intCast(chunk.origin_x)) + primitive.chunk_dim * @as(i64, @intCast(chunk.origin_y)) + primitive.chunk_dim * primitive.chunk_dim * @as(i64, @intCast(chunk.origin_z));
+
+                const chunk_res = voxel_chunk_map.getOrPut(index) catch unreachable;
+                const info = chunk_res.value_ptr;
+
+                if (!chunk_res.found_existing or chunk.dirty == 1) {
+                    const data_ptr: [*]u8 = @ptrCast(chunk.voxels.ptr);
+                    const data_slice = data_ptr[0 .. @sizeOf(primitive.VoxelTransform) * chunk.voxels.len];
+
+                    std.log.info("Rebuilding voxel chunk", .{});
+                    std.log.info("VOXELS: {}", .{chunk.voxels.len});
+
+                    if (chunk_res.found_existing) {
+                        sg.destroyBuffer(info.v0);
+                        sg.destroyBuffer(info.v1);
+                        sg.destroyBuffer(info.v2);
+                        sg.destroyBuffer(info.i0);
+                    }
+
+                    info.* = ChunkRenderInfo{};
+                    info.v0 = sg.makeBuffer(.{
+                        .data = sg.asRange(&voxel_face_vertices),
+                    });
+                    info.v1 = sg.makeBuffer(.{
+                        .data = sg.asRange(&voxel_face_normals),
+                    });
+                    info.v2 = sg.makeBuffer(.{
+                        .data = sg.asRange(data_slice),
+                    });
+                    info.i0 = sg.makeBuffer(.{
+                        .usage = .{ .index_buffer = true },
+                        .data = sg.asRange(&voxel_face_indices),
+                    });
+                    info.bind.vertex_buffers[0] = info.v0;
+                    info.bind.vertex_buffers[1] = info.v1;
+                    info.bind.vertex_buffers[2] = info.v2;
+                    info.bind.index_buffer = info.i0;
+                }
 
                 sg.applyPipeline(pipeline_voxel);
-                sg.applyBindings(bind);
+                sg.applyBindings(info.bind);
                 uniforms_voxel.vp = m4.transpose(vp);
+                uniforms_voxel.chunk_pos = .{
+                    .x = @floatFromInt(primitive.voxel_dim * primitive.chunk_dim * @as(i32, chunk.origin_x)),
+                    .y = @floatFromInt(primitive.voxel_dim * primitive.chunk_dim * @as(i32, chunk.origin_y)),
+                    .z = @floatFromInt(primitive.voxel_dim * primitive.chunk_dim * @as(i32, chunk.origin_z)),
+                };
                 sg.applyUniforms(0, sg.asRange(&uniforms_voxel));
                 sg.applyUniforms(1, sg.asRange(&UniformsFragmentVoxelChunk{
                     .color = v4{
@@ -1481,7 +1550,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     .light_color = light_color,
                     .camera_pos = camera_pos,
                 }));
-                sg.draw(0, cube_indices.len, @intCast(chunk.voxels.len));
+                sg.draw(0, rectangle_indices.len, @intCast(chunk.voxels.len));
             },
             .VoxelTransform => {},
             else => {},
@@ -1509,8 +1578,4 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
     }
 
     sg.commit();
-
-    for (temp_vertex_buffers.items) |buf| {
-        sg.destroyBuffer(buf);
-    }
 }

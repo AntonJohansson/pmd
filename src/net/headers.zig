@@ -1,6 +1,6 @@
 const packet_meta = @import("packet_meta.zig");
 
-pub const BatchHeader = extern struct {
+pub const BatchHeader = struct {
     salt: u64 = 0,
     num_packets: u16,
     size: u16 = 0,
@@ -12,7 +12,7 @@ pub const BatchHeader = extern struct {
     ack_bits: u32 = 0,
 };
 
-pub const Header = extern struct {
+pub const Header = struct {
     kind: packet_meta.MessageKind,
     id: u16,
     reliable: bool,

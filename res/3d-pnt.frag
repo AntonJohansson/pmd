@@ -29,5 +29,5 @@ void main() {
     vec3 specular = strength * spec * light_color;
 
     vec3 texture_color = texture(tex, vtexcoord).rgb;
-    frag_color = vec4((ambient + diffuse + specular) * texture_color, 1.0);
+    frag_color = vec4((ambient + diffuse + specular) * texture_color * color.rgb, 1.0);
 }

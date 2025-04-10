@@ -14,6 +14,8 @@ pub const goosepack = @import("pack.zig");
 pub const res = @import("res.zig");
 pub const Profile = @import("profile.zig");
 pub const color = @import("color.zig");
+pub const serialize = @import("serialize.zig");
+pub const BoundedArray = @import("bounded_array.zig").BoundedArray;
 
 const v2 = math.v2;
 const v3 = math.v3;
@@ -24,6 +26,7 @@ const Camera3d = primitive.Camera3d;
 pub const connect_packet_repeat_count = 10;
 pub const target_fps = 165;
 pub const target_tickrate = 165;
+pub const scale = 1;
 
 const debug_num_frames_to_record = 64;
 
@@ -38,18 +41,34 @@ pub const InputName = enum(u8) {
     Jump,
     Crouch,
     Sprint,
+    bolt_back,
+    bolt_forward,
 
     // Random
     ResetCamera,
     Interact,
     AltInteract,
-    Editor,
-    Console,
     Enter,
     Save,
     Load,
-    pause,
-    unpause,
+
+    // Mode Switching
+    to_console,
+    to_editor,
+    to_pause,
+    leave_state,
+
+    // Edit mode
+    PlaceBlock,
+    SelectRegion,
+    TogglePlacementMode,
+    add_chunk,
+    remove_chunk,
+    SelectBlock1,
+    SelectBlock2,
+    SelectBlock3,
+    SelectBlock4,
+    SelectBlock5,
 
     // Combat
     SwitchWeapon,
@@ -63,8 +82,8 @@ pub const InputName = enum(u8) {
     DebugShowData,
 };
 
-pub const Input = extern struct {
-    active: [@typeInfo(InputName).Enum.fields.len]bool = undefined,
+pub const Input = struct {
+    active: [@typeInfo(InputName).@"enum".fields.len]bool = undefined,
     cursor_delta: v2 = .{},
     scroll: f32 = 0,
 
@@ -102,7 +121,7 @@ pub fn newEntityId() EntityId {
     return id;
 }
 
-pub const Weapon = extern struct {
+pub const Weapon = struct {
     type: enum(u8) {
         sniper,
         pistol,
@@ -114,6 +133,8 @@ pub const Weapon = extern struct {
         zoom,
         reload,
     } = .normal,
+    zoom_start_pos: v3 = .{},
+    zoom_start_dir: v3 = .{},
     total_cooldown: f32,
     cooldown: f32 = 0,
     total_reload_cooldown: f32,
@@ -122,20 +143,26 @@ pub const Weapon = extern struct {
     kickback_scale: f32,
     total_ammo: u8,
     ammo: u8,
+
+    // animation/model fields
+    id_bolt: u8 = 0,
+    id_barrel: u8 = 0,
+    id_aim: u8 = 0,
+    tree: TransformTree = undefined,
 };
 
-pub const sniper = Weapon{
+pub var sniper = Weapon{
     .type = .sniper,
-    .total_cooldown = 1.0,
+    .total_cooldown = 0.5,
     .total_reload_cooldown = 1.0,
-    .total_zoom_cooldown = 0.5,
+    .total_zoom_cooldown = 0.25,
     .kickback_time = 0.05,
     .kickback_scale = 20.0,
     .total_ammo = 5,
     .ammo = 5,
 };
 
-pub const pistol = Weapon{
+pub var pistol = Weapon{
     .type = .pistol,
     .total_cooldown = 0.1,
     .total_reload_cooldown = 1.0,
@@ -146,7 +173,7 @@ pub const pistol = Weapon{
     .ammo = 10,
 };
 
-pub const nade = Weapon{
+pub var nade = Weapon{
     .type = .nade,
     .total_cooldown = 0.1,
     .total_reload_cooldown = 1.0,
@@ -157,13 +184,13 @@ pub const nade = Weapon{
     .ammo = 1,
 };
 
-pub const Ray = extern struct {
+pub const Ray = struct {
     dir: v3,
     pos: v3,
     len: f32,
 };
 
-pub const Hitscan = extern struct {
+pub const Hitscan = struct {
     id_from: EntityId,
     ray: Ray,
     width: f32,
@@ -171,31 +198,40 @@ pub const Hitscan = extern struct {
     time_left: f32,
 };
 
-pub const Nade = extern struct {
+pub const Nade = struct {
     id_from: EntityId,
     time_left: f32,
 };
 
-pub const Explosion = extern struct {
+pub const Explosion = struct {
     id_from: EntityId,
     pos: v3,
     radius: f32,
     time_left: f32,
 };
 
-pub const Damage = extern struct {
+pub const Damage = struct {
     from: EntityId,
     to: EntityId,
     damage: f32,
 };
 
-pub const Player = extern struct {
+pub const MapModify = struct {
+    coord: VoxelCoordinate,
+    voxel: primitive.Voxel,
+    is_region: bool = false,
+    to_coord: VoxelCoordinate = .{ 0, 0, 0 },
+};
+
+pub const Player = struct {
     id: EntityId,
 
     state: enum(u8) {
         dead,
         alive,
     } = .dead,
+
+    in_editor: bool = false,
 
     // Position, velocity, and orientation
     pos: v3,
@@ -209,7 +245,7 @@ pub const Player = extern struct {
     aim_start_pos: v3 = .{},
     aim_dir: v3 = .{},
 
-    weapons: [3]Weapon = .{ sniper, pistol, nade },
+    weapons: [3]?Weapon = .{ null, null, null },
     weapon_current: u8 = 0,
     weapon_last: u8 = 1,
 
@@ -221,6 +257,23 @@ pub const Player = extern struct {
 
     // camera
     camera: Camera3d = .{},
+
+    // Edit state
+    edit: struct {
+        coord: VoxelCoordinate = .{ 0, 0, 0 },
+        selected_block: primitive.Voxel = .grass,
+        placement_mode: enum(u8) {
+            air,
+            adjacent,
+        } = .adjacent,
+        selected_0: bool = false,
+        region_i0: i16 = 0,
+        region_j0: i16 = 0,
+        region_k0: i16 = 0,
+        region_i1: i16 = 0,
+        region_j1: i16 = 0,
+        region_k1: i16 = 0,
+    } = .{},
 };
 
 pub fn findIndexById(players: []Player, id: EntityId) ?usize {
@@ -276,7 +329,7 @@ pub const WidgetModel = struct {
 
 pub const max_players = 4;
 
-pub const Entity = extern struct {
+pub const Entity = struct {
     id: EntityId,
     flags: packed struct(u8) {
         updated_server: bool = false,
@@ -301,7 +354,7 @@ pub const SoundType = enum(u8) {
     doink,
 };
 
-pub const Sound = extern struct {
+pub const Sound = struct {
     type: SoundType,
     pos: v3,
     id_from: EntityId,
@@ -357,45 +410,27 @@ pub const State = enum {
     gameplay,
     editor,
     pause,
-    mainmenu,
+    console,
 };
 
-pub fn update_game_state(memory: *Memory, input: *const Input) void {
-    switch (memory.state) {
-        .gameplay => {
-            if (input.isset(.pause)) {
-                memory.state = .pause;
-            }
-        },
-        .editor => {
-            if (input.isset(.pause)) {
-                memory.state = .pause;
-            } else if (input.isset(.Editor)) {
-                memory.state = .gameplay;
-            }
-        },
-        .pause => {
-            if (input.isset(.unpause)) {
-                memory.state = .gameplay;
-            }
-        },
-        .mainmenu => {
-        },
-    }
-}
-
 pub const Memory = struct {
+    active_state: State = .gameplay,
+
     // System, things not relevant to gamestate
     pack: goosepack.Pack = undefined,
     mem: MemoryAllocators = .{},
     threadpool: std.Thread.Pool = undefined,
     log_memory: log.LogMemory = undefined,
 
-    // game state
-    state: State = .gameplay,
-    players: std.BoundedArray(Player, max_players) = .{},
-    entities: std.BoundedArray(Entity, 64) = .{},
+    // Animations
+    animation_states: std.ArrayList(AnimationState) = undefined,
 
+    // game state
+
+    players: BoundedArray(Player, max_players) = .{},
+    entities: BoundedArray(Entity, 64) = .{},
+
+    // TODO(anjo): Client only
     windows_persistent: std.ArrayList(WindowPersistentState) = undefined,
     windows: std.ArrayList(WindowState) = undefined,
 
@@ -403,16 +438,17 @@ pub const Memory = struct {
     window_moving_offset: v2 = .{},
 
     // TODO: move to frame allocator
-    new_sounds: std.BoundedArray(Sound, 64) = .{},
-    new_hitscans: std.BoundedArray(Hitscan, 64) = .{},
-    new_nades: std.BoundedArray(Nade, 64) = .{},
-    new_explosions: std.BoundedArray(Explosion, 64) = .{},
-    new_damage: std.BoundedArray(Damage, 64) = .{},
+    new_sounds: BoundedArray(Sound, 64) = .{},
+    new_hitscans: BoundedArray(Hitscan, 64) = .{},
+    new_nades: BoundedArray(Nade, 64) = .{},
+    new_explosions: BoundedArray(Explosion, 64) = .{},
+    new_damage: BoundedArray(Damage, 64) = .{},
+    map_mods: std.ArrayList(MapModify) = undefined,
 
-    sounds: std.BoundedArray(Sound, 64) = .{},
-    hitscans: std.BoundedArray(Hitscan, 64) = .{},
-    nades: std.BoundedArray(Nade, 64) = .{},
-    explosions: std.BoundedArray(Explosion, 64) = .{},
+    sounds: BoundedArray(Sound, 64) = .{},
+    hitscans: BoundedArray(Hitscan, 64) = .{},
+    nades: BoundedArray(Nade, 64) = .{},
+    explosions: BoundedArray(Explosion, 64) = .{},
 
     // camera2d
     target: v2 = .{ .x = 0.5, .y = 0.5 },
@@ -428,7 +464,7 @@ pub const Memory = struct {
 
     // Console
     console_input_index: usize = 0,
-    console_input: std.BoundedArray(u8, 128) = .{},
+    console_input: BoundedArray(u8, 128) = .{},
 
     // Editor
     selected_entity: ?u32 = null,
@@ -440,11 +476,11 @@ pub const Memory = struct {
 
     ray_model: ?m4 = null,
 
-    respawns: std.BoundedArray(RespawnEntry, 8) = .{},
+    respawns: BoundedArray(RespawnEntry, 8) = .{},
     // TODO: move to frame allocator
-    new_spawns: std.BoundedArray(*Player, 8) = .{},
+    new_spawns: BoundedArray(*Player, 8) = .{},
 
-    new_kills: std.BoundedArray(struct {
+    new_kills: BoundedArray(struct {
         from: EntityId,
         to: EntityId,
     }, 8) = .{},
@@ -464,4 +500,98 @@ pub const Memory = struct {
 pub const DebugFrameData = struct {
     profile: *Profile,
     used: bool = false,
+};
+
+pub const AnimationId = packed struct {
+    model_id: res.Id,
+    node_index: u8,
+};
+
+pub const AnimationBlend = struct {
+    id: AnimationId,
+    animations: [3]AnimationState,
+    num_animations: u2,
+    additive: u1,
+    tree: *TransformTree,
+};
+
+pub const AnimationState = struct {
+    rotation: math.Quat = undefined,
+    translation: math.v3 = undefined,
+    scale: math.v3 = undefined,
+
+    begin_time: f32 = 0,
+    end_time: f32 = 0,
+    playback_speed: f32 = 1.0,
+
+    animation: *res.Animation,
+
+    tree: *TransformTree,
+    index: u8,
+
+    finished: bool = false,
+};
+
+//
+// Voxel maps
+//
+
+pub const chunk_dim = primitive.chunk_dim;
+pub const voxel_dim = primitive.voxel_dim;
+
+pub const ChunkCoordinate = [3]i16;
+pub const VoxelCoordinate = [3]i16;
+pub const VoxelIndex = [3]u6;
+pub const ChunkIndex = i64;
+pub const ChunkMap = std.AutoHashMap(ChunkIndex, Chunk);
+
+pub const Map = struct {
+    chunks: ChunkMap,
+};
+
+pub const Chunk = struct {
+    voxels: [chunk_dim][chunk_dim][chunk_dim]primitive.Voxel = .{.{.{.air} ** chunk_dim} ** chunk_dim} ** chunk_dim,
+    faces: []primitive.VoxelTransform = undefined,
+    origin: ChunkCoordinate,
+    flags: struct {
+        occupied: u1 = 0,
+        built_faces: u1 = 0,
+        dirty: u1 = 0,
+    },
+};
+
+//
+// TransformTree
+//
+
+//
+// what is needed?
+// - update node in tree -> propagates
+// - look up subset of leaf nodes
+// - map nodes of trees to meshes/models
+// - easily reference individual nodes of tree
+//
+
+pub const TransformTreeNode = struct {
+    transform: m4,
+    root_transform: m4,
+    mesh_index: ?res.MeshIndex,
+    parent: u8,
+    flags: struct {
+        dirty: u1 = 0,
+    },
+};
+
+pub const TransformTreeSaveNode = struct {
+    id: res.Id,
+    index: *u8,
+};
+
+pub const TransformTree = struct {
+    nodes: []TransformTreeNode,
+    node_ids: []res.Id,
+    id: res.Id,
+    flags: struct {
+        dirty: u1,
+    },
 };

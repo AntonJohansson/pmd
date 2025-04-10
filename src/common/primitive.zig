@@ -1,27 +1,35 @@
 const math = @import("math.zig");
+const res = @import("common.zig").res;
 const v2 = math.v2;
 const v3 = math.v3;
 const m4 = math.m4;
 
-pub const VoxelTransform = struct {
-    pub const FaceDir = enum(u8) {
-        up,
-        down,
-        back,
-        front,
-        left,
-        right
-    };
+pub const voxel_dim = 8;
+pub const chunk_dim = 64;
 
-    x: u8,
-    y: u8,
-    z: u8,
+pub const Voxel = enum(u8) {
+    air,
+    grass,
+    stone,
+    wood,
+};
+
+pub const VoxelTransform = struct {
+    pub const FaceDir = enum(u8) { up, down, back, front, left, right };
+
+    pos: [3]u8,
     face: FaceDir,
+
+    kind: Voxel,
+    dummy: [3]u8 = .{ 0, 0, 0 },
 };
 
 pub const VoxelChunk = struct {
-    dim: u8 = 16,
+    origin_x: i16 = 0,
+    origin_y: i16 = 0,
+    origin_z: i16 = 0,
     voxels: []VoxelTransform,
+    dirty: u1 = 0,
 };
 
 pub const Color = struct {
@@ -66,12 +74,12 @@ pub const CubeOutline = struct {
 };
 
 pub const Mesh = struct {
-    model: m4,
-    name: []const u8,
-    draw_children: bool = false,
+    transform: m4,
+    mesh_index: u32,
+    model_id: res.Id,
 };
 
-pub const Camera3d = extern struct {
+pub const Camera3d = struct {
     pos: v3 = .{},
     dir: v3 = .{},
     proj: m4 = math.m4_identity,
@@ -88,7 +96,7 @@ pub const Camera2d = struct {
 pub const End3d = struct {};
 pub const End2d = struct {};
 
-pub const Plane = extern struct {
+pub const Plane = struct {
     model: m4,
 };
 

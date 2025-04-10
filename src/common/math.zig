@@ -507,7 +507,8 @@ pub const m4 = extern struct {
         const x = q.v.x;
         const y = q.v.y;
         const z = q.v.z;
-        const w = q.s;
+        // TODO: ?
+        const w = -q.s;
         return m4{
             .m00 = (1 - 2 * y * y - 2 * z * z),
             .m01 = (2 * x * y + 2 * z * w),
@@ -528,24 +529,24 @@ pub const m4 = extern struct {
         };
     }
 
-    pub fn from(t: v3, q: Quat, s: v3) m4 {
-        const x = q.v.x;
-        const y = q.v.y;
-        const z = q.v.z;
-        const w = q.s;
+    pub fn from_transform(t: Transform) m4 {
+        const x = t.rotation.v.x;
+        const y = t.rotation.v.y;
+        const z = t.rotation.v.z;
+        const w = -t.rotation.s;
         return m4{
-            .m00 = s.x * (1 - 2 * y * y - 2 * z * z),
-            .m01 = s.y * (2 * x * y + 2 * z * w),
-            .m02 = s.z * (2 * x * z - 2 * y * w),
-            .m03 = t.x,
-            .m10 = s.x * (2 * x * y - 2 * z * w),
-            .m11 = s.y * (1 - 2 * x * x - 2 * z * z),
-            .m12 = s.z * (2 * y * z + 2 * x * w),
-            .m13 = t.y,
-            .m20 = s.x * (2 * x * z + 2 * y * w),
-            .m21 = s.y * (2 * y * z - 2 * x * w),
-            .m22 = s.z * (1 - 2 * x * x - 2 * y * y),
-            .m23 = t.z,
+            .m00 = t.scale.x * (1 - 2 * y * y - 2 * z * z),
+            .m01 = t.scale.y * (2 * x * y + 2 * z * w),
+            .m02 = t.scale.z * (2 * x * z - 2 * y * w),
+            .m03 = t.position.x,
+            .m10 = t.scale.x * (2 * x * y - 2 * z * w),
+            .m11 = t.scale.y * (1 - 2 * x * x - 2 * z * z),
+            .m12 = t.scale.z * (2 * y * z + 2 * x * w),
+            .m13 = t.position.y,
+            .m20 = t.scale.x * (2 * x * z + 2 * y * w),
+            .m21 = t.scale.y * (2 * y * z - 2 * x * w),
+            .m22 = t.scale.z * (1 - 2 * x * x - 2 * y * y),
+            .m23 = t.position.z,
             .m30 = 0,
             .m31 = 0,
             .m32 = 0,
@@ -886,10 +887,22 @@ pub const m4 = extern struct {
         const cosa = cos(angle);
         const sina = sin(angle);
         return m4{
-            .m00 = 1, .m01 = 0, .m02 = 0, .m03 = 0,
-            .m10 = 0, .m11 = cosa, .m12 = -sina, .m13 = 0,
-            .m20 = 0, .m21 = sina, .m22 = cosa, .m23 = 0,
-            .m30 = 0, .m31 = 0, .m32 = 0, .m33 = 1,
+            .m00 = 1,
+            .m01 = 0,
+            .m02 = 0,
+            .m03 = 0,
+            .m10 = 0,
+            .m11 = cosa,
+            .m12 = -sina,
+            .m13 = 0,
+            .m20 = 0,
+            .m21 = sina,
+            .m22 = cosa,
+            .m23 = 0,
+            .m30 = 0,
+            .m31 = 0,
+            .m32 = 0,
+            .m33 = 1,
         };
     }
 
@@ -897,10 +910,22 @@ pub const m4 = extern struct {
         const cosa = cos(angle);
         const sina = sin(angle);
         return m4{
-            .m00 = cosa, .m01 = 0, .m02 = sina, .m03 = 0,
-            .m10 = 0, .m11 = 1, .m12 = 0, .m13 = 0,
-            .m20 = -sina, .m21 = 0, .m22 = cosa, .m23 = 0,
-            .m30 = 0, .m31 = 0, .m32 = 0, .m33 = 1,
+            .m00 = cosa,
+            .m01 = 0,
+            .m02 = sina,
+            .m03 = 0,
+            .m10 = 0,
+            .m11 = 1,
+            .m12 = 0,
+            .m13 = 0,
+            .m20 = -sina,
+            .m21 = 0,
+            .m22 = cosa,
+            .m23 = 0,
+            .m30 = 0,
+            .m31 = 0,
+            .m32 = 0,
+            .m33 = 1,
         };
     }
 
@@ -908,10 +933,22 @@ pub const m4 = extern struct {
         const cosa = cos(angle);
         const sina = sin(angle);
         return m4{
-            .m00 = cosa, .m01 = -sina, .m02 = 0, .m03 = 0,
-            .m10 = sina, .m11 = cosa, .m12 = 0, .m13 = 0,
-            .m20 = 0, .m21 = 0, .m22 = 1, .m23 = 0,
-            .m30 = 0, .m31 = 0, .m32 = 0, .m33 = 1,
+            .m00 = cosa,
+            .m01 = -sina,
+            .m02 = 0,
+            .m03 = 0,
+            .m10 = sina,
+            .m11 = cosa,
+            .m12 = 0,
+            .m13 = 0,
+            .m20 = 0,
+            .m21 = 0,
+            .m22 = 1,
+            .m23 = 0,
+            .m30 = 0,
+            .m31 = 0,
+            .m32 = 0,
+            .m33 = 1,
         };
     }
 };
@@ -1047,7 +1084,7 @@ pub fn v4tov3(v: v4) v3 {
     return v3{ .x = v.x, .y = v.y, .z = v.z };
 }
 
-pub const Quat = struct {
+pub const Quat = extern struct {
     v: v3 = .{},
     s: f32 = 0,
 
@@ -1064,6 +1101,24 @@ pub const Quat = struct {
         };
     }
 
+    pub fn dot(a: Quat, b: Quat) f32 {
+        return v3.dot(a.v, b.v) + a.s * b.s;
+    }
+
+    pub fn add(a: Quat, b: Quat) Quat {
+        return .{
+            .v = v3.add(a.v, b.v),
+            .s = a.s + b.s,
+        };
+    }
+
+    pub fn scale(s: f32, a: Quat) Quat {
+        return .{
+            .v = v3.scale(s, a.v),
+            .s = s * a.s,
+        };
+    }
+
     pub fn mul(a: Quat, b: Quat) Quat {
         return .{
             .v = v3.add(v3.add(v3.scale(b.s, a.v), v3.scale(a.s, b.v)), v3.cross(a.v, b.v)),
@@ -1072,7 +1127,7 @@ pub const Quat = struct {
     }
 
     pub fn len2(a: Quat) f32 {
-        return v3.len2(a.v) + a.s * a.s;
+        return dot(a, a);
     }
 
     pub fn len(a: Quat) f32 {
@@ -1080,11 +1135,7 @@ pub const Quat = struct {
     }
 
     pub fn normalize(a: Quat) Quat {
-        const l = len(a);
-        return .{
-            .v = v3.scale(1 / l, a.v),
-            .s = a.s / l,
-        };
+        return scale(1.0 / len(a), a);
     }
 
     pub fn conj(a: Quat) Quat {
@@ -1103,7 +1154,68 @@ pub const Quat = struct {
     pub fn lerp(a: Quat, b: Quat, t: f32) Quat {
         return .{
             .v = v3.lerp(a.v, b.v, t),
-            .s = a.s + t*(b.s-a.s),
+            .s = a.s + t * (b.s - a.s),
         };
     }
+
+    pub fn slerp(a: Quat, b: Quat, t: f32) Quat {
+        var d = dot(a, b);
+        // Ensure shortest path
+        if (d < 0.0) {
+            b = .{ .v = v3.neg(b.v), .s = -b.s };
+            d = -d;
+        }
+
+        // Handle co-linear quaternions with lerp
+        const epsilon = 1e-6;
+        if (d > 1.0 - epsilon) {
+            return Quat.lerp(a, b, t).normalize();
+        }
+
+        // Compute theta and weights
+        const theta = std.math.acos(d);
+        const s = @sin(theta);
+        const w0 = @sin((1 - t) * theta) / s;
+        const w1 = @sin(t * theta) / s;
+
+        // Blend
+        return Quat.add(Quat.scale(w0, a), Quat.scale(w1, b));
+    }
 };
+
+pub const Transform = struct {
+    position: v3,
+    rotation: Quat,
+    scale: v3,
+};
+
+pub fn transform_blend(ts: []Transform, ws: []f32) Transform {
+    std.debug.assert(ts.len == ws.len);
+
+    var total_weight: f32 = 0.0;
+    for (ws) |w| {
+        total_weight += w;
+    }
+
+    var t: v3 = .{};
+    for (0..ts.len) |i| {
+        t = v3.add(t, v3.scale(ws[i] / total_weight, ts[i].position));
+    }
+
+    var q: Quat = .{};
+    for (0..ts.len) |i| {
+        q = Quat.add(q, Quat.scale(ws[i] / total_weight, ts[i].rotation));
+    }
+    q = q.normalize();
+
+    var s: v3 = .{};
+    for (0..ts.len) |i| {
+        s = v3.add(s, v3.scale(ws[i] / total_weight, ts[i].scale));
+    }
+
+    return .{
+        .position = t,
+        .rotation = q,
+        .scale = s,
+    };
+}

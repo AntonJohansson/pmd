@@ -29,8 +29,8 @@ pub const LogMemory = struct {
     frame: std.mem.Allocator,
 
     pub fn init(persistent: std.mem.Allocator, frame: std.mem.Allocator, file: ?[]const u8, mirror_to_stdio: bool) !LogMemory {
-        var logmem = LogMemory {
-            .messages = std.ArrayList(Message).init(persistent),
+        var logmem = LogMemory{
+            .messages = std.ArrayList(Message){},
             .mirror_to_stdio = mirror_to_stdio,
             .persistent = persistent,
             .frame = frame,
@@ -49,23 +49,23 @@ pub const LogMemory = struct {
         return logmem;
     }
 
-    pub fn deinit() void {
-    }
+    pub fn deinit() void {}
 
     pub fn append(memory: *LogMemory, comptime group: Group, comptime severity: Severity, comptime fmt: []const u8, args: anytype) void {
         const str = std.fmt.allocPrint(memory.persistent, fmt, args) catch return;
 
-        memory.messages.append(.{
+        memory.messages.append(memory.persistent, .{
             .group = group,
             .severity = severity,
             .message = str,
         }) catch return;
 
-
         if (memory.mirror_to_stdio) {
-            const head = std.fmt.allocPrint(memory.frame, "[{s}] [{s}]: " , .{@tagName(group), @tagName(severity)}) catch return;
-            const stdout = std.io.getStdOut();
-            const writer = stdout.writer();
+            const head = std.fmt.allocPrint(memory.frame, "[{s}] [{s}]: ", .{ @tagName(group), @tagName(severity) }) catch return;
+            var stdout = std.fs.File.stdout();
+            var buffer: [1024]u8 = undefined;
+            var stdout_writer = stdout.writer(&buffer);
+            const writer = &stdout_writer.interface;
             _ = writer.writeAll(head) catch return;
             _ = writer.writeAll(str) catch return;
             _ = writer.writeAll("\n") catch return;

@@ -64,9 +64,9 @@ pub fn clconnect(ip_port_str: []const u8) void {
 //fn clbloomAniso8()    void { setBloomMode(raylib.TEXTURE_FILTER_ANISOTROPIC_8X); }
 //fn clbloomAniso16()   void { setBloomMode(raylib.TEXTURE_FILTER_ANISOTROPIC_16X); }
 
-fn dodo(comptime func_name: []const u8, comptime func: anytype, it: *std.mem.TokenIterator(u8, .any)) ?std.meta.ArgsTuple(@TypeOf(func)) {
+fn dodo(comptime func_name: []const u8, comptime func: anytype, it: *std.mem.TokenIterator(u8, .scalar)) ?std.meta.ArgsTuple(@TypeOf(func)) {
     var tuple: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
-    const args = @typeInfo(@TypeOf(func)).Fn.params;
+    const args = @typeInfo(@TypeOf(func)).@"fn".params;
     inline for (args, 0..) |arg, i| {
         comptime var buf: [128]u8 = undefined;
         const name = comptime std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
@@ -104,7 +104,7 @@ fn dodo(comptime func_name: []const u8, comptime func: anytype, it: *std.mem.Tok
 }
 
 pub fn dodododododododo(commandline: []const u8) void {
-    var it = std.mem.tokenize(u8, commandline, " ");
+    var it = std.mem.tokenizeScalar(u8, commandline, ' ');
     const command = it.next() orelse {
         std.log.err("expected command", .{});
         return;
@@ -116,7 +116,7 @@ pub fn dodododododododo(commandline: []const u8) void {
             return;
         };
 
-        inline for (@typeInfo(Vars).Struct.fields) |field| {
+        inline for (@typeInfo(Vars).@"struct".fields) |field| {
             if (std.mem.eql(u8, varname, field.name)) {
                 const f = @field(config.vars, field.name);
                 const T = @TypeOf(f);
@@ -158,11 +158,11 @@ pub fn dodododododododo(commandline: []const u8) void {
     } else {
         // Here we dispatch to cl*() functions if the command == * and arguments
         // are valid.
-        inline for (@typeInfo(@This()).Struct.decls) |decl| {
+        inline for (@typeInfo(@This()).@"struct".decls) |decl| {
             const f = @field(@This(), decl.name);
             const T = @TypeOf(f);
             const ti = @typeInfo(T);
-            if (ti == .Fn and decl.name.len > "cl".len and decl.name[0] == 'c' and decl.name[1] == 'l' and std.mem.eql(u8, command, decl.name["cl".len..])) {
+            if (ti == .@"fn" and decl.name.len > "cl".len and decl.name[0] == 'c' and decl.name[1] == 'l' and std.mem.eql(u8, command, decl.name["cl".len..])) {
                 if (dodo(decl.name, f, &it)) |args| {
                     @call(.auto, f, args);
                 }

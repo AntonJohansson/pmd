@@ -4,11 +4,17 @@ const sin = std.math.sin;
 const max = std.math.max;
 const min = std.math.min;
 
+const voxels = @import("voxels.zig");
+
 const common = @import("common");
+const BoundedArray = common.BoundedArray;
 const Memory = common.Memory;
 const Player = common.Player;
 const Input = common.Input;
 const hsv_to_rgb = common.color.hsv_to_rgb;
+const TransformTree = common.TransformTree;
+const TransformTreeNode = common.TransformTreeNode;
+const TransformTreeSaveNode = common.TransformTreeSaveNode;
 
 const intersect = @import("intersect.zig");
 const ui_profile = @import("debug/ui_profile.zig");
@@ -34,8 +40,6 @@ const m4 = math.m4;
 
 const draw_api = common.draw_api;
 
-const zphy = @import("zphysics");
-
 const widget_length = 20.0;
 const widget_thickness = 2.0;
 const widget_size_x = v3{ .x = widget_length, .y = widget_thickness, .z = widget_thickness };
@@ -58,144 +62,70 @@ const tile_size = 32.0;
 const tile_max_height = 4.0;
 const tile_base_height = 2.0;
 
-//
-// PHYSICS
-//
+var map: common.Map = undefined;
 
-const object_layers = struct {
-    const non_moving: zphy.ObjectLayer = 0;
-    const moving: zphy.ObjectLayer = 1;
-    const len: u32 = 2;
-};
+const goosepack = common.goosepack;
 
-const broad_phase_layers = struct {
-    const non_moving: zphy.BroadPhaseLayer = 0;
-    const moving: zphy.BroadPhaseLayer = 1;
-    const len: u32 = 2;
-};
+var sniper_bolt_back_animation: common.res.Animation = undefined;
+var sniper_bolt_forward_animation: common.res.Animation = undefined;
+var sniper_trigger_animation: common.res.Animation = undefined;
 
-const BroadPhaseLayerInterface = extern struct {
-    usingnamespace zphy.BroadPhaseLayerInterface.Methods(@This());
-    __v: *const zphy.BroadPhaseLayerInterface.VTable = &vtable,
-
-    object_to_broad_phase: [object_layers.len]zphy.BroadPhaseLayer = undefined,
-
-    const vtable = zphy.BroadPhaseLayerInterface.VTable{
-        .getNumBroadPhaseLayers = _getNumBroadPhaseLayers,
-        .getBroadPhaseLayer = _getBroadPhaseLayer,
-    };
-
-    fn init() BroadPhaseLayerInterface {
-        var layer_interface: BroadPhaseLayerInterface = .{};
-        layer_interface.object_to_broad_phase[object_layers.non_moving] = broad_phase_layers.non_moving;
-        layer_interface.object_to_broad_phase[object_layers.moving] = broad_phase_layers.moving;
-        return layer_interface;
-    }
-
-    fn _getNumBroadPhaseLayers(_: *const zphy.BroadPhaseLayerInterface) callconv(.C) u32 {
-        return broad_phase_layers.len;
-    }
-
-    fn _getBroadPhaseLayer(
-        iself: *const zphy.BroadPhaseLayerInterface,
-        layer: zphy.ObjectLayer,
-    ) callconv(.C) zphy.BroadPhaseLayer {
-        const self = @as(*const BroadPhaseLayerInterface, @ptrCast(iself));
-        return self.object_to_broad_phase[layer];
-    }
-};
-
-const ObjectVsBroadPhaseLayerFilter = extern struct {
-    usingnamespace zphy.ObjectVsBroadPhaseLayerFilter.Methods(@This());
-    __v: *const zphy.ObjectVsBroadPhaseLayerFilter.VTable = &vtable,
-
-    const vtable = zphy.ObjectVsBroadPhaseLayerFilter.VTable{ .shouldCollide = _shouldCollide };
-
-    fn _shouldCollide(
-        _: *const zphy.ObjectVsBroadPhaseLayerFilter,
-        layer1: zphy.ObjectLayer,
-        layer2: zphy.BroadPhaseLayer,
-    ) callconv(.C) bool {
-        return switch (layer1) {
-            object_layers.non_moving => layer2 == broad_phase_layers.moving,
-            object_layers.moving => true,
-            else => unreachable,
-        };
-    }
-};
-
-const ObjectLayerPairFilter = extern struct {
-    usingnamespace zphy.ObjectLayerPairFilter.Methods(@This());
-    __v: *const zphy.ObjectLayerPairFilter.VTable = &vtable,
-
-    const vtable = zphy.ObjectLayerPairFilter.VTable{ .shouldCollide = _shouldCollide };
-
-    fn _shouldCollide(
-        _: *const zphy.ObjectLayerPairFilter,
-        object1: zphy.ObjectLayer,
-        object2: zphy.ObjectLayer,
-    ) callconv(.C) bool {
-        return switch (object1) {
-            object_layers.non_moving => object2 == object_layers.moving,
-            object_layers.moving => true,
-            else => unreachable,
-        };
-    }
-};
-
-const ContactListener = extern struct {
-    usingnamespace zphy.ContactListener.Methods(@This());
-    __v: *const zphy.ContactListener.VTable = &vtable,
-
-    const vtable = zphy.ContactListener.VTable{ .onContactValidate = _onContactValidate };
-
-    fn _onContactValidate(
-        self: *zphy.ContactListener,
-        body1: *const zphy.Body,
-        body2: *const zphy.Body,
-        base_offset: *const [3]zphy.Real,
-        collision_result: *const zphy.CollideShapeResult,
-    ) callconv(.C) zphy.ValidateResult {
-        _ = self;
-        _ = body1;
-        _ = body2;
-        _ = base_offset;
-        _ = collision_result;
-        return .accept_all_contacts;
-    }
-};
-
-//
-// END PHYSICS
-//
-
-var broad_phase_layer_interface = BroadPhaseLayerInterface.init();
-var object_vs_broad_phase_layer_filter: ObjectVsBroadPhaseLayerFilter = .{};
-var object_layer_pair_filter: ObjectLayerPairFilter = .{};
-var contact_listener: ContactListener = .{};
-var physics_system: *zphy.PhysicsSystem = undefined;
+var weapon_model: m4 = undefined;
 
 export fn init(memory: *Memory) bool {
-    zphy.init(memory.mem.persistent, .{}) catch return false;
+    voxels.map_init(&map, memory.mem.persistent) catch return false;
+    const chunk = voxels.add_chunk(&map, .{ 1, 0, 0 }) catch return false;
+    voxels.chunk_build_terrain(memory, chunk);
+    voxels.chunk_build_faces(memory, chunk);
+    goosepack.setAllocators(memory.mem.frame, memory.mem.persistent);
 
-    physics_system = zphy.PhysicsSystem.create(
-        @as(*const zphy.BroadPhaseLayerInterface, @ptrCast(&broad_phase_layer_interface)),
-        @as(*const zphy.ObjectVsBroadPhaseLayerFilter, @ptrCast(&object_vs_broad_phase_layer_filter)),
-        @as(*const zphy.ObjectLayerPairFilter, @ptrCast(&object_layer_pair_filter)),
-        .{
-            .max_bodies = 1024,
-            .num_body_mutexes = 0,
-            .max_body_pairs = 1024,
-            .max_contact_constraints = 1024,
-        },
-    ) catch return false;
+    common.sniper.tree = from_model(memory, "res/models/weapons/sniper v2", &.{
+        .{ .id = common.res.id("res/models/weapons/sniper bolt"), .index = &common.sniper.id_bolt },
+        .{ .id = common.res.id("res/models/weapons/sniper bullet exit"), .index = &common.sniper.id_barrel },
+        .{ .id = common.res.id("res/models/weapons/sniper iron sight aim"), .index = &common.sniper.id_aim },
+    }) orelse {
+        return false;
+    };
+
+    common.pistol.tree = from_model(memory, "res/models/weapons/pittol", &.{
+        .{ .id = common.res.id("res/models/weapons/pittol bullet exit"), .index = &common.pistol.id_barrel },
+        .{ .id = common.res.id("res/models/weapons/pittol iron sight"), .index = &common.pistol.id_aim },
+    }) orelse {
+        return false;
+    };
+
+    {
+        const anim_name = "res/models/weapons/animation/bolt back";
+        const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
+            std.log.info("unable to find animation {s}", .{anim_name});
+            return false;
+        };
+        sniper_bolt_back_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
+    }
+
+    {
+        const anim_name = "res/models/weapons/animation/bolt forward";
+        const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
+            std.log.info("unable to find animation {s}", .{anim_name});
+            return false;
+        };
+        sniper_bolt_forward_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
+    }
+
+    {
+        const anim_name = "res/models/weapons/animation/fire";
+        const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
+            std.log.info("unable to find animation {s}", .{anim_name});
+            return false;
+        };
+        sniper_trigger_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
+    }
+
     return true;
 }
 
 export fn deinit(memory: *Memory) void {
     _ = memory;
-    physics_system.destroy();
-    zphy.deinit();
 }
 
 fn updateWidget(widget: *common.WidgetModel, input: *const Input, start: v3, dir: v3) void {
@@ -219,7 +149,7 @@ fn updateWidget(widget: *common.WidgetModel, input: *const Input, start: v3, dir
         const k = m4.modelAxisK(model);
         const pos = m4.modelTranslation(model);
 
-        var widgets: std.BoundedArray(WidgetMoveDir, 6) = .{};
+        var widgets: BoundedArray(WidgetMoveDir, 6) = .{};
         const move_x = intersect.cubeLine(model, widget_size_x, start, dir);
         if (move_x) |res|
             widgets.appendAssumeCapacity(.{ .intersect = res, .move_dir = i, .move_normal = k });
@@ -340,21 +270,23 @@ fn drawWidget(cmd: *draw_api.CommandBuffer, widget: *common.WidgetModel) void {
 
 const ground_plane_model = m4.model(.{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 });
 
+fn player_height(p: *const Player) f32 {
+    return if (p.crouch) 15 else 22;
+}
+
 fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
-    if (memory.state == .gameplay or memory.state == .editor) {
-        if (input.cursor_delta.x != 0 or input.cursor_delta.y != 0) {
-            player.yaw -= input.cursor_delta.x;
-            player.pitch += input.cursor_delta.y;
-            player.pitch = std.math.clamp(player.pitch, -std.math.pi / 2.0 + 0.1, std.math.pi / 2.0 - 0.1);
-            player.dir = v3{
-                .x = cos(player.yaw) * cos(player.pitch),
-                .y = sin(player.yaw) * cos(player.pitch),
-                .z = -sin(player.pitch),
-            };
-        }
+    if (input.cursor_delta.x != 0 or input.cursor_delta.y != 0) {
+        player.yaw -= input.cursor_delta.x;
+        player.pitch += input.cursor_delta.y;
+        player.pitch = std.math.clamp(player.pitch, -std.math.pi / 2.0 + 0.1, std.math.pi / 2.0 - 0.1);
+        player.dir = v3{
+            .x = cos(player.yaw) * cos(player.pitch),
+            .y = sin(player.yaw) * cos(player.pitch),
+            .z = -sin(player.pitch),
+        };
     }
 
-    const noclip = memory.state == .editor;
+    const noclip = player.in_editor;
 
     // compute wishvel
     var wishvel: v3 = .{};
@@ -396,8 +328,9 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
     // Compute wishdir/wishspeed and bound wishvel
     var wishspeed = v3.len(wishvel);
     var wishdir = v3{};
-    if (wishspeed != 0.0)
+    if (wishspeed != 0.0) {
         wishdir = v3.scale(1.0 / wishspeed, wishvel);
+    }
     if (wishspeed > vars.maxspeed) {
         wishvel = v3.scale(vars.maxspeed / wishspeed, wishvel);
         wishspeed = vars.maxspeed;
@@ -411,12 +344,9 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
         // Apply friction
         const speed = v3.len(player.vel);
         if (speed > 0) {
-            const control = if (speed < vars.stopspeed) vars.stopspeed else speed;
-            var newspeed = speed - dt * control * vars.friction;
-            if (newspeed < 0)
-                newspeed = 0;
-            newspeed /= speed;
-            player.vel = v3.scale(newspeed, player.vel);
+            const control = @max(speed, vars.stopspeed);
+            const newspeed = @max(speed - dt * control * vars.friction, 0);
+            player.vel = v3.scale(newspeed / speed, player.vel);
         }
 
         const speed_in_wishdir = v3.dot(player.vel, wishdir);
@@ -424,21 +354,24 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
 
         if (addspeed > 0) {
             var accelspeed = vars.acceleration * dt * wishspeed;
-            if (accelspeed > addspeed)
+            if (accelspeed > addspeed) {
                 accelspeed = addspeed;
+            }
             player.vel = v3.add(player.vel, v3.scale(accelspeed, wishdir));
         }
     } else {
         // in air
         var huh_wishspeed = wishspeed;
-        if (huh_wishspeed > vars.maxairspeed)
+        if (huh_wishspeed > vars.maxairspeed) {
             huh_wishspeed = vars.maxairspeed;
+        }
         const speed_in_wishdir = v3.dot(player.vel, wishdir);
         const addspeed = huh_wishspeed - speed_in_wishdir;
         if (addspeed > 0) {
             var accelspeed = vars.acceleration * dt * wishspeed;
-            if (accelspeed > addspeed)
+            if (accelspeed > addspeed) {
                 accelspeed = addspeed;
+            }
             player.vel = v3.add(player.vel, v3.scale(accelspeed, wishdir));
         }
     }
@@ -450,7 +383,7 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
     if (v3.len2(potential_delta) != 0.0) {
         var collided = false;
         var pos_delta = v3{ .x = 0, .y = 0, .z = 0 };
-        for (memory.entities.constSlice()) |e| {
+        for (memory.entities.slice()) |e| {
             if (intersect.planeModelRay(e.plane.model, global_plane_size, player.pos, potential_delta)) |res| {
                 if (!collided) {
                     const normal = if (v3.dot(res.normal, potential_delta) < 0) res.normal else v3.neg(res.normal);
@@ -496,7 +429,7 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
 
     // Check for ground touch
     player.onground = false;
-    for (memory.entities.constSlice()) |e| {
+    for (memory.entities.slice()) |e| {
         if (intersect.planeModelRay(e.plane.model, global_plane_size, player.pos, .{ .x = 0, .y = 0, .z = -0.5 })) |_| {
             player.onground = true;
         }
@@ -507,11 +440,11 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
 
     // copy player pos to camera pos
     {
-        const weapon = player.weapons[player.weapon_current];
-        const in_zoom = weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown == weapon.total_zoom_cooldown;
+        //const weapon = player.weapons[player.weapon_current];
+        const in_zoom = false; //weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown == weapon.total_zoom_cooldown;
         const fov = if (in_zoom) vars.fov_zoom else vars.fov;
 
-        const height: f32 = if (player.crouch) 15 else 22;
+        const height = player_height(player);
         const offset = v3{ .x = 0, .y = 0, .z = height };
         player.camera.pos = v3.add(player.pos, offset);
         player.camera.dir = player.dir;
@@ -520,17 +453,17 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
     }
 }
 
-fn dumpTypeToDisk(writer: anytype, value: anytype) !void {
+fn dumpTypeToDisk(writer: *std.Io.Writer, value: anytype) !void {
     const ti = @typeInfo(@TypeOf(value));
     switch (ti) {
-        .Int => {
-            try std.fmt.formatInt(value, 10, .lower, .{}, writer);
+        .int => {
+            try writer.printInt(value, 10, .lower, .{});
             try writer.writeByte('\n');
         },
-        .Float => {
+        .float => {
             try writer.print("{}\n", .{value});
         },
-        .Struct => |s| {
+        .@"struct" => |s| {
             try writer.writeAll("struct:\n");
             inline for (s.fields) |field| {
                 try writer.writeAll(field.name);
@@ -549,24 +482,25 @@ fn dumpEntitiesToDisk(entities: []common.Entity) !void {
         return;
     };
     defer file.close();
-    const writer = file.writer();
+    var buffer: [1024]u8 = undefined;
+    var writer = file.writer(&buffer);
 
     for (entities) |e| {
-        try dumpTypeToDisk(writer, e);
+        try dumpTypeToDisk(&writer.interface, e);
     }
 }
 
 fn readTypeFromDisk(it: *std.mem.TokenIterator(u8, .any), value: anytype) !void {
-    const base_type = @typeInfo(@TypeOf(value)).Pointer.child;
+    const base_type = @typeInfo(@TypeOf(value)).pointer.child;
     const ti = @typeInfo(base_type);
     switch (ti) {
-        .Int => {
+        .int => {
             value.* = std.fmt.parseInt(base_type, it.next().?, 0) catch return;
         },
-        .Float => {
+        .float => {
             value.* = std.fmt.parseFloat(base_type, it.next().?) catch return;
         },
-        .Struct => |s| {
+        .@"struct" => |s| {
             _ = it.next(); // consume "struct:"
             inline for (s.fields) |field| {
                 _ = it.next(); // consume "field.name:"
@@ -585,16 +519,16 @@ fn readEntitiesFromDisk(memory: *common.Memory) !void {
     };
     defer file.close();
 
-    var data: std.BoundedArray(u8, 4096) = .{};
-    const bytes = try file.readAll(&data.buffer);
-    data.len = @intCast(bytes);
+    var buffer: BoundedArray(u8, 4096) = .{};
+    const bytes = try file.readAll(&buffer.data);
+    buffer.used = @intCast(bytes);
 
-    var it = std.mem.tokenize(u8, data.slice(), " \n");
+    var it = std.mem.tokenizeAny(u8, buffer.slice(), " \n");
 
     while (it.peek() != null) {
         var entity: common.Entity = undefined;
         try readTypeFromDisk(&it, &entity);
-        memory.entities.appendAssumeCapacity(entity);
+        memory.entities.append(entity);
     }
 }
 
@@ -609,7 +543,7 @@ fn pushWindow(memory: *Memory, cmd: *draw_api.CommandBuffer, title: []const u8, 
     }
 
     if (persistent == null) {
-        persistent = memory.windows_persistent.addOne() catch unreachable;
+        persistent = memory.windows_persistent.addOne(memory.mem.persistent) catch unreachable;
         persistent.?.* = .{
             .title = title,
             .x = x,
@@ -619,7 +553,7 @@ fn pushWindow(memory: *Memory, cmd: *draw_api.CommandBuffer, title: []const u8, 
         };
     }
 
-    const window = memory.windows.addOne() catch unreachable;
+    const window = memory.windows.addOne(memory.mem.frame) catch unreachable;
     window.* = .{
         .persistent = persistent.?,
         .cursor_x = 0,
@@ -662,15 +596,26 @@ fn pushText(memory: *Memory, cmd: *draw_api.CommandBuffer, text: []const u8) voi
 }
 
 export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
+    if (player.in_editor) {
+        voxels.edit(memory, player, input, &map) catch {};
+    }
+
+    // TODO(anjo): move
+    if (player.weapons[0] == null) {
+        player.weapons[0] = common.sniper;
+        player.weapons[1] = common.pistol;
+        player.weapons[2] = common.nade;
+    }
+
     // Update hitscans
     // @client
     {
         var i: usize = 0;
-        while (i < memory.hitscans.len) {
+        while (i < memory.hitscans.used) {
             const h = &memory.hitscans.slice()[i];
             h.time_left -= @min(dt, h.time_left);
             if (h.time_left == 0.0) {
-                _ = memory.hitscans.swapRemove(i);
+                _ = memory.hitscans.swap_remove(i);
             } else {
                 i += 1;
             }
@@ -693,6 +638,118 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
         }
     }
 
+    // animation
+    {
+        const tree = &player.weapons[0].?.tree;
+        if (input.isset(.bolt_back)) {
+            memory.animation_states.append(memory.mem.persistent, .{
+                .begin_time = time_seconds(memory),
+                .playback_speed = 1.5,
+                .animation = &sniper_bolt_back_animation,
+                .tree = tree,
+                .index = common.sniper.id_bolt,
+            }) catch unreachable;
+        }
+        if (input.isset(.bolt_forward)) {
+            memory.animation_states.append(memory.mem.persistent, .{
+                .begin_time = time_seconds(memory),
+                .playback_speed = 1.5,
+                .animation = &sniper_bolt_forward_animation,
+                .tree = tree,
+                .index = common.sniper.id_bolt,
+            }) catch unreachable;
+        }
+
+        // TODO(anjo): @parallelize
+        for (memory.animation_states.items) |*state| {
+            transform_animation(state, time_seconds(memory));
+        }
+
+        var i: usize = 0;
+        while (i < memory.animation_states.items.len) {
+            if (memory.animation_states.items[i].finished) {
+                _ = memory.animation_states.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+
+        {
+            var anim_map = std.AutoHashMap(struct { res_id: common.res.Id, id: u8 }, std.ArrayList(*common.AnimationState)).init(memory.mem.frame);
+            for (memory.animation_states.items) |*state| {
+                if (anim_map.getPtr(.{ .res_id = state.tree.id, .id = state.index })) |arr| {
+                    var inserted = false;
+                    for (arr.items, 0..) |x, j| {
+                        if (state.begin_time < x.begin_time) {
+                            arr.insert(memory.mem.frame, j, state) catch unreachable;
+                            inserted = true;
+                            break;
+                        }
+                    }
+                    if (!inserted) {
+                        arr.append(memory.mem.persistent, state) catch unreachable;
+                    }
+                } else {
+                    var arr = std.ArrayList(*common.AnimationState){};
+                    arr.append(memory.mem.frame, state) catch unreachable;
+                    anim_map.put(.{ .res_id = state.tree.id, .id = state.index }, arr) catch unreachable;
+                }
+            }
+
+            const t = time_seconds(memory);
+            var it = anim_map.iterator();
+            while (it.next()) |pair| {
+                std.log.info("blending: {}", .{pair.value_ptr.items.len});
+
+                if (pair.value_ptr.items.len > 1) {
+                    const weights = memory.mem.frame.alloc(f32, pair.value_ptr.items.len) catch unreachable;
+                    const tfs = memory.mem.frame.alloc(math.Transform, pair.value_ptr.items.len) catch unreachable;
+
+                    var max_index: usize = 0;
+                    var max_time: f32 = 0;
+                    for (pair.value_ptr.items, 0..) |state, j| {
+                        if (state.end_time > max_time) {
+                            max_time = state.end_time;
+                            max_index = j;
+                        }
+                    }
+
+                    for (pair.value_ptr.items, 0..) |state, j| {
+                        const half_len = 0.5 * (state.end_time - state.begin_time) / state.playback_speed;
+                        const middle = state.begin_time + half_len;
+                        tfs[j] = .{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
+                        if (j == 0) {
+                            weights[j] = 1.0 - (1.0 / (2.0 * half_len)) * (t - state.begin_time);
+                        } else if (j == max_index) {
+                            weights[j] = (1.0 / (2.0 * half_len)) * (t - state.begin_time);
+                        } else {
+                            weights[j] = 1.0 - (1.0 / half_len) * @abs(t - middle);
+                        }
+                    }
+                    const node = &pair.value_ptr.items[0].tree.nodes[pair.key_ptr.id];
+                    const tf = math.transform_blend(tfs, weights);
+                    node.transform = m4.from_transform(tf);
+                } else {
+                    const state = pair.value_ptr.items[0];
+                    const node = &state.tree.nodes[pair.key_ptr.id];
+                    const tf = math.Transform{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
+                    node.transform = m4.from_transform(tf);
+                }
+            }
+
+            for (memory.animation_states.items) |*state| {
+                transform_animation(state, time_seconds(memory));
+                if (state.tree.flags.dirty == 1) {
+                    update_dirty_nodes(state.tree);
+                }
+            }
+        }
+    }
+
+    if (input.isset(.to_editor)) {
+        player.in_editor = !player.in_editor;
+    }
+
     // Player movement
     if (player.state == .alive) {
         player.crouch = input.isset(.Crouch);
@@ -700,8 +757,8 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
         move(vars, memory, player, input, dt);
         aim(vars, memory, player);
 
-        if (memory.state == .gameplay) {
-            weaponUpdate(memory, player, input, dt);
+        if (!player.in_editor) {
+            weaponUpdate(vars, memory, player, input, dt);
         }
     }
 
@@ -745,17 +802,16 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
     if (input.isset(.Load)) {
         readEntitiesFromDisk(memory) catch {};
     }
-
 }
 
 export fn authorizedPlayerUpdate(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
     _ = dt;
     _ = vars;
-    if (input.isset(.Editor)) {
+    if (player.in_editor) {
         // Create new entity
         if (input.isset(.AltInteract)) {
             const id = common.newEntityId();
-            memory.entities.appendAssumeCapacity(.{
+            memory.entities.append(.{
                 .id = id,
                 .flags = .{ .updated_server = true },
                 .plane = .{
@@ -771,10 +827,10 @@ export fn authorizedUpdate(vars: *const Vars, memory: *Memory, dt: f32) void {
 
     // Handle respawns
     // TODO: Move to some sort of "lobby" update
-    if (memory.respawns.len > 0) {
+    if (memory.respawns.used > 0) {
         var i: usize = 0;
-        while (i < memory.respawns.len) {
-            var r = &memory.respawns.slice()[i];
+        while (i < memory.respawns.used) {
+            var r = &memory.respawns.data[i];
 
             r.time_left -= dt;
             if (r.time_left <= 0.0) {
@@ -790,9 +846,9 @@ export fn authorizedUpdate(vars: *const Vars, memory: *Memory, dt: f32) void {
                     .yaw = 0,
                     .pitch = 0,
                 };
-                memory.new_spawns.appendAssumeCapacity(player);
+                memory.new_spawns.append(player);
 
-                _ = memory.respawns.swapRemove(i);
+                _ = memory.respawns.swap_remove(i);
             } else {
                 i += 1;
             }
@@ -800,24 +856,24 @@ export fn authorizedUpdate(vars: *const Vars, memory: *Memory, dt: f32) void {
     }
 
     // Handle damage
-    if (memory.new_damage.len > 0) {
-        for (memory.new_damage.constSlice()) |d| {
+    if (memory.new_damage.used > 0) {
+        for (memory.new_damage.slice()) |d| {
             var player = &memory.players.slice()[d.to];
             if (player.state == .dead)
                 continue;
             player.health -= @min(d.damage, player.health);
             if (player.health == 0.0) {
                 player.state = .dead;
-                memory.respawns.appendAssumeCapacity(.{
+                memory.respawns.append(.{
                     .id = d.to,
                     .time_left = 2.0,
                 });
-                memory.new_sounds.appendAssumeCapacity(.{
+                memory.new_sounds.append(.{
                     .type = .death,
                     .pos = .{ .x = 0, .y = 0, .z = 0 },
                     .id_from = d.to,
                 });
-                memory.new_kills.appendAssumeCapacity(.{
+                memory.new_kills.append(.{
                     .from = d.from,
                     .to = d.to,
                 });
@@ -826,8 +882,112 @@ export fn authorizedUpdate(vars: *const Vars, memory: *Memory, dt: f32) void {
     }
 }
 
-fn weaponUpdate(memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
-    const weapon = &player.weapons[player.weapon_current];
+export fn server_update(vars: *const Vars, memory: *Memory, dt: f32) void {
+    _ = dt;
+    _ = vars;
+    if (memory.map_mods.items.len > 0) {
+        _ = voxels.apply_modify(memory, &map, memory.map_mods.items);
+    }
+}
+
+export fn client_update(vars: *const Vars, memory: *Memory, dt: f32) void {
+    _ = dt;
+    _ = vars;
+    if (memory.map_mods.items.len > 0) {
+        const dirty_chunks = voxels.apply_modify(memory, &map, memory.map_mods.items);
+        voxels.rebuild_chunks(memory, &map, dirty_chunks);
+    }
+}
+
+fn weaponUpdate(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
+    const weapon = &player.weapons[player.weapon_current].?;
+
+    {
+        const m = m4.modelWithRotations(player.camera.pos, .{ .x = 1, .y = 1, .z = 1 }, .{
+            .x = 0,
+            .y = player.pitch,
+            .z = player.yaw,
+        });
+        const right = v3.neg(m4.modelAxisJ(m));
+        const forward = m4.modelAxisI(m);
+        const up = m4.modelAxisK(m);
+
+        // Dynamic offset due to movement and rotation
+        var move_offset = v3.scale(-0.0025, player.vel);
+        const view_delta =
+            v3.add(v3.scale(-10 * input.cursor_delta.x, right), v3.scale(10 * input.cursor_delta.y, up));
+        move_offset = v3.add(move_offset, view_delta);
+
+        var shoot_offset: v3 = .{ .x = 0, .y = 0, .z = 0 };
+        switch (weapon.state) {
+            .cooldown => {
+                const total_cd = weapon.total_cooldown;
+                const kt = weapon.kickback_time;
+                const cd = (total_cd - weapon.cooldown) / total_cd;
+                const cd_scale = @as(f32, @floatFromInt(@intFromBool(cd < kt))) * (if (cd < kt / 2.0) cd else kt - cd);
+                shoot_offset = v3.scale(-weapon.kickback_scale * cd_scale, player.aim_dir);
+            },
+            .reload => {
+                const total_cd = weapon.total_reload_cooldown;
+                const cd = (total_cd - weapon.cooldown) / total_cd;
+                const cd_scale = @as(f32, @floatFromInt(@intFromBool(cd < 1.0))) * (if (cd < 0.5) cd else 1.0 - cd);
+                shoot_offset = v3.scale(-10.0 * cd_scale, up);
+            },
+            else => {},
+        }
+
+        move_offset = v3.add(move_offset, shoot_offset);
+        switch (weapon.type) {
+            .sniper => {
+                const start_offset = v3.add(v3.add(v3.scale(vars.sniper_len / 2 + vars.sniper_off_y, forward), v3.scale(vars.sniper_off_x, right)), v3.scale(vars.sniper_off_z, up));
+
+                var offset: v3 = .{};
+                if (weapon.state == .zoom) {
+                    const t = weapon.cooldown / weapon.total_zoom_cooldown;
+
+                    const tmp_model = m4.modelFromXDir(.{}, .{ .x = 1, .y = 1, .z = 1 }, player.camera.dir);
+                    const aim_model = m4.mul(tmp_model, weapon.tree.nodes[weapon.id_aim].root_transform);
+                    const zoom_end_offset = m4.modelTranslation(aim_model);
+
+                    const zoom_end = v3.add(zoom_end_offset, v3.scale(-10.0, player.camera.dir));
+                    offset = v3.lerp(start_offset, zoom_end.neg(), t);
+                    offset = v3.add(offset, v3.scale(1.0 - t, move_offset));
+                } else {
+                    offset = v3.add(start_offset, move_offset);
+                }
+
+                const aim_dir = player.camera.dir;
+                //const aim_dir = player.aim_dir;
+                weapon_model = m4.modelFromXDir(v3.add(player.camera.pos, offset), .{ .x = 1, .y = 1, .z = 1 }, aim_dir);
+            },
+            .pistol => {
+                const start_offset = v3.add(v3.add(v3.scale(vars.pistol_len / 2 + vars.pistol_off_y, forward), v3.scale(vars.pistol_off_x, right)), v3.scale(vars.pistol_off_z, up));
+
+                const rrot = m4.modelWithRotations(.{}, .{ .x = 1, .y = 1, .z = 1 }, .{ .x = -std.math.pi / 4.0, .y = 0, .z = 0 });
+
+                var offset: v3 = .{};
+                if (weapon.state == .zoom) {
+                    const t = weapon.cooldown / weapon.total_zoom_cooldown;
+
+                    const tmp_model = m4.mul(m4.modelFromXDir(.{}, .{ .x = 1, .y = 1, .z = 1 }, player.camera.dir), rrot);
+                    const aim_model = m4.mul(tmp_model, weapon.tree.nodes[weapon.id_aim].root_transform);
+                    const zoom_end_offset = m4.modelTranslation(aim_model);
+
+                    const zoom_end = v3.add(zoom_end_offset, v3.scale(-10.0, player.camera.dir));
+                    offset = v3.lerp(start_offset, zoom_end.neg(), t);
+                    offset = v3.add(offset, v3.scale(1.0 - t, move_offset));
+                } else {
+                    offset = v3.add(start_offset, move_offset);
+                }
+
+                {
+                    const aim_dir = player.camera.dir;
+                    weapon_model = m4.mul(m4.modelFromXDir(v3.add(player.camera.pos, offset), .{ .x = 1, .y = 1, .z = 1 }, aim_dir), rrot);
+                }
+            },
+            .nade => {},
+        }
+    }
 
     switch (weapon.state) {
         .normal => {
@@ -836,7 +996,7 @@ fn weaponUpdate(memory: *Memory, player: *Player, input: *const Input, dt: f32) 
             if (can_fire and input.isset(.Interact)) {
                 switch (weapon.type) {
                     .sniper => {
-                        memory.new_sounds.appendAssumeCapacity(.{
+                        memory.new_sounds.append(.{
                             .type = .sniper,
                             .pos = .{ .x = 0, .y = 0, .z = 0 },
                             .id_from = player.id,
@@ -844,7 +1004,7 @@ fn weaponUpdate(memory: *Memory, player: *Player, input: *const Input, dt: f32) 
                         fireSniperHitscan(memory, player);
                     },
                     .pistol => {
-                        memory.new_sounds.appendAssumeCapacity(.{
+                        memory.new_sounds.append(.{
                             .type = .sniper,
                             .pos = .{ .x = 0, .y = 0, .z = 0 },
                             .id_from = player.id,
@@ -852,7 +1012,7 @@ fn weaponUpdate(memory: *Memory, player: *Player, input: *const Input, dt: f32) 
                         firePistolHitscan(memory, player);
                     },
                     .nade => {
-                        memory.new_sounds.appendAssumeCapacity(.{
+                        memory.new_sounds.append(.{
                             .type = .pip,
                             .pos = .{ .x = 0, .y = 0, .z = 0 },
                             .id_from = player.id,
@@ -890,7 +1050,7 @@ fn weaponUpdate(memory: *Memory, player: *Player, input: *const Input, dt: f32) 
                 if (input.isset(.Interact) and weapon.cooldown == weapon.total_zoom_cooldown) {
                     switch (weapon.type) {
                         .sniper => {
-                            memory.new_sounds.appendAssumeCapacity(.{
+                            memory.new_sounds.append(.{
                                 .type = .sniper,
                                 .pos = .{ .x = 0, .y = 0, .z = 0 },
                                 .id_from = player.id,
@@ -898,7 +1058,7 @@ fn weaponUpdate(memory: *Memory, player: *Player, input: *const Input, dt: f32) 
                             fireSniperHitscan(memory, player);
                         },
                         .pistol => {
-                            memory.new_sounds.appendAssumeCapacity(.{
+                            memory.new_sounds.append(.{
                                 .type = .sniper,
                                 .pos = .{ .x = 0, .y = 0, .z = 0 },
                                 .id_from = player.id,
@@ -935,7 +1095,7 @@ fn weaponUpdate(memory: *Memory, player: *Player, input: *const Input, dt: f32) 
         player.weapon_current = player.weapon_last;
         player.weapon_last = tmp;
 
-        memory.new_sounds.appendAssumeCapacity(.{
+        memory.new_sounds.append(.{
             .type = .weapon_switch,
             .pos = .{ .x = 0, .y = 0, .z = 0 },
             .id_from = player.id,
@@ -953,7 +1113,7 @@ fn aim(vars: *const Vars, memory: *Memory, player: *Player) void {
         const j = v3.neg(v3.cross(i, up));
         const k = v3.cross(i, j);
 
-        const weapon = player.weapons[player.weapon_current];
+        const weapon = player.weapons[player.weapon_current].?;
         switch (weapon.type) {
             .sniper => {
                 var base = player.camera.pos;
@@ -988,7 +1148,7 @@ fn aim(vars: *const Vars, memory: *Memory, player: *Player) void {
         const j = v3.neg(v3.cross(i, up));
         const k = v3.cross(i, j);
 
-        const weapon = player.weapons[player.weapon_current];
+        const weapon = player.weapons[player.weapon_current].?;
         switch (weapon.type) {
             .sniper => {
                 var base = player.camera.pos;
@@ -1022,39 +1182,43 @@ fn aim(vars: *const Vars, memory: *Memory, player: *Player) void {
 }
 
 fn firePistolHitscan(memory: *Memory, player: *Player) void {
+    const weapon = &player.weapons[1].?;
+    const m = m4.mul(weapon_model, weapon.tree.nodes[weapon.id_barrel].root_transform);
+    const aim_dir = v3.normalize(m4.modelAxisI(m));
+    const start_pos = m4.modelTranslation(m);
     var ray = common.Ray{
-        .pos = player.aim_start_pos,
-        .dir = player.aim_dir,
+        .pos = start_pos,
+        .dir = aim_dir,
         .len = 1000.0,
     };
 
-    if (raycastAgainstEntities(memory, player.aim_start_pos, player.aim_dir, player.id)) |cast| {
+    if (raycastAgainstEntities(memory, start_pos, aim_dir, player.id)) |cast| {
         if (cast.is_player) {
-            memory.new_damage.appendAssumeCapacity(.{
+            memory.new_damage.append(.{
                 .from = player.id,
                 .to = cast.id,
                 .damage = 10.0,
             });
-            memory.new_sounds.appendAssumeCapacity(.{
+            memory.new_sounds.append(.{
                 .type = .death,
                 .pos = .{ .x = 0, .y = 0, .z = 0 },
                 .id_from = cast.id,
             });
         } else {
-            memory.new_sounds.appendAssumeCapacity(.{
+            memory.new_sounds.append(.{
                 .type = .pip,
                 .pos = .{ .x = 0, .y = 0, .z = 0 },
                 .id_from = cast.id,
             });
         }
 
-        ray.pos = player.aim_start_pos;
-        ray.dir = player.aim_dir;
+        ray.pos = start_pos;
+        ray.dir = aim_dir;
         ray.len = cast.intersect.distance;
     }
 
     // Add tracer for shot
-    memory.new_hitscans.appendAssumeCapacity(common.Hitscan{
+    memory.new_hitscans.append(common.Hitscan{
         .id_from = player.id,
         .ray = ray,
         .width = 0.5,
@@ -1064,39 +1228,44 @@ fn firePistolHitscan(memory: *Memory, player: *Player) void {
 }
 
 fn fireSniperHitscan(memory: *Memory, player: *Player) void {
+    const weapon = &player.weapons[0].?;
+    const m = m4.mul(weapon_model, weapon.tree.nodes[weapon.id_barrel].root_transform);
+    const aim_dir = v3.normalize(m4.modelAxisI(m));
+    const start_pos = m4.modelTranslation(m);
+
     var ray = common.Ray{
-        .pos = player.aim_start_pos,
-        .dir = player.aim_dir,
+        .pos = start_pos,
+        .dir = aim_dir,
         .len = 1000.0,
     };
 
-    if (raycastAgainstEntities(memory, player.aim_start_pos, player.aim_dir, player.id)) |cast| {
+    if (raycastAgainstEntities(memory, start_pos, aim_dir, player.id)) |cast| {
         if (cast.is_player) {
-            memory.new_damage.appendAssumeCapacity(.{
+            memory.new_damage.append(.{
                 .from = player.id,
                 .to = cast.id,
                 .damage = 80.0,
             });
-            memory.new_sounds.appendAssumeCapacity(.{
+            memory.new_sounds.append(.{
                 .type = .death,
                 .pos = .{ .x = 0, .y = 0, .z = 0 },
                 .id_from = cast.id,
             });
         } else {
-            memory.new_sounds.appendAssumeCapacity(.{
+            memory.new_sounds.append(.{
                 .type = .pip,
                 .pos = .{ .x = 0, .y = 0, .z = 0 },
                 .id_from = cast.id,
             });
         }
 
-        ray.pos = player.aim_start_pos;
-        ray.dir = player.aim_dir;
+        ray.pos = start_pos;
+        ray.dir = aim_dir;
         ray.len = cast.intersect.distance;
     }
 
     // Add tracer for shot
-    memory.new_hitscans.appendAssumeCapacity(common.Hitscan{
+    memory.new_hitscans.append(common.Hitscan{
         .id_from = player.id,
         .ray = ray,
         .width = 1.0,
@@ -1118,10 +1287,10 @@ fn raycastAgainstEntities(memory: *Memory, pos: v3, dir: v3, skip_id: ?common.En
     var closest_entity_id: ?u64 = null;
     var is_player: bool = false;
 
-    for (memory.players.constSlice()) |p| {
+    for (memory.players.slice()) |p| {
         if (skip_id != null and p.id == skip_id.?)
             continue;
-        const height: f32 = if (p.crouch) 15 else 22;
+        const height = player_height(&p);
         const rot = v3{
             .x = 0,
             .y = p.pitch,
@@ -1146,7 +1315,7 @@ fn raycastAgainstEntities(memory: *Memory, pos: v3, dir: v3, skip_id: ?common.En
         }
     }
 
-    for (memory.entities.constSlice()) |e| {
+    for (memory.entities.slice()) |e| {
         if (intersect.planeModelLine(e.plane.model, global_plane_size, pos, dir)) |res| {
             if (closest == null or res.distance < closest.?.distance) {
                 closest = res;
@@ -1248,191 +1417,14 @@ fn drawWindow(cmd: *draw_api.CommandBuffer, window: *common.WindowState) void {
     //}
 }
 
-const dim = 64;
-var voxels: [dim][dim][dim]u1 = .{.{.{0} ** dim} ** dim} ** dim;
-var built_terrain = false;
-
-fn addVoxelFaceIfSet(faces: []primitive.VoxelTransform, len: *usize, x: usize, y: usize, z: usize, face: primitive.VoxelTransform.FaceDir) void {
-    if (voxels[z][y][x] == 1) {
-        faces[len] = .{
-            .x = @intCast(x),
-            .y = @intCast(y),
-            .z = @intCast(z),
-            .face = face,
-        };
-        len.* += 1;
-    }
-}
-
-const VoxelFaceArray = MultiThreadedArray(primitive.VoxelTransform, 128);
-
-fn build_terrain(memory: *Memory, x0: usize, x1: usize, y0: usize, y1: usize, z: usize) void {
-    const block = memory.profile.begin(@src().fn_name, (x1 - x0) * (y1 - y0) / 8);
-    defer memory.profile.end(block);
-
-    for (y0..y1) |y| {
-        for (x0..x1) |x| {
-            const halfdim = dim / 2.0;
-            const d = v3{
-                .x = @as(f32, @floatFromInt(x)) + 0.5 - halfdim,
-                .y = @as(f32, @floatFromInt(y)) + 0.5 - halfdim,
-                .z = @as(f32, @floatFromInt(z)) + 0.5 - halfdim,
-            };
-            if (v3.len(d) <= halfdim) {
-                voxels[z][y][x] = 1;
-            }
-        }
-    }
-}
-
-fn build_faces(memory: *Memory, faces: *VoxelFaceArray, x0: usize, x1: usize, y0: usize, y1: usize, z: usize) void {
-    const profile_block = memory.profile.begin(@src().fn_name, 6 * (x1 - x0) * (y1 - y0) / 8);
-    defer memory.profile.end(profile_block);
-
-    var block = faces.head();
-
-    for (y0..y1) |y| {
-        for (x0..x1) |x| {
-            if (voxels[z][y][x] > 0) {
-                continue;
-            }
-
-            const n = dim - 1;
-            const f = if (x < n) voxels[z][y][x + 1] else 0;
-            const b = if (x > 0) voxels[z][y][x - 1] else 0;
-            const r = if (y < n) voxels[z][y + 1][x] else 0;
-            const l = if (y > 0) voxels[z][y - 1][x] else 0;
-            const u = if (z < n) voxels[z + 1][y][x] else 0;
-            const d = if (z > 0) voxels[z - 1][y][x] else 0;
-
-            if (f == 1) {
-                VoxelFaceArray.push(&block, .{
-                    .x = @intCast(x + 1),
-                    .y = @intCast(y),
-                    .z = @intCast(z),
-                    .face = .back,
-                });
-            }
-            if (b == 1) {
-                VoxelFaceArray.push(&block, .{
-                    .x = @intCast(x - 1),
-                    .y = @intCast(y),
-                    .z = @intCast(z),
-                    .face = .front,
-                });
-            }
-            if (r == 1) {
-                VoxelFaceArray.push(&block, .{
-                    .x = @intCast(x),
-                    .y = @intCast(y + 1),
-                    .z = @intCast(z),
-                    .face = .left,
-                });
-            }
-            if (l == 1) {
-                VoxelFaceArray.push(&block, .{
-                    .x = @intCast(x),
-                    .y = @intCast(y - 1),
-                    .z = @intCast(z),
-                    .face = .right,
-                });
-            }
-            if (u == 1) {
-                VoxelFaceArray.push(&block, .{
-                    .x = @intCast(x),
-                    .y = @intCast(y),
-                    .z = @intCast(z + 1),
-                    .face = .down,
-                });
-            }
-            if (d == 1) {
-                VoxelFaceArray.push(&block, .{
-                    .x = @intCast(x),
-                    .y = @intCast(y),
-                    .z = @intCast(z - 1),
-                    .face = .up,
-                });
-            }
-        }
-    }
-}
-
-fn build_chunk_edges(memory: *Memory, faces: *VoxelFaceArray, _i0: usize, _i1: usize, j: usize) void {
-    const profile_block = memory.profile.begin(@src().fn_name, (_i1 - _i0) / 8);
-    defer memory.profile.end(profile_block);
-
-    var block = faces.head();
-
-    for (_i0.._i1) |i| {
-        const n = dim - 1;
-        if (voxels[0][j][i] > 0) {
-            VoxelFaceArray.push(&block, .{
-                .x = @intCast(i),
-                .y = @intCast(j),
-                .z = @intCast(0),
-                .face = .down,
-            });
-        }
-        if (voxels[n][j][i] > 0) {
-            VoxelFaceArray.push(&block, .{
-                .x = @intCast(i),
-                .y = @intCast(j),
-                .z = @intCast(n),
-                .face = .up,
-            });
-        }
-        if (voxels[j][0][i] > 0) {
-            VoxelFaceArray.push(&block, .{
-                .x = @intCast(i),
-                .y = @intCast(0),
-                .z = @intCast(j),
-                .face = .left,
-            });
-        }
-        if (voxels[j][n][i] > 0) {
-            VoxelFaceArray.push(&block, .{
-                .x = @intCast(i),
-                .y = @intCast(n),
-                .z = @intCast(j),
-                .face = .right,
-            });
-        }
-        if (voxels[j][i][0] > 0) {
-            VoxelFaceArray.push(&block, .{
-                .x = @intCast(0),
-                .y = @intCast(i),
-                .z = @intCast(j),
-                .face = .back,
-            });
-        }
-        if (voxels[j][i][n] > 0) {
-            VoxelFaceArray.push(&block, .{
-                .x = @intCast(n),
-                .y = @intCast(i),
-                .z = @intCast(j),
-                .face = .front,
-            });
-        }
-    }
-}
-
 const bl = 100;
-const a0 = math.Quat.fromAxisAngle(.{.x=1}, 0);
-const a1 = math.Quat.fromAxisAngle(.{.x=1}, 0);
-const b0 = math.Quat.fromAxisAngle(.{.x=1}, std.math.pi/4.0);
-const b1 = math.Quat.fromAxisAngle(.{.x=1}, std.math.pi/4.0);
+const a0 = math.Quat.fromAxisAngle(.{ .x = 1 }, 0);
+const a1 = math.Quat.fromAxisAngle(.{ .x = 1 }, 0);
+const b0 = math.Quat.fromAxisAngle(.{ .x = 1 }, std.math.pi / 4.0);
+const b1 = math.Quat.fromAxisAngle(.{ .x = 1 }, std.math.pi / 4.0);
 
 export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer, player_id: common.EntityId, input: *const Input) void {
-    if (!built_terrain) {
-        var wg: std.Thread.WaitGroup = undefined;
-        wg.reset();
-        for (0..dim) |z| {
-            memory.threadpool.spawnWg(&wg, build_terrain, .{ memory, 0, dim, 0, dim, z });
-        }
-        built_terrain = true;
-        memory.threadpool.waitAndWork(&wg);
-    }
-
+    _ = vars;
     const player = common.findPlayerById(memory.players.slice(), player_id) orelse return;
     if (player.state == .dead) {
         return;
@@ -1441,172 +1433,36 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
 
     cmd.push(camera, .{});
 
-    cmd.push(primitive.Mesh{
-        .model = m4.modelWithRotations(.{ .x = 50, .y = 0, .z = 20 }, .{ .x = 20, .y = 20, .z = 20 }, .{
+    //draw_model(memory, cmd, "res/models/brog/frog", true, m4.modelWithRotations(.{ .x = 50, .y = 0, .z = 20 }, .{ .x = 20, .y = 20, .z = 20 }, .{
+    //    .x = 0,
+    //    .y = 0,
+    //    .z = @as(f32, @floatFromInt(memory.time)) / 1e9,
+    //}));
+
+    if (player.weapons[0]) |weapon| {
+        draw_model(cmd, &weapon.tree, m4.modelWithRotations(.{ .x = 100, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
             .x = 0,
             .y = 0,
-            .z = @as(f32, @floatFromInt(memory.time)) / 1e9,
-        }),
-        .name = "res/models/brog/frog",
-        .draw_children = true,
-    }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
+            .z = -std.math.pi / 2.0, //@as(f32, @floatFromInt(memory.time)) / 1e9,
+        }), true);
+    }
 
-    cmd.push(primitive.Mesh{
-        .model = m4.modelWithRotations(.{ .x = 100, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
+    {
+        const tree = from_model(memory, "res/models/weapons/.308 bullet", &.{}) orelse {
+            return;
+        };
+        draw_model(cmd, &tree, m4.mul(m4.modelWithRotations(.{ .x = 100, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
             .x = 0,
             .y = 0,
-            .z = @as(f32, @floatFromInt(memory.time)) / 1e9,
-        }),
-        .name = "res/models/weapons/granat",
-        .draw_children = true,
-    }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
-
-
-    //cmd.push(primitive.Cube{
-    //    .model = m4.modelWithRotations(
-    //        .{
-    //            .x = 50,
-    //            .y = 0,
-    //            .z = 0,
-    //        },
-    //        .{ .x = 100, .y = 10, .z = 10 },
-    //        .{ .x = 0, .y = 0, .z = 0 },
-    //    ),
-    //}, .{ .r = 255, .g = 0, .b = 0, .a = 255 });
-    //cmd.push(primitive.Cube{
-    //    .model = m4.modelWithRotations(
-    //        .{
-    //            .x = 0,
-    //            .y = 50,
-    //            .z = 0,
-    //        },
-    //        .{ .x = 10, .y = 100, .z = 10 },
-    //        .{ .x = 0, .y = 0, .z = 0 },
-    //    ),
-    //}, .{ .r = 0, .g = 255, .b = 0, .a = 255 });
-    //cmd.push(primitive.Cube{
-    //    .model = m4.modelWithRotations(
-    //        .{
-    //            .x = 0,
-    //            .y = 0,
-    //            .z = 50,
-    //        },
-    //        .{ .x = 10, .y = 10, .z = 100 },
-    //        .{ .x = 0, .y = 0, .z = 0 },
-    //    ),
-    //}, .{ .r = 0, .g = 0, .b = 255, .a = 255 });
-
-    //const selected_index: usize = 0;
-
-    //const max_faces = 6*n*n + n*(4*n + 2*n*(n-1)) + (n-1)*n*n;
-    //const max_faces_per_thread = dim*(4*dim + 2*dim*(dim-1));
-    //const faces_thread = memory.mem.frame.alloc(primitive.VoxelTransform, memory.threadpool.threads.len*max_faces_per_thread) catch unreachable;
-
-    {
-        const c0 = .{ .r = 255, .g = 0, .b = 0, .a = 255 };
-        const c1 = .{ .r = 0, .g = 255, .b = 0, .a = 255 };
-        const p0: v4 = .{.w=1};
-        cmd.push(primitive.Cube{
-            .model = m4.modelWithRotations(.{.x=p0.x, .y=p0.y, .z=p0.z}, .{.x=25,.y=25,.z=25}, .{}),
-        }, c0);
-        var p1: v3 = .{};
-        p1.z += bl;
-        const t = @as(f32, @floatFromInt(memory.time % 1000000000)) / 1e9;
-        const qb0 = math.Quat.lerp(a0, b0, t);
-        p1 = math.Quat.rotate(qb0, p1);
-        //p1 = m4.mulv(b0, p1);
-        cmd.push(primitive.Cube{
-            .model = m4.modelWithRotations(p1, .{.x=25,.y=25,.z=25}, .{}),
-        }, c0);
-        var p2: v3 = .{};
-        p2.z += bl;
-        //p2 = m4.mulv(m4.mul(b1, b0), p2);
-        const qb1 = math.Quat.lerp(a1, b1, t);
-        const q2 = math.Quat.mul(qb1, qb0);
-        p2 = math.Quat.rotate(q2, p2);
-        p2 = v3.add(p2, p1);
-        cmd.push(primitive.Cube{
-            .model = m4.modelWithRotations(p2, .{.x=25,.y=25,.z=25}, .{}),
-        }, c1);
+            .z = -std.math.pi / 2.0, //@as(f32, @floatFromInt(memory.time)) / 1e9,
+        }), common.sniper.tree.nodes[common.sniper.id_bolt].root_transform), true);
     }
 
-    var faces = VoxelFaceArray.init(memory.mem.frame, memory.threadpool.threads.len + 1);
-
-    {
-        var wg: std.Thread.WaitGroup = undefined;
-        wg.reset();
-
-        for (0..dim) |z| {
-            memory.threadpool.spawnWg(&wg, build_faces, .{ memory, &faces, 0, dim, 0, dim, z });
-        }
-
-        for (0..dim) |j| {
-            memory.threadpool.spawnWg(&wg, build_chunk_edges, .{ memory, &faces, 0, dim, j });
-        }
-
-        memory.threadpool.waitAndWork(&wg);
-
-        {
-            const block = memory.profile.begin("collect voxel faces", 0);
-            defer memory.profile.end(block);
-
-            cmd.push(primitive.VoxelChunk{
-                .dim = dim,
-                .voxels = faces.collect(memory.mem.frame),
-            }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
-        }
-    }
-
-    if (intersect.planeModelLine(math.m4.model(.{ .x = 0, .y = 0, .z = tile_size / 2.0 }, .{ .x = 1, .y = 1, .z = 1 }), .{ .x = 1000000.0, .y = 1000000.0 }, player.camera.pos, player.camera.dir)) |res| {
-        if (res.pos.x > 0 and res.pos.y > 0 and res.pos.z > 0) {
-            const i: usize = @intFromFloat(@trunc(res.pos.x / tile_size));
-            const j: usize = @intFromFloat(@trunc(res.pos.y / tile_size));
-            const k: usize = @intFromFloat(@trunc(res.pos.z / tile_size));
-            if (i < dim and j < dim and k < dim) {
-                if (input.isset(.Interact)) {
-                    voxels[k][j][i] = ~voxels[k][j][i];
-                }
-                var p: v3 = .{};
-                p.x = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(i));
-                p.y = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(j));
-                p.z = tile_size / 2.0 + tile_size * @as(f32, @floatFromInt(k));
-                cmd.push(primitive.CubeOutline{
-                    .model = m4.modelWithRotations(
-                        p,
-                        .{ .x = tile_size, .y = tile_size, .z = tile_size },
-                        .{ .x = 0, .y = 0, .z = 0 },
-                    ),
-                }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
-            }
-        }
-    }
+    voxels.draw(memory, cmd, player, input, &map);
 
     // Draw map(?)
-    var prng = std.rand.DefaultPrng.init(0);
+    var prng = std.Random.DefaultPrng.init(0);
     const rand = prng.random();
-    //{
-    //    var i: usize = 0;
-    //    while (i < grid_size) : (i += 1) {
-    //        var j: usize = 0;
-    //        while (j < grid_size) : (j += 1) {
-    //            cmd.push(primitive.Cube{
-    //                .model = m4.modelWithRotations(
-    //                    .{
-    //                        .x = tile_size * @as(f32, @floatFromInt(i)) - tile_size * @as(f32, @floatFromInt(grid_size)) / 2 + tile_size / 2.0,
-    //                        .y = tile_size * @as(f32, @floatFromInt(j)) - tile_size * @as(f32, @floatFromInt(grid_size)) / 2 + tile_size / 2.0,
-    //                        .z = (tile_base_height + tile_max_height * rand.float(f32)) / 2.0,
-    //                    },
-    //                    .{
-    //                        .x = tile_size,
-    //                        .y = tile_size,
-    //                        .z = tile_base_height + tile_max_height * rand.float(f32),
-    //                    },
-    //                    .{ .x = 0, .y = 0, .z = 0 },
-    //                ),
-    //            }, hsv_to_rgb(80.0 + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0)));
-    //        }
-    //    }
-    //}
 
     // pick
     {
@@ -1637,7 +1493,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
         //}, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
     }
 
-    for (memory.entities.constSlice()) |e| {
+    for (memory.entities.slice()) |e| {
         var plane = e.plane;
         plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x, .y = global_plane_size.y, .z = 1 });
         cmd.push(plane, hsv_to_rgb(10, 0.6, 0.7));
@@ -1645,7 +1501,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
         cmd.push(plane, hsv_to_rgb(10, 0.6, 0.5));
     }
 
-    if (input.isset(.Editor) and memory.selected_entity != null) {
+    if (player.in_editor and memory.selected_entity != null) {
         drawWidget(cmd, &memory.widget);
     }
 
@@ -1655,7 +1511,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
         if (p.id == player_id)
             continue;
         if (p.state == .alive) {
-            const height: f32 = if (p.crouch) 15 else 22;
+            const height = player_height(&p);
 
             const pos = v3{
                 .x = p.pos.x,
@@ -1677,7 +1533,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
                 .model = model,
             }, playerRandomColor(p.id, rand));
         } else {
-            const height: f32 = 22;
+            const height = player_height(&p);
 
             const pos = v3{
                 .x = p.pos.x,
@@ -1710,107 +1566,27 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
     //}, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
 
     for (memory.players.slice()) |p| {
-        if (p.state == .dead)
+        if (p.state == .dead) {
             continue;
+        }
         // Draw weapons
-        if (!input.isset(.Editor)) {
-            // TODO(anjo): Store this somewhere...
-
-            // Get player model and extract right/forward/up
-            const m = m4.modelWithRotations(p.camera.pos, .{ .x = 1, .y = 1, .z = 1 }, .{
-                .x = 0,
-                .y = p.pitch,
-                .z = p.yaw,
-            });
-            const right = v3.neg(m4.modelAxisJ(m));
-            const forward = m4.modelAxisI(m);
-            const up = m4.modelAxisK(m);
-
-            // Dynamic offset due to movement and rotation
-            var move_offset = v3.scale(-0.0025, p.vel);
-            const view_delta =
-                v3.add(v3.scale(-10 * input.cursor_delta.x, right), v3.scale(10 * input.cursor_delta.y, up));
-            move_offset = v3.add(move_offset, view_delta);
-
-            const weapon = p.weapons[p.weapon_current];
-
-            var shoot_offset: v3 = .{ .x = 0, .y = 0, .z = 0 };
-            switch (weapon.state) {
-                .cooldown => {
-                    const total_cd = weapon.total_cooldown;
-                    const kt = weapon.kickback_time;
-                    const cd = (total_cd - weapon.cooldown) / total_cd;
-                    const cd_scale = @as(f32, @floatFromInt(@intFromBool(cd < kt))) * (if (cd < kt / 2.0) cd else kt - cd);
-                    shoot_offset = v3.scale(-weapon.kickback_scale * cd_scale, p.aim_dir);
-                },
-                .reload => {
-                    const total_cd = weapon.total_reload_cooldown;
-                    const cd = (total_cd - weapon.cooldown) / total_cd;
-                    const cd_scale = @as(f32, @floatFromInt(@intFromBool(cd < 1.0))) * (if (cd < 0.5) cd else 1.0 - cd);
-                    shoot_offset = v3.scale(-10.0 * cd_scale, up);
-                },
-                else => {},
-            }
-
-            move_offset = v3.add(move_offset, shoot_offset);
-
-            switch (weapon.type) {
-                .sniper => {
-                    const start_offset = v3.add(v3.add(v3.scale(vars.sniper_len / 2 + vars.sniper_off_y, forward), v3.scale(vars.sniper_off_x, right)), v3.scale(vars.sniper_off_z, up));
-
-                    const zoom_fire = p.id == player_id and weapon.state == .zoom and weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
-
-                    var offset: v3 = .{};
-                    if (weapon.state == .zoom) {
-                        const t = weapon.cooldown / weapon.total_zoom_cooldown;
-                        const end_offset = v3.add(v3.add(v3.scale(vars.sniper_scope_off_x + 8.0, forward), v3.scale(0.0, right)), v3.scale(vars.sniper_scope_off_z - 2.5, up));
-                        offset = v3.lerp(start_offset, end_offset, t);
-                        offset = v3.add(offset, v3.scale(1.0 - t, move_offset));
-                    } else {
-                        offset = v3.add(start_offset, move_offset);
-                    }
-
-                    if (!zoom_fire) {
-                        const aim_dir = if (zoom_fire) p.camera.dir else p.aim_dir;
-                        const model_sniper = m4.modelFromXDir(v3.add(p.camera.pos, offset), .{ .x = 1, .y = 1, .z = 1 }, aim_dir);
-
-                        cmd.push(primitive.Mesh{
-                            .model = model_sniper,
-                            .name = "res/models/weapons/sniper",
-                            .draw_children = true,
-                        }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
-                    }
-                },
-                .pistol => {
-                    const start_offset = v3.add(v3.add(v3.scale(vars.pistol_len / 2 + vars.pistol_off_y, forward), v3.scale(vars.pistol_off_x, right)), v3.scale(vars.pistol_off_z, up));
-
-                    var offset: v3 = .{};
-                    if (weapon.state == .zoom) {
-                        const t = weapon.cooldown / weapon.total_zoom_cooldown;
-                        const end_offset = v3.add(v3.add(v3.scale(vars.pistol_handle_off_x + 12.0, forward), v3.scale(0.0, right)), v3.scale(vars.pistol_handle_off_z - 0.4, up));
-                        offset = v3.lerp(start_offset, end_offset, t);
-                        offset = v3.add(offset, v3.scale(1.0 - t, move_offset));
-                    } else {
-                        offset = v3.add(start_offset, move_offset);
-                    }
-
-                    const zoom_fire = weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
-                    const aim_dir = if (zoom_fire) p.camera.dir else p.aim_dir;
-                    const model_pistol = m4.modelFromXDir(v3.add(p.camera.pos, offset), .{ .x = 1, .y = 1, .z = 1 }, aim_dir);
-
-                    cmd.push(primitive.Mesh{
-                        .model = model_pistol,
-                        .name = "res/models/weapons/pistol",
-                        .draw_children = true,
-                    }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
-                },
-                .nade => {},
+        if (!player.in_editor) {
+            if (p.weapons[p.weapon_current]) |weapon| {
+                switch (weapon.type) {
+                    .sniper => {
+                        draw_model(cmd, &weapon.tree, weapon_model, true);
+                    },
+                    .pistol => {
+                        draw_model(cmd, &weapon.tree, weapon_model, true);
+                    },
+                    .nade => {},
+                }
             }
         }
     }
 
     // Draw tracers for hitscans
-    for (memory.hitscans.constSlice()) |h| {
+    for (memory.hitscans.slice()) |h| {
         var col = playerRandomColor(h.id_from, rand);
         col.a = @intFromFloat(255.0 * h.time_left / h.total_time);
         cmd.push(primitive.Cube{
@@ -1837,7 +1613,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
     //            15, 0.75, 0.5);
     //    }
 
-    if (memory.state == .pause) {
+    if (memory.active_state == .pause) {
         if (pushWindow(memory, cmd, "wow", 0.5, 0.5)) {
             pushText(memory, cmd, "haha");
             pushText(memory, cmd, "abcarstratrastarst");
@@ -1856,7 +1632,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
         }
     }
 
-    if (memory.state == .pause) {
+    if (memory.active_state == .pause) {
         // update cursor position
         memory.cursor_pos.x += input.cursor_delta.x;
         memory.cursor_pos.y -= input.cursor_delta.y;
@@ -1868,7 +1644,8 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
             if (memory.cursor_pos.x >= win.persistent.x and
                 memory.cursor_pos.y >= win.persistent.y + win.persistent.h - top_bar_height and
                 memory.cursor_pos.x <= win.persistent.x + win.persistent.w and
-                memory.cursor_pos.y <= win.persistent.y + win.persistent.h) {
+                memory.cursor_pos.y <= win.persistent.y + win.persistent.h)
+            {
                 win.hover = true;
             } else {
                 win.hover = false;
@@ -1894,7 +1671,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
         //}
     }
 
-    if (input.isset(.Console)) {
+    if (memory.active_state == .console) {
         //    if (!mouse_enabled) {
         //        mouse_enabled = true;
         //        raylib.EnableCursor();
@@ -1922,7 +1699,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
                     .y = 1.0 - console_height,
                 },
                 .str = undefined,
-                .len = memory.console_input.len,
+                .len = memory.console_input.used,
                 .size = fontsize,
                 .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
                 .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
@@ -1962,7 +1739,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
 
         @memset(&text.str, 0);
         {
-            const str = std.fmt.bufPrint(&text.str, "speed: {d:5.0}", .{v3.len(memory.players.get(0).vel)}) catch unreachable;
+            const str = std.fmt.bufPrint(&text.str, "speed: {d:5.0}", .{v3.len(memory.players.data[0].vel)}) catch unreachable;
             text.len = str.len;
             text.pos.x = 1.0 - 0.3;
             cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
@@ -1970,9 +1747,9 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
 
         // ammo
         @memset(&text.str, 0);
-        {
+        if (player.weapons[player.weapon_current]) |weapon| {
             const size = 0.05;
-            const str = std.fmt.bufPrint(&text.str, "{}", .{player.weapons[player.weapon_current].ammo}) catch unreachable;
+            const str = std.fmt.bufPrint(&text.str, "{}", .{weapon.ammo}) catch unreachable;
             text.len = str.len;
             text.pos.x = 1.0 - 3 * size + size + size / 4.0;
             text.pos.y = 0.05;
@@ -2015,7 +1792,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
         }
     }
 
-    if (memory.state == .pause) {
+    if (memory.active_state == .pause) {
         // cursor
         const cursor_size = 0.01;
         cmd.push(primitive.Rectangle{
@@ -2029,11 +1806,11 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
             },
         }, hsv_to_rgb(350, 0.75, 0.75));
     } else {
-        const weapon = player.weapons[player.weapon_current];
-        const zoom_fire = weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
+        //const weapon = player.weapons[player.weapon_current];
+        const zoom_fire = false; //weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
 
         // Crosshair
-        if (memory.state == .pause) {
+        if (memory.active_state == .pause) {
             const cursor_thickness = 0.004;
             const color = hsv_to_rgb(
                 (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
@@ -2104,7 +1881,7 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
             const cursor_thickness = 0.0025;
             const gap = 0.75;
 
-            const color = Color{.r=0,.g=0,.b=0,.a=255};
+            const color = Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
 
             cmd.push(primitive.Rectangle{
                 .pos = .{
@@ -2186,7 +1963,7 @@ fn playerColor(id: common.EntityId) Color {
     );
 }
 
-fn playerRandomColor(id: common.EntityId, rand: std.rand.Random) Color {
+fn playerRandomColor(id: common.EntityId, rand: std.Random) Color {
     return hsv_to_rgb((360.0 / 8.0) * @as(f32, @floatFromInt(id % 8)) + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0));
 }
 
@@ -2260,108 +2037,286 @@ fn drawGraph(cmd: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h:
     }, Color{ .r = 128, .g = 128, .b = 128, .a = 255 });
 }
 
-fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
-    return struct {
-        const Self = @This();
-        const Block = struct {
-            allocator: std.mem.Allocator = undefined,
-            next: ?*Block = null,
-            head: **Block = undefined,
-            used: usize = 0,
-            memory: [blocksize]T = undefined,
-        };
-
-        roots: []*Block = undefined,
-        heads: []*Block = undefined,
-        thread_indices: []usize = undefined,
-        used_thread_indices: std.atomic.Value(u8) = undefined,
-
-        fn push(self: **Block, t: T) void {
-            if (self.*.used == self.*.memory.len) {
-                std.debug.assert(self.*.next == null);
-                const block = self.*.allocator.alloc(Block, 1) catch unreachable;
-                self.*.next = @ptrCast(block.ptr);
-                self.*.head.* = self.*.next.?;
-                self.*.next.?.* = Block{
-                    .allocator = self.*.allocator,
-                    .head = self.*.head,
-                };
-                self.* = self.*.next.?;
-            }
-
-            self.*.memory[self.*.used] = t;
-            self.*.used += 1;
-        }
-
-        fn init(allocator: std.mem.Allocator, num_cpus: usize) Self {
-            var self = Self{
-                .used_thread_indices = std.atomic.Value(u8).init(0),
-            };
-
-            self.roots = allocator.alloc(*Block, num_cpus) catch unreachable;
-            self.heads = allocator.alloc(*Block, num_cpus) catch unreachable;
-            self.thread_indices = allocator.alloc(usize, num_cpus) catch unreachable;
-
-            for (0..num_cpus) |i| {
-                const block = allocator.alloc(Block, 1) catch unreachable;
-                self.roots[i] = @ptrCast(block.ptr);
-                self.roots[i].* = Block{
-                    .allocator = allocator,
-                    .head = &self.heads[i],
-                };
-                self.heads[i] = self.roots[i];
-            }
-
-            return self;
-        }
-
-        fn get_thread_index(self: *Self) usize {
-            const id = std.Thread.getCurrentId();
-            for (self.thread_indices[0..self.used_thread_indices.load(.monotonic)], 0..) |_id, i| {
-                if (id == _id) {
-                    return i;
-                }
-            }
-
-            const i = self.used_thread_indices.fetchAdd(1, .monotonic);
-            self.thread_indices[i] = id;
-            return i;
-        }
-
-        fn head(self: *Self) *Block {
-            const index = self.get_thread_index();
-            return self.heads[index];
-        }
-
-        fn collect(self: *Self, allocator: std.mem.Allocator) []T {
-            var len: usize = 0;
-            for (self.roots) |r| {
-                var b: ?*Block = r;
-                while (true) {
-                    len += b.?.used;
-                    b = b.?.next;
-                    if (b == null) {
-                        break;
-                    }
-                }
-            }
-
-            const memory = allocator.alloc(T, len) catch unreachable;
-            var index: usize = 0;
-            for (self.roots) |r| {
-                var b: ?*Block = r;
-                while (true) {
-                    @memcpy(memory[index..(index + b.?.used)], b.?.memory[0..b.?.used]);
-                    index += b.?.used;
-
-                    b = b.?.next;
-                    if (b == null) {
-                        break;
-                    }
-                }
-            }
-
-            return memory;
-        }
+fn from_model(memory: *Memory, name: []const u8, save_nodes: ?[]const TransformTreeSaveNode) ?TransformTree {
+    const node_entry_info = goosepack.entry_lookup(&memory.pack, name) orelse {
+        std.log.info("unable to find pack entry {s}", .{name});
+        return null;
     };
+    const node = goosepack.getResource(&memory.pack, node_entry_info.index).model_node;
+
+    if (save_nodes != null) {
+        for (node.tree.node_ids, 0..) |id, i| {
+            for (save_nodes.?) |s| {
+                if (id == s.id) {
+                    s.index.* = @intCast(i);
+                }
+            }
+        }
+    }
+
+    return node.tree;
+
+    //const model = goosepack.getResource(&memory.pack, @intCast(@as(i32, @intCast(node_entry_info.index)) + node.root_entry_relative_index)).model;
+    //
+    //    var nodes = std.ArrayList(TransformTreeNode).initCapacity(memory.mem.frame, 8) catch unreachable;
+    //
+    //    var stack = std.ArrayList(struct {
+    //        info: goosepack.EntryInfo,
+    //        parent_transform: m4,
+    //        parent_index: u8,
+    //    }).initCapacity(memory.mem.frame, 16) catch unreachable;
+    //    stack.append(.{
+    //        .info = node_entry_info,
+    //        .parent_transform = math.m4_identity,
+    //        .parent_index = 0,
+    //    }) catch unreachable;
+    //
+    //    while (stack.popOrNull()) |item| {
+    //        const mesh_node = goosepack.getResource(&memory.pack, item.info.index).model_node;
+    //        const transform = m4.mul(item.parent_transform, mesh_node.transform);
+    //        if (save_nodes != null) {
+    //            for (save_nodes.?) |s| {
+    //                if (item.info.entry.id == s.id) {
+    //                    s.index.* = @intCast(nodes.items.len);
+    //                }
+    //            }
+    //        }
+    //        nodes.append(.{
+    //            .transform = transform,
+    //            .root_transform = math.m4_identity,
+    //            .mesh_index = mesh_node.mesh_index,
+    //            .parent = item.parent_index,
+    //            .flags = .{
+    //                .dirty = 1,
+    //            },
+    //        }) catch unreachable;
+    //        if (item.info.entry.children) |children| {
+    //            for (children) |c| {
+    //                const index: u32 = @intCast(@as(i32, @intCast(item.info.index)) + c);
+    //                const entry = memory.pack.entries.?.items[index];
+    //                stack.append(.{
+    //                    .info = .{ .entry = entry, .index = index },
+    //                    .parent_transform = transform,
+    //                    .parent_index = @intCast(nodes.items.len - 1),
+    //                }) catch unreachable;
+    //            }
+    //        }
+    //    }
+    //
+    //    const tree = TransformTree{
+    //        .nodes = memory.mem.persistent.alloc(TransformTreeNode, nodes.items.len) catch unreachable,
+    //        .model = model,
+    //        .flags = .{
+    //            .dirty = 1,
+    //        },
+    //    };
+    //    @memcpy(tree.nodes, nodes.items);
+    //
+    //    return tree;
+
+}
+
+fn update_dirty_nodes(tree: *const TransformTree) void {
+    std.debug.assert(tree.flags.dirty == 1);
+    var found_dirty = false;
+    for (tree.nodes[1..]) |*n| {
+        if (!found_dirty and n.flags.dirty == 1) {
+            found_dirty = true;
+        }
+        if (found_dirty) {
+            n.root_transform = m4.mul(tree.nodes[n.parent].root_transform, n.transform);
+        }
+    }
+}
+
+fn transform_tree(tree: *const TransformTree, transform: m4) void {
+    for (tree.nodes[0..]) |*n| {
+        n.new_transform = m4.mul(transform, n.root_transform);
+    }
+}
+
+fn transform_animation(state: *common.AnimationState, time: f32) void {
+    if (state.finished) {
+        return;
+    }
+
+    const node = &state.tree.nodes[state.index];
+    const t = time - state.begin_time;
+    var finished = true;
+
+    var end_time: f32 = 0;
+    if (state.animation.rotation) |rotation| {
+        end_time = @max(end_time, rotation.time[rotation.time.len - 1]);
+        const len = (rotation.time[rotation.time.len - 1] - rotation.time[0]) / state.playback_speed;
+        const dt = len / @as(f32, @floatFromInt(rotation.time.len - 1));
+        if (t <= len) {
+            const ti0: usize = @intFromFloat(@floor(t / dt));
+            const ti1: usize = @intFromFloat(@ceil(t / dt));
+            std.debug.assert(ti0 >= 0 and ti0 < rotation.time.len);
+            std.debug.assert(ti1 >= 0 and ti1 < rotation.time.len);
+            const it = @mod(t, dt) / dt;
+            const q0 = rotation.data[ti0];
+            const q1 = rotation.data[ti1];
+            state.rotation = math.Quat.lerp(q0, q1, it);
+            finished = false;
+        }
+    }
+
+    if (state.animation.scale) |scale| {
+        end_time = @max(end_time, scale.time[scale.time.len - 1]);
+        const len = (scale.time[scale.time.len - 1] - scale.time[0]) / state.playback_speed;
+        const dt = len / @as(f32, @floatFromInt(scale.time.len - 1));
+        if (t <= len) {
+            const ti0: usize = @intFromFloat(@floor(t / dt));
+            const ti1: usize = @intFromFloat(@ceil(t / dt));
+            std.debug.assert(ti0 >= 0 and ti0 < scale.time.len);
+            std.debug.assert(ti1 >= 0 and ti1 < scale.time.len);
+            const it = @mod(t, dt) / dt;
+            const v0 = scale.data[ti0];
+            const v1 = scale.data[ti1];
+            state.scale = v3.lerp(v0, v1, it);
+            finished = false;
+        }
+    }
+
+    if (state.animation.translation) |translation| {
+        end_time = @max(end_time, translation.time[translation.time.len - 1]);
+        const len = (translation.time[translation.time.len - 1] - translation.time[0]) / state.playback_speed;
+        const dt = len / @as(f32, @floatFromInt(translation.time.len - 1));
+        if (t <= len) {
+            const ti0: usize = @intFromFloat(@floor(t / dt));
+            const ti1: usize = @intFromFloat(@ceil(t / dt));
+            std.debug.assert(ti0 >= 0 and ti0 < translation.time.len);
+            std.debug.assert(ti1 >= 0 and ti1 < translation.time.len);
+            const it = @mod(t, dt) / dt;
+            const v0 = translation.data[ti0];
+            const v1 = translation.data[ti1];
+            state.translation = v3.lerp(v0, v1, it);
+            finished = false;
+        }
+    }
+
+    state.end_time = state.begin_time + end_time;
+
+    if (!finished) {
+        node.flags.dirty = 1;
+        state.tree.flags.dirty = 1;
+    } else {
+        state.finished = true;
+    }
+}
+
+fn time_seconds(memory: *const Memory) f32 {
+    return @as(f32, @floatFromInt(memory.time)) / 1e9;
+}
+
+fn draw_model(cmd: *draw_api.CommandBuffer, tree: *const TransformTree, model_transform: math.m4, root: bool) void {
+    for (tree.nodes) |n| {
+        if (n.mesh_index) |mesh_index| {
+            const transform = if (root) n.root_transform else n.transform;
+            cmd.push(primitive.Mesh{
+                .transform = m4.mul(model_transform, transform),
+                .mesh_index = mesh_index,
+                .model_id = tree.id,
+            }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
+        }
+    }
+
+    //const node_entry_info = goosepack.entry_lookup(&memory.pack, name) orelse {
+    //    std.log.info("unable to find pack entry {s}", .{name});
+    //    return;
+    //};
+    //const node = goosepack.getResource(&memory.pack, node_entry_info.index).model_node;
+    //const model = goosepack.getResource(&memory.pack, @intCast(@as(i32, @intCast(node_entry_info.index)) + node.root_entry_relative_index)).model;
+
+    //if (draw_children and node_entry_info.entry.children != null) {
+    //    var stack = std.ArrayList(struct {
+    //        info: goosepack.EntryInfo,
+    //        parent_transform: m4,
+    //    }).initCapacity(memory.mem.frame, 128) catch unreachable;
+    //    stack.appendAssumeCapacity(.{ .info = node_entry_info, .parent_transform = model_transform });
+    //    while (stack.popOrNull()) |item| {
+    //        const mesh_node = goosepack.getResource(&memory.pack, item.info.index).model_node;
+
+    //        var animation_transform = math.m4_identity;
+    //        if (std.mem.eql(u8, item.info.entry.name, animation.?.target)) {
+    //            if (animation.?.rotation) |rotation| {
+    //                const len = rotation.time[rotation.time.len - 1] - rotation.time[0];
+    //                const dt = len / @as(f32, @floatFromInt(rotation.time.len - 1));
+    //                const t = @mod(@as(f32, @floatFromInt(memory.time)) / 1e9, len);
+    //                const ti0: usize = @intFromFloat(@floor(t / dt));
+    //                const ti1: usize = @intFromFloat(@ceil(t / dt));
+    //                std.debug.assert(ti0 >= 0 and ti0 < rotation.time.len);
+    //                std.debug.assert(ti1 >= 0 and ti1 < rotation.time.len);
+    //                const it = @mod(t, dt) / dt;
+    //                const q0 = rotation.data[ti0];
+    //                const q1 = rotation.data[ti1];
+    //                const q = math.Quat.lerp(q0, q1, it);
+    //                animation_transform = m4.mul(m4.fromQuat(q), animation_transform);
+    //            }
+    //            if (animation.?.scale) |scale| {
+    //                const len = scale.time[scale.time.len - 1] - scale.time[0];
+    //                const dt = len / @as(f32, @floatFromInt(scale.time.len - 1));
+    //                const t = @mod(@as(f32, @floatFromInt(memory.time)) / 1e9, len);
+    //                const ti0: usize = @intFromFloat(@floor(t / dt));
+    //                const ti1: usize = @intFromFloat(@ceil(t / dt));
+    //                std.debug.assert(ti0 >= 0 and ti0 < scale.time.len);
+    //                std.debug.assert(ti1 >= 0 and ti1 < scale.time.len);
+    //                const it = @mod(t, dt) / dt;
+    //                const v0 = scale.data[ti0];
+    //                const v1 = scale.data[ti1];
+    //                const v = v3.lerp(v0, v1, it);
+    //                animation_transform = m4.mul(m4.fromScale(v), animation_transform);
+    //            }
+    //            if (animation.?.translation) |translation| {
+    //                const len = translation.time[translation.time.len - 1] - translation.time[0];
+    //                const dt = len / @as(f32, @floatFromInt(translation.time.len - 1));
+    //                const t = @mod(@as(f32, @floatFromInt(memory.time)) / 1e9, len);
+    //                const ti0: usize = @intFromFloat(@floor(t / dt));
+    //                const ti1: usize = @intFromFloat(@ceil(t / dt));
+    //                std.debug.assert(ti0 >= 0 and ti0 < translation.time.len);
+    //                std.debug.assert(ti1 >= 0 and ti1 < translation.time.len);
+    //                const it = @mod(t, dt) / dt;
+    //                const v0 = translation.data[ti0];
+    //                const v1 = translation.data[ti1];
+    //                const v = v3.lerp(v0, v1, it);
+    //                animation_transform = m4.mul(m4.fromTranslation(v), animation_transform);
+    //            }
+    //        } else {
+    //            animation_transform = mesh_node.transform;
+    //        }
+
+    //        const transform = m4.mul(item.parent_transform, animation_transform);
+    //        if (mesh_node.mesh_index) |mesh_index| {
+    //            const mesh = model.meshes[mesh_index];
+    //            cmd.push(primitive.Mesh{
+    //                .transform = transform,
+    //                .mesh = mesh,
+    //                .mesh_index = mesh_index,
+    //                .model_id = model.id,
+    //                .materials = model.materials,
+    //            }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
+    //        }
+
+    //        if (item.info.entry.children) |children| {
+    //            for (children) |c| {
+    //                const index: u32 = @intCast(@as(i32, @intCast(item.info.index)) + c);
+    //                const entry = memory.pack.entries.?.items[index];
+    //                stack.appendAssumeCapacity(.{ .info = .{ .entry = entry, .index = index }, .parent_transform = transform });
+    //            }
+    //        }
+    //    }
+    //} else {
+    //    const transform = m4.mul(model_transform, node.transform);
+    //    if (node.mesh_index) |mesh_index| {
+    //        const mesh = model.meshes[mesh_index];
+    //        cmd.push(primitive.Mesh{
+    //            .transform = transform,
+    //            .mesh = mesh,
+    //            .mesh_index = mesh_index,
+    //            .model_id = model.id,
+    //            .materials = model.materials,
+    //        }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
+    //    }
+    //}
 }

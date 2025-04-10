@@ -1,14 +1,17 @@
 const std = @import("std");
 const bb = @import("bytebuffer.zig");
+const BoundedArray = @import("common.zig").BoundedArray;
 
 fn rdtsc() u32 {
-    return asm volatile ("rdtsc ": [out] "={eax}" (-> u32));
+    return asm volatile ("rdtsc "
+        : [out] "={eax}" (-> u32),
+    );
 }
 
 pub const StatData = struct {
     enabled: bool = true,
-    entries: std.BoundedArray(StatEntry, 128) = .{},
-    ids_being_tracked: std.BoundedArray(u16, 128) = .{},
+    entries: BoundedArray(StatEntry, 128) = .{},
+    ids_being_tracked: BoundedArray(u16, 128) = .{},
 
     const Self = @This();
 
@@ -17,9 +20,9 @@ pub const StatData = struct {
             return;
         const id = self.findId(name) orelse blk: {
             _ = self.entries.addOneAssumeCapacity();
-            const new_id = self.entries.len-1;
+            const new_id = self.entries.len - 1;
             if (self.ids_being_tracked.len > 0) {
-                const parent_id = self.ids_being_tracked.get(self.ids_being_tracked.len-1);
+                const parent_id = self.ids_being_tracked.get(self.ids_being_tracked.len - 1);
                 var parent = &self.entries.slice()[parent_id];
                 parent.children.appendAssumeCapacity(new_id);
             }
@@ -47,7 +50,7 @@ pub const StatData = struct {
     }
 
     pub fn findId(self: *Self, name: []const u8) ?u16 {
-        for (self.entries.constSlice(), 0..self.entries.len) |stat,i| {
+        for (self.entries.constSlice(), 0..self.entries.len) |stat, i| {
             if (std.mem.eql(u8, stat.name, name))
                 return @intCast(i);
         }
@@ -68,7 +71,7 @@ pub const StatEntry = struct {
     start_time: std.time.Instant = undefined,
     is_root: bool = false,
 
-    children: std.BoundedArray(u16, 16) = .{},
+    children: BoundedArray(u16, 16) = .{},
 
     const Self = @This();
 
@@ -95,7 +98,7 @@ pub const StatEntry = struct {
         var max: u64 = std.math.minInt(u64);
         for (self.samples.data) |s| {
             const d = @as(i64, @intCast(s)) - @as(i64, @intCast(avg));
-            const mul = @mulWithOverflow(d,d);
+            const mul = @mulWithOverflow(d, d);
             // Skip on overflow
             if (mul[1] == 1)
                 continue;
@@ -106,11 +109,11 @@ pub const StatEntry = struct {
             if (s > max)
                 max = s;
         }
-        variance /= self.samples.data.len-1;
+        variance /= self.samples.data.len - 1;
 
         const std_float = std.math.sqrt(@as(f64, @floatFromInt(variance)));
 
-        return StatResult {
+        return StatResult{
             .avg = avg,
             .std = @intFromFloat(std_float),
             .min = min,

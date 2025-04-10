@@ -4,9 +4,9 @@ const config = common.config;
 const Vars = config.Vars;
 const commands = @import("command_client.zig");
 
-fn check_args(comptime func_name: []const u8, comptime func: anytype, it: *std.mem.TokenIterator(u8, .any)) ?std.meta.ArgsTuple(@TypeOf(func)) {
+fn check_args(comptime func_name: []const u8, comptime func: anytype, it: *std.mem.TokenIterator(u8, .scalar)) ?std.meta.ArgsTuple(@TypeOf(func)) {
     var tuple: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
-    const args = @typeInfo(@TypeOf(func)).Fn.params;
+    const args = @typeInfo(@TypeOf(func)).@"fn".params;
     inline for (args, 0..) |arg, i| {
         comptime var buf: [128]u8 = undefined;
         const name = comptime std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
@@ -44,7 +44,7 @@ fn check_args(comptime func_name: []const u8, comptime func: anytype, it: *std.m
 }
 
 pub fn run(commandline: []const u8) void {
-    var it = std.mem.tokenize(u8, commandline, " ");
+    var it = std.mem.tokenizeScalar(u8, commandline, ' ');
     const command = it.next() orelse {
         std.log.err("expected command", .{});
         return;
@@ -56,7 +56,7 @@ pub fn run(commandline: []const u8) void {
             return;
         };
 
-        inline for (@typeInfo(Vars).Struct.fields) |field| {
+        inline for (@typeInfo(Vars).@"struct".fields) |field| {
             if (std.mem.eql(u8, varname, field.name)) {
                 const f = @field(config.vars, field.name);
                 const T = @TypeOf(f);
@@ -98,11 +98,11 @@ pub fn run(commandline: []const u8) void {
     } else {
         // Here we dispatch to cl*() functions if the command == * and arguments
         // are valid.
-        inline for (@typeInfo(commands).Struct.decls) |decl| {
+        inline for (@typeInfo(commands).@"struct".decls) |decl| {
             const f = @field(commands, decl.name);
             const T = @TypeOf(f);
             const ti = @typeInfo(T);
-            if (ti == .Fn and std.mem.eql(u8, command, decl.name)) {
+            if (ti == .@"fn" and std.mem.eql(u8, command, decl.name)) {
                 if (check_args(decl.name, f, &it)) |args| {
                     @call(.auto, f, args);
                 }

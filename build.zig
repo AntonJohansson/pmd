@@ -1,5 +1,4 @@
 const std = @import("std");
-//const sokol = @import("third_party/sokol-zig/build.zig");
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -8,15 +7,9 @@ pub fn build(b: *std.Build) !void {
     const sokol_dep = b.dependency("sokol", .{
         .target = target,
         .optimize = optimize,
+        .x11 = false,
+        .wayland = true,
     });
-
-    const zphysics_dep = b.dependency("zphysics", .{
-        .target = target,
-        .optimize = optimize,
-        .use_double_precision = false,
-        .enable_cross_platform_determinism = true,
-    });
-
 
     //
     // build_options
@@ -26,11 +19,19 @@ pub fn build(b: *std.Build) !void {
     const production = b.option(bool, "production", "disables debug engine features (hot reloading, modules, pack recompilation)") orelse false;
     options.addOption(bool, "debug", !production);
 
+    const should_build_glfw = b.option(bool, "build-glfw", "build glfw submodule") orelse false;
+    if (should_build_glfw) {
+        try build_glfw(b);
+    }
+
     const build_options = b.createModule(.{
         .root_source_file = b.path("src/build_options.zig"),
     });
     build_options.addOptions("options", options);
 
+    //
+    // mach glfw dependency
+    //
     //
     // common
     //
@@ -39,6 +40,8 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/common/common.zig"),
     });
     common.addImport("build_options", build_options);
+    common.addIncludePath(b.path("third_party/glfw/include/GLFW"));
+    //common.addImport("mach-glfw", glfw_dep.module("mach-glfw"));
 
     //
     // pack
@@ -60,9 +63,13 @@ pub fn build(b: *std.Build) !void {
 
     const pack = b.addExecutable(.{
         .name = "pack",
-        .root_source_file = b.path("src/tools/pack.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/pack.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        // TODO(anjo): temp
+        .use_lld = false,
     });
     pack.root_module.addImport("common", common);
     pack.root_module.addImport("pack-disk", pack_disk);
@@ -82,26 +89,19 @@ pub fn build(b: *std.Build) !void {
     // lib
     //
 
-    const libgame = b.addSharedLibrary(.{
+    const libgame = b.addLibrary(.{
+        .linkage = .dynamic,
         .name = "game",
-        .root_source_file = b.path("src/game/game.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/game/game.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     libgame.root_module.addImport("common", common);
     libgame.root_module.addImport("net", net);
     libgame.root_module.addImport("build_options", build_options);
-    libgame.root_module.addImport("zphysics", zphysics_dep.module("root"));
-    libgame.linkLibrary(zphysics_dep.artifact("joltc"));
     _ = b.installArtifact(libgame);
-
-    //
-    // mach glfw dependency
-    //
-    const glfw_dep = b.dependency("mach-glfw", .{
-        .target = target,
-        .optimize = optimize,
-    });
 
     //
     // client
@@ -111,16 +111,19 @@ pub fn build(b: *std.Build) !void {
 
     const client = b.addExecutable(.{
         .name = "client",
-        .root_source_file = b.path("src/client/client.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/client/client.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        // TODO(anjo): temp
+        .use_lld = false,
     });
-    client.addIncludePath(b.path("src/client"));
-    client.linkLibC();
+    client.root_module.addObjectFile(b.path("third_party/glfw/build/src/libglfw3.a"));
+    client.root_module.addIncludePath(b.path("third_party/glfw/include/GLFW"));
     client.root_module.addImport("sokol", sokol_dep.module("sokol"));
     client.root_module.addImport("common", common);
     client.root_module.addImport("net", net);
-    client.root_module.addImport("mach-glfw", glfw_dep.module("mach-glfw"));
     client.root_module.addImport("pack-disk", pack_disk);
     client.root_module.addImport("build_options", build_options);
     b.installArtifact(client);
@@ -139,13 +142,17 @@ pub fn build(b: *std.Build) !void {
 
     const server = b.addExecutable(.{
         .name = "server",
-        .root_source_file = b.path("src/server/server.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/server/server.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        // TODO(anjo): temp
+        .use_lld = false,
     });
     server.root_module.addImport("common", common);
     server.root_module.addImport("net", net);
-    client.root_module.addImport("pack-disk", pack_disk);
+    server.root_module.addImport("pack-disk", pack_disk);
     server.root_module.addImport("build_options", build_options);
     server.linkLibC();
     b.installArtifact(server);
@@ -169,4 +176,23 @@ pub fn build(b: *std.Build) !void {
     }
     const run_pack_step = b.step("run-pack", "Run pack");
     run_pack_step.dependOn(&run_pack_cmd.step);
+}
+
+fn build_glfw(b: *std.Build) !void {
+    _ = try std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &[_][]const u8{ "mkdir", "-p", "third_party/glfw/build" },
+    });
+
+    const res_cmake = try std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &[_][]const u8{ "cmake", "-B", "third_party/glfw/build", "-S", "third_party/glfw", "-D", "GLFW_BUILD_X11=0", "-D", "GLFW_BUILD_WAYLAND=1" },
+    });
+    std.log.info("{s}", .{res_cmake.stdout});
+
+    const res_make = try std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &[_][]const u8{ "make", "-C", "third_party/glfw/build" },
+    });
+    std.log.info("{s}", .{res_make.stdout});
 }

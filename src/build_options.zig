@@ -1,1 +1,1 @@
-pub usingnamespace @import("options");
+pub const options = @import("options");

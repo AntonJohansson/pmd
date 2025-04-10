@@ -10,7 +10,7 @@ const Input = common.Input;
 // Debug packets
 //
 
-pub const Command = extern struct {
+pub const Command = struct {
     data: [128]u8,
     len: usize,
 };
@@ -19,105 +19,107 @@ pub const Command = extern struct {
 // Connection packets
 //
 
-pub const ConnectionRequest = extern struct {
+pub const ConnectionRequest = struct {
     client_salt: u64,
 };
 
-pub const ConnectionChallenge = extern struct {
+pub const ConnectionChallenge = struct {
     client_salt: u64,
     server_salt: u64,
 };
 
-pub const ConnectionChallengeResponse = extern struct {
+pub const ConnectionChallengeResponse = struct {
     salt: u64,
 };
 
-pub const ConnectionSuccessful = extern struct {
-};
+pub const ConnectionSuccessful = struct {};
 
-pub const ConnectionDenied = extern struct {
-};
+pub const ConnectionDenied = struct {};
 
-pub const ConnectionTimeout = extern struct {
-};
+pub const ConnectionTimeout = struct {};
 
 //
 // Game packets
 //
 
-pub const Pong = extern struct {
+pub const Pong = struct {
     num: u32,
 };
 
-pub const Joined = extern struct {
+pub const Joined = struct {
     tick: u64,
 };
 
-pub const PlayerJoinRequest = extern struct {
-};
+pub const PlayerJoinRequest = struct {};
 
-pub const PlayerJoinResponse = extern struct {
+pub const PlayerJoinResponse = struct {
     id: EntityId,
 };
 
-pub const PeerJoined = extern struct {
+pub const PeerJoined = struct {
     player: Player,
 };
 
-pub const PeerDisconnected = extern struct {
+pub const PeerDisconnected = struct {
     id: EntityId,
 };
 
-pub const PlayerUpdate = extern struct {
+pub const PlayerUpdate = struct {
     tick: u64,
     id: EntityId,
     input: Input,
+    in_editor: u8,
 };
 
-pub const PlayerUpdateAuth = extern struct {
+pub const PlayerUpdateAuth = struct {
     tick: u64,
     player: Player,
 };
 
-pub const ServerPlayerUpdate = extern struct {
+pub const ServerPlayerUpdate = struct {
     players: [common.max_players]Player,
     num_players: usize,
 };
 
-pub const NewSounds = extern struct {
-    new_sounds:     [16]common.Sound = undefined,
-    num_sounds:     u16 = 0,
+pub const NewSounds = struct {
+    new_sounds: [16]common.Sound = undefined,
+    num_sounds: u16 = 0,
 };
 
-pub const NewHitscans = extern struct {
-    new_hitscans:   [16]common.Hitscan   = undefined,
-    num_hitscans:   u16 = 0,
+pub const NewHitscans = struct {
+    new_hitscans: [16]common.Hitscan = undefined,
+    num_hitscans: u16 = 0,
 };
 
-pub const NewExplosions = extern struct {
+pub const NewExplosions = struct {
     new_explosions: [16]common.Explosion = undefined,
     num_explosions: u16 = 0,
 };
 
-pub const NewNades = extern struct {
-    new_nades:      [16]common.Nade      = undefined,
-    num_nades:      u16 = 0,
+pub const NewNades = struct {
+    new_nades: [16]common.Nade = undefined,
+    num_nades: u16 = 0,
 };
 
-pub const NewDamage = extern struct {
-    new_damage:     [16]common.Damage    = undefined,
-    num_damage:     u16 = 0,
+pub const NewDamage = struct {
+    new_damage: [16]common.Damage = undefined,
+    num_damage: u16 = 0,
 };
 
-pub const Kill = extern struct {
+pub const NewMapMods = struct {
+    mods: [8]common.MapModify = undefined,
+    num_mods: u16 = 0,
+};
+
+pub const Kill = struct {
     from: EntityId,
     to: EntityId,
 };
 
-pub const SpawnPlayer = extern struct {
+pub const SpawnPlayer = struct {
     player: Player,
 };
 
-pub const EntityUpdate = extern struct {
+pub const EntityUpdate = struct {
     entity: common.Entity,
 };

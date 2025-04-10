@@ -51,7 +51,7 @@ pub fn CodeModule(comptime function_table_type: type) type {
             try std.fs.Dir.copyFile(dir, self.name, dir, self.name_running, .{});
 
             self.lib = try std.DynLib.open(self.path_running);
-            inline for (@typeInfo(@TypeOf(self.function_table)).Struct.fields) |f| {
+            inline for (@typeInfo(@TypeOf(self.function_table)).@"struct".fields) |f| {
                 // Allocate space for a null-terminated string
                 var name: [:0]u8 = @ptrCast(try allocator.alloc(u8, f.name.len + 1));
                 @memcpy(name[0..f.name.len], f.name);

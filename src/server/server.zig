@@ -15,6 +15,7 @@ const threadpool = common.threadpool;
 const stat = common.stat;
 const code_module = common.code_module;
 const command = common.command;
+const BoundedArray = common.BoundedArray;
 
 const config = common.config;
 const Vars = config.Vars;
@@ -26,10 +27,10 @@ const v3 = math.v3;
 var log: common.log.GroupLog(.general) = undefined;
 
 const PeerData = struct {
-    ids: std.BoundedArray(EntityId, 4) = .{},
+    ids: BoundedArray(EntityId, 4) = .{},
 
     pub fn clear(self: *@This()) void {
-        self.ids.len = 0;
+        self.ids.used = 0;
     }
 };
 
@@ -53,17 +54,30 @@ pub fn main() !void {
     memory.mem.frame = arena_allocator.allocator();
     memory.mem.persistent = general_purpose_allocator.allocator();
 
+    memory.animation_states = std.ArrayList(common.AnimationState){};
     memory.log_memory = try common.log.LogMemory.init(memory.mem.persistent, memory.mem.frame, null, false);
     log = memory.log_memory.group_log(.general);
+
+    memory.profile.init(memory.mem.persistent);
+    defer memory.profile.deinit();
+
+    const num_cpus = std.Thread.getCpuCount() catch 1;
+    try memory.threadpool.init(.{
+        .allocator = memory.mem.persistent,
+        .n_jobs = @intCast(num_cpus - 1),
+    });
+    defer memory.threadpool.deinit();
 
     net.mem = memory.mem;
     net.init(&memory.log_memory);
 
     var module = try code_module.CodeModule(struct {
-        update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
-        authorizedPlayerUpdate: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void,
-        authorizedUpdate: *fn (vars: *const Vars, memory: *Memory, dt: f32) void,
-        draw: *fn (memory: *Memory) void,
+        init: *fn (memory: *Memory) callconv(.c) bool,
+        deinit: *fn (memory: *Memory) callconv(.c) void,
+        update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) callconv(.c) void,
+        authorizedPlayerUpdate: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) callconv(.c) void,
+        authorizedUpdate: *fn (vars: *const Vars, memory: *Memory, dt: f32) callconv(.c) void,
+        server_update: *fn (vars: *const Vars, memory: *Memory, dt: f32) callconv(.c) void,
     }).init(memory.mem.persistent, "zig-out/lib", "game");
 
     // TODO(anjo): Pass module name through compile time constants and don't rely on trying to
@@ -74,10 +88,15 @@ pub fn main() !void {
     };
     defer module.close();
 
+    if (!module.function_table.init(&memory)) {
+        return;
+    }
+    defer module.function_table.deinit(&memory);
+
     const host = net.bind(9053) orelse return;
     defer std.posix.close(host.fd);
 
-    const new_connections: std.BoundedArray(NewConnectionData, 4) = .{};
+    const new_connections: BoundedArray(NewConnectionData, 4) = .{};
 
     const desired_frame_time = std.time.ns_per_s / common.target_fps;
     const dt: f32 = 1.0 / @as(f32, @floatFromInt(common.target_fps));
@@ -86,7 +105,7 @@ pub fn main() !void {
     const running = true;
 
     const crand = std.crypto.random;
-    var prng = std.rand.DefaultPrng.init(crand.int(u64));
+    var prng = std.Random.DefaultPrng.init(crand.int(u64));
     const rand = prng.random();
 
     //var print_perf = false;
@@ -100,6 +119,8 @@ pub fn main() !void {
         frame_start_time = timer.read();
 
         //log.info("---- Starting tick {}", .{tick});
+
+        memory.map_mods = std.ArrayList(common.MapModify){};
 
         {
             {
@@ -133,7 +154,7 @@ pub fn main() !void {
                         for (peers[e.peer_index].ids.slice()) |id| {
                             const index = common.findIndexById(memory.players.slice(), id);
                             if (index != null)
-                                _ = memory.players.swapRemove(index.?);
+                                _ = memory.players.swap_remove(index.?);
                             // TODO: reliable
                             net.pushMessageToAllPeers(packet.PeerDisconnected{
                                 .id = id,
@@ -155,23 +176,23 @@ pub fn main() !void {
                                 const message: *align(1) packet.PlayerJoinRequest = @ptrCast(e.data);
                                 _ = message;
 
-                                const player = try memory.players.addOne();
+                                const player = Player{};
 
                                 var peer = &peers[e.peer_index];
-                                const id = try peer.ids.addOne();
-                                id.* = common.newEntityId();
-                                player.id = id.*;
+                                player.id = common.newEntityId();
+                                peer.ids.append(player.id);
+                                memory.players.append(player);
 
-                                log.info("A new player joined the game: {}", .{id.*});
+                                log.info("A new player joined the game: {}", .{player.id});
 
                                 // Joined response for player trying to connect
                                 net.pushMessage(e.peer_index, packet.PlayerJoinResponse{
-                                    .id = id.*,
+                                    .id = player.id,
                                 });
 
                                 // Add to respawn queue
                                 memory.respawns.appendAssumeCapacity(.{
-                                    .id = id.*,
+                                    .id = player.id,
                                     .time_left = 1.0,
                                 });
 
@@ -182,8 +203,9 @@ pub fn main() !void {
 
                                 // Send peer joined to packed to new connection, informing of all other clients
                                 for (memory.players.slice()) |p| {
-                                    if (p.id == id.*)
+                                    if (p.id == player.id) {
                                         continue;
+                                    }
                                     net.pushMessage(e.peer_index, packet.PeerJoined{
                                         .player = p,
                                     });
@@ -202,12 +224,26 @@ pub fn main() !void {
                                 if (found_id) {
                                     if (common.findPlayerById(memory.players.slice(), message.id)) |player| {
                                         const input: Input = message.input;
+
+                                        // Copy player state
+                                        player.in_editor = (message.in_editor == 1);
+
                                         module.function_table.update(vars, &memory, player, &input, dt);
                                         module.function_table.authorizedPlayerUpdate(vars, &memory, player, &input, dt);
+
                                         net.pushMessage(e.peer_index, packet.PlayerUpdateAuth{
                                             .tick = message.tick,
                                             .player = player.*,
                                         });
+
+                                        if (memory.map_mods.items.len > 0) {
+                                            std.log.info("sending map mods\n", .{});
+                                            var p = packet.NewMapMods{};
+                                            std.debug.assert(memory.map_mods.items.len <= p.mods.len);
+                                            @memcpy(p.mods[0..memory.map_mods.items.len], memory.map_mods.items);
+                                            p.num_mods = @intCast(memory.map_mods.items.len);
+                                            net.pushMessageToAllOtherPeers(e.peer_index, p);
+                                        }
                                     }
                                 }
                             },
@@ -230,6 +266,7 @@ pub fn main() !void {
             }
 
             module.function_table.authorizedUpdate(vars, &memory, dt);
+            module.function_table.server_update(vars, &memory, dt);
 
             for (memory.entities.slice()) |*e| {
                 if (!e.flags.updated_server)
@@ -250,7 +287,7 @@ pub fn main() !void {
             if (memory.new_damage.len > 0) {
                 var p = packet.NewDamage{};
                 @memcpy(p.new_damage[0..memory.new_damage.len], memory.new_damage.constSlice());
-                p.num_damage = memory.new_damage.len;
+                p.num_damage = @intCast(memory.new_damage.len);
                 memory.new_damage.resize(0) catch unreachable;
                 net.pushMessageToAllPeers(p);
             }
@@ -258,7 +295,7 @@ pub fn main() !void {
             if (memory.new_sounds.len > 0) {
                 var p = packet.NewSounds{};
                 @memcpy(p.new_sounds[0..memory.new_sounds.len], memory.new_sounds.constSlice());
-                p.num_sounds = memory.new_sounds.len;
+                p.num_sounds = @intCast(memory.new_sounds.len);
                 memory.new_sounds.resize(0) catch unreachable;
                 net.pushMessageToAllPeers(p);
             }
@@ -270,7 +307,7 @@ pub fn main() !void {
 
                 var p = packet.NewHitscans{};
                 @memcpy(p.new_hitscans[0..memory.new_hitscans.len], memory.new_hitscans.constSlice());
-                p.num_hitscans = memory.new_hitscans.len;
+                p.num_hitscans = @intCast(memory.new_hitscans.len);
                 memory.new_hitscans.resize(0) catch unreachable;
                 net.pushMessageToAllPeers(p);
             }
@@ -282,7 +319,7 @@ pub fn main() !void {
 
                 var p = packet.NewNades{};
                 @memcpy(p.new_nades[0..memory.new_nades.len], memory.new_nades.constSlice());
-                p.num_nades = memory.new_nades.len;
+                p.num_nades = @intCast(memory.new_nades.len);
                 memory.new_nades.resize(0) catch unreachable;
                 net.pushMessageToAllPeers(p);
             }
@@ -294,7 +331,7 @@ pub fn main() !void {
 
                 var p = packet.NewExplosions{};
                 @memcpy(p.new_explosions[0..memory.new_explosions.len], memory.new_explosions.constSlice());
-                p.num_explosions = memory.new_explosions.len;
+                p.num_explosions = @intCast(memory.new_explosions.len);
                 memory.explosions.resize(0) catch unreachable;
                 net.pushMessageToAllPeers(p);
             }

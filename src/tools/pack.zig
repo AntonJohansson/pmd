@@ -9,9 +9,10 @@ var arena_state = std.heap.ArenaAllocator.init(gpa);
 var arena = arena_state.allocator();
 
 pub fn main() !void {
-    const stdout_file = std.io.getStdOut().writer();
-    var stdout_buffered_writer = std.io.bufferedWriter(stdout_file);
-    const stdout = stdout_buffered_writer.writer();
+    var buffer: [1024]u8 = undefined;
+    var stdout_file = std.fs.File.stdout();
+    var stdout_writer = stdout_file.writer(&buffer);
+    const stdout = &stdout_writer.interface;
 
     const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
@@ -136,10 +137,10 @@ pub fn main() !void {
                         name: []const u8,
                         srcs: []goosepack.EntrySrc,
                     }).init(arena);
-                    var worklist = std.ArrayList([]const u8).init(arena);
-                    try worklist.append(path);
+                    var worklist = std.ArrayList([]const u8){};
+                    try worklist.append(arena, path);
 
-                    while (worklist.popOrNull()) |workitem| {
+                    while (worklist.pop()) |workitem| {
                         const dir = try std.fs.cwd().openDir(workitem, .{ .iterate = true });
                         var it = dir.iterate();
                         while (try it.next()) |e| {
@@ -256,7 +257,7 @@ pub fn main() !void {
                                     }
                                 },
                                 .directory => {
-                                    try worklist.append(item_path);
+                                    try worklist.append(arena, item_path);
                                 },
                                 else => unreachable,
                             }
@@ -307,7 +308,7 @@ pub fn main() !void {
                     for (p.entries.?.items, 0..) |e, i| {
                         try stdout.print("{:3}: {s:32} {s:16} {:16} {:16}\n", .{ i, e.name, @tagName(e.type), e.offset, e.size });
                     }
-                    try stdout_buffered_writer.flush();
+                    try stdout.flush();
                     return;
                 }
 
@@ -328,7 +329,7 @@ pub fn main() !void {
 
     arena_state.deinit();
 
-    try stdout_buffered_writer.flush();
+    try stdout.flush();
 }
 
 fn printUsage() void {
@@ -341,4 +342,3 @@ const Action = enum(u8) {
     del,
     update,
 };
-

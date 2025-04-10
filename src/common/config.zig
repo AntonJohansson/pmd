@@ -21,14 +21,14 @@ pub const Vars = struct {
 
     sensitivity: f32 = 0.001,
 
-    //cvar_t	cl_upspeed = {"cl_upspeed","200"};
-    //cvar_t	cl_forwardspeed = {"cl_forwardspeed","200", true};
-    //cvar_t	cl_backspeed = {"cl_backspeed","200", true};
-    //cvar_t	cl_sidespeed = {"cl_sidespeed","350"};
-    //cvar_t	cl_movespeedkey = {"cl_movespeedkey","2.0"};
-    //cvar_t	cl_yawspeed = {"cl_yawspeed","140"};
-    //cvar_t	cl_pitchspeed = {"cl_pitchspeed","150"};
-    //cvar_t	cl_anglespeedkey = {"cl_anglespeedkey","1.5"};
+    //cvar_t cl_upspeed = {"cl_upspeed","200"};
+    //cvar_t cl_forwardspeed = {"cl_forwardspeed","200", true};
+    //cvar_t cl_backspeed = {"cl_backspeed","200", true};
+    //cvar_t cl_sidespeed = {"cl_sidespeed","350"};
+    //cvar_t cl_movespeedkey = {"cl_movespeedkey","2.0"};
+    //cvar_t cl_yawspeed = {"cl_yawspeed","140"};
+    //cvar_t cl_pitchspeed = {"cl_pitchspeed","150"};
+    //cvar_t cl_anglespeedkey = {"cl_anglespeedkey","1.5"};
 
     gravity: f32 = -800,
     jumpspeed: f32 = 270,
@@ -47,7 +47,7 @@ pub const Vars = struct {
     sniper_len: f32 = 75.0,
     sniper_w: f32 = 1.0,
     sniper_off_x: f32 = 8.0,
-    sniper_off_y: f32 = -20,
+    sniper_off_y: f32 = -10,
     sniper_off_z: f32 = -7,
 
     sniper_stock_len: f32 = 2.0,
@@ -67,7 +67,7 @@ pub const Vars = struct {
     pistol_len: f32 = 5.0,
     pistol_w: f32 = 1.0,
     pistol_off_x: f32 = 6.0,
-    pistol_off_y: f32 = 8.0,
+    pistol_off_y: f32 = 16,
     pistol_off_z: f32 = -5.0,
     pistol_scope_len: f32 = 4.5,
     pistol_scope_w: f32 = 0.05,
@@ -79,9 +79,8 @@ pub const Vars = struct {
     pistol_handle_off_y: f32 = 0.0,
     pistol_handle_off_z: f32 = -1.2,
 
-    pub usingnamespace if (build_options.debug) struct {
-        pub const pack_update_check_interval_ns: u64 = 165;
-    } else struct {};
+    // TODO(anjo): if (build_options.debug) struct {
+    pack_update_check_interval_ns: u64 = 165,
 };
 
 pub const DebugVars = struct {

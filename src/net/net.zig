@@ -7,6 +7,7 @@ pub const packet = @import("packet.zig");
 pub const packet_meta = @import("packet_meta.zig");
 
 const common = @import("common");
+const BoundedArray = common.BoundedArray;
 const bb = common.bb;
 const stat = common.stat;
 
@@ -17,18 +18,18 @@ const ClientHost = struct {
 };
 
 pub const DebugState = struct {
-    rand: std.rand.Random,
+    rand: std.Random,
     delay: u64,
     dropchance: f32,
 };
 
 const PacketData = struct {
     acked: bool = false,
-    ids: std.BoundedArray(u16, 64) = .{},
+    ids: BoundedArray(u16, 64) = .{},
 };
 
 pub const LogEntry = struct {
-    batch: BatchBuilder,
+    data: []const u8,
     address: ?std.net.Address = null,
     repeat: u8 = 1,
     push_time: u64 = 0,
@@ -45,25 +46,6 @@ pub var mem: common.MemoryAllocators = .{};
 
 pub var input_buffer_stat: stat.StatEntry = .{};
 pub var output_buffer_stat: stat.StatEntry = .{};
-
-pub const BatchBuilder = struct {
-    buffer: bb.ByteBufferSlice = undefined,
-    header: *align(1) headers.BatchHeader = undefined,
-
-    pub fn clear(self: *@This()) void {
-        self.buffer.clear();
-        self.buffer.push(headers.BatchHeader{
-            .num_packets = 0,
-            .id = 0,
-        });
-        self.header = @ptrCast(&self.buffer.data[0]);
-    }
-
-    pub fn copy(self: *@This(), other: @This()) void {
-        self.buffer = other.buffer;
-        self.header = @ptrCast(&self.buffer.data[0]);
-    }
-};
 
 pub const Host = struct {
     state: PeerState = .Disconnected,
@@ -113,7 +95,7 @@ pub fn connect(host: *Host, ip: []const u8, port: u16) ?PeerIndex {
         };
         host.fd = fd;
         const peer_index = findAvailablePeerIndex();
-        var peer = &peers.buffer[peer_index];
+        var peer = &peers.data[peer_index];
         peer.state = .Connecting;
         return peer_index;
     }
@@ -122,7 +104,7 @@ pub fn connect(host: *Host, ip: []const u8, port: u16) ?PeerIndex {
 }
 
 pub fn disconnect(index: PeerIndex) void {
-    var peer = &peers.buffer[index];
+    var peer = &peers.data[index];
     std.debug.assert(peer.state != .Disconnected);
 
     // TODO(anjo): Send disconnect packet
@@ -131,68 +113,43 @@ pub fn disconnect(index: PeerIndex) void {
 }
 
 pub fn pushMessage(index: PeerIndex, message: anytype) void {
-    var peer = &peers.buffer[index];
+    var peer = &peers.data[index];
     std.debug.assert(peer.state != .Disconnected);
 
-    const message_id = peer.current_message_id;
-    peer.current_message_id = @addWithOverflow(peer.current_message_id, 1)[0];
+    //const message_id = peer.current_message_id;
+    //peer.current_message_id +%= 1;
 
-    const size = @sizeOf(headers.Header) + @sizeOf(@TypeOf(message));
-    const memory = mem.frame.alloc(u8, size) catch unreachable;
-    log.info("Allocating size for message {} bytes", .{size});
+    // Will be set to null again at the end of the frame in process
+    if (peer.frame_bytes == null) {
+        peer.frame_bytes = common.serialize.StringBuilder.init(mem.frame);
+    }
 
     const kind = comptime packet_meta.mapMessageToKind(@TypeOf(message));
-    @as(*align(1) headers.Header, @ptrCast(memory.ptr)).* = headers.Header{
+    common.serialize.memory_write_type(&peer.frame_bytes.?, headers.Header{
         .kind = kind,
-        .id = message_id,
+        .id = 0,
         .reliable = false,
-    };
-    @as(*align(1) @TypeOf(message), @ptrCast(memory.ptr + @sizeOf(headers.Header))).* = message;
-
-    // TODO(anjo): verbose
-    log.info("Pushing message", .{});
-    log.info("  message id: {}", .{message_id});
-    log.info("  message kind: {}", .{kind});
-    log.info("  message size: {}", .{@sizeOf(@TypeOf(message))});
-    log.info("  message index: {}", .{message_id % peer.messages_in_flight.data.len});
-    log.info("  message ptr: {*}", .{memory.ptr});
-
-    peer.messages_in_flight.set(message_id, ReliableMessageInfo{
-        .id = message_id,
-        .data = memory,
-        .reliable = false,
-    });
-
-    const ii: u16 = message_id % @as(u16, @intCast(peer.messages_in_flight.data.len));
-    const rmi = peer.messages_in_flight.data[ii];
-
-    {
-        const h: *align(1) const headers.Header = @ptrCast(rmi.data.ptr);
-        log.info("  ( Attempting to add message w. id {}", .{rmi.id});
-        log.info("  (   header id: {}", .{h.id});
-        log.info("  (   header reliable: {}", .{h.reliable});
-        log.info("  (   kind: {}", .{h.kind});
-        log.info("  (   size: {}", .{rmi.data.len});
-        log.info("  (   ptr:  {*}", .{rmi.data.ptr});
-    }
+    }) catch {};
+    common.serialize.memory_write_type(&peer.frame_bytes.?, message) catch {};
 }
 
 pub fn pushReliableMessage(index: PeerIndex, message: anytype) void {
-    var peer = &peers.buffer[index];
+    var peer = &peers.data[index];
     std.debug.assert(peer.state != .Disconnected);
 
     const message_id = peer.current_message_id;
-    peer.current_message_id += 1;
+    peer.current_message_id +%= 1;
 
-    const size = @sizeOf(headers.Header) + @sizeOf(@TypeOf(message));
-    const memory = mem.persistent.alloc(u8, size) catch unreachable;
-
-    @as(*align(1) headers.Header, @ptrCast(memory.ptr)).* = headers.Header{
-        .kind = comptime packet_meta.mapMessageToKind(@TypeOf(message)),
+    const builder = common.serialize.StringBuilder.init(mem.frame);
+    const kind = comptime packet_meta.mapMessageToKind(@TypeOf(message));
+    common.serialize.memory_write_type(&builder, headers.Header{
+        .kind = kind,
         .id = message_id,
-        .reliable = true,
-    };
-    @as(*align(1) @TypeOf(message), @ptrCast(memory.ptr + @sizeOf(headers.Header))).* = message;
+        .reliable = false,
+    }) catch {};
+    common.serialize.memory_write_type(&builder, message) catch {};
+
+    const memory = builder.dump_to_buffer(mem.persistent);
 
     peer.messages_in_flight.set(message_id, ReliableMessageInfo{
         .id = message_id,
@@ -202,7 +159,7 @@ pub fn pushReliableMessage(index: PeerIndex, message: anytype) void {
 }
 
 pub fn pushMessageToAllPeers(message: anytype) void {
-    for (peers.buffer, 0..) |entry, i| {
+    for (peers.data, 0..) |entry, i| {
         if (entry.state != .Connected)
             continue;
         pushMessage(@intCast(i), message);
@@ -210,7 +167,7 @@ pub fn pushMessageToAllPeers(message: anytype) void {
 }
 
 pub fn pushReliableMessageToAllPeers(message: anytype) void {
-    for (peers.buffer, 0..) |entry, i| {
+    for (peers.data, 0..) |entry, i| {
         if (entry.state != .Connected)
             continue;
         pushReliableMessage(@intCast(i), message);
@@ -218,7 +175,7 @@ pub fn pushReliableMessageToAllPeers(message: anytype) void {
 }
 
 pub fn pushReliableMessageToAllOtherPeers(index: PeerIndex, message: anytype) void {
-    for (peers.buffer, 0..) |entry, i| {
+    for (peers.data, 0..) |entry, i| {
         if (entry.state != .Connected or i == index)
             continue;
         pushReliableMessage(@intCast(i), message);
@@ -226,7 +183,7 @@ pub fn pushReliableMessageToAllOtherPeers(index: PeerIndex, message: anytype) vo
 }
 
 pub fn pushMessageToAllOtherPeers(index: PeerIndex, message: anytype) void {
-    for (peers.buffer, 0..) |entry, i| {
+    for (peers.data, 0..) |entry, i| {
         if (entry.state != .Connected or i == index)
             continue;
         pushMessage(@intCast(i), message);
@@ -263,6 +220,7 @@ const Peer = struct {
     received_messages: bb.SequenceBuffer(ReceivedMessageInfo, u16, message_receive_buffer_len) = .{},
     packets_in_flight: bb.SequenceBuffer(PacketData, u16, message_receive_buffer_len) = .{},
     messages_in_flight: bb.SequenceBuffer(ReliableMessageInfo, u16, message_receive_buffer_len) = .{},
+    frame_bytes: ?common.serialize.StringBuilder = null,
 
     current_packet_id: u16 = 0,
     current_message_id: u16 = 0,
@@ -277,10 +235,10 @@ const Peer = struct {
 pub const max_peer_count = 255;
 
 pub const PeerIndex = u8;
-pub var peers: std.BoundedArray(Peer, max_peer_count) = .{};
+pub var peers: BoundedArray(Peer, max_peer_count) = .{};
 
 fn findPeerIndex(address: std.net.Address) ?PeerIndex {
-    for (peers.buffer, 0..) |entry, i| {
+    for (peers.data, 0..) |entry, i| {
         if (entry.state != .Disconnected and entry.address != null and entry.address.?.eql(address)) {
             return @intCast(i);
         }
@@ -289,8 +247,8 @@ fn findPeerIndex(address: std.net.Address) ?PeerIndex {
 }
 
 fn findAvailablePeerIndex() PeerIndex {
-    std.debug.assert(peers.len < peers.buffer.len);
-    for (peers.buffer, 0..) |entry, i|
+    std.debug.assert(peers.used < peers.data.len);
+    for (peers.data, 0..) |entry, i|
         if (entry.state == .Disconnected)
             return @intCast(i);
     unreachable;
@@ -302,49 +260,47 @@ fn findAvailablePeerIndex() PeerIndex {
 var input_buffer: bb.ByteBuffer(8192) = .{};
 
 pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
-    var received_data: std.BoundedArray(ReceivedData, 128) = .{};
+    input_buffer.clear();
     while (true) {
-        input_buffer.clear();
-
         const nbytes = posix.recvfrom(host.fd, input_buffer.remainingData(), 0, null, null) catch 0;
         if (nbytes == 0) {
             break;
         }
-        if (nbytes < @sizeOf(headers.BatchHeader)) {
-            log.info("Recieved less data than packet header size", .{});
-            break;
-        }
         input_buffer.top += @intCast(nbytes);
-
-        log.info("Received {} bytes", .{nbytes});
-        while (input_buffer.hasData()) {
-            const packet_header = input_buffer.pop(headers.BatchHeader);
-            if (input_buffer.size() < packet_header.size) {
-                log.info("Received partial packet {}/{} bytes", .{ input_buffer.size(), packet_header.size });
-                break;
-            }
-            if (packet_header.num_packets == 0) {
-                log.info("Recieved empty packet", .{});
-                break;
-            }
-
-            log.info("  Contains packet", .{});
-            log.info("    num messages {}", .{packet_header.num_packets});
-            log.info("    size {}", .{packet_header.size});
-
-            const data = mem.frame.alloc(u8, packet_header.size) catch unreachable;
-            @memcpy(data[0..input_buffer.dataSlice().len], input_buffer.dataSlice());
-            input_buffer.bottom += packet_header.size;
-
-            received_data.append(ReceivedData{
-                .peer_index = 0,
-                .packet_header = packet_header,
-                .data = data,
-            }) catch unreachable;
-        }
     }
 
-    var peer = &peers.buffer[peer_index];
+    log.info("Received {} bytes", .{input_buffer.top});
+
+    var received_data: BoundedArray(ReceivedData, 128) = .{};
+    var offset: usize = 0;
+    while (input_buffer.hasData()) {
+        var packet_header: headers.BatchHeader = undefined;
+        common.serialize.memory_read_type(mem.frame, headers.BatchHeader, &input_buffer.data, &offset, &packet_header);
+
+        if (input_buffer.size() < packet_header.size) {
+            log.info("Received partial packet {}/{} bytes", .{ input_buffer.size(), packet_header.size });
+            break;
+        }
+        if (packet_header.num_packets == 0) {
+            log.info("Recieved empty packet", .{});
+            break;
+        }
+
+        log.info("  Contains packet", .{});
+        log.info("    num messages {}", .{packet_header.num_packets});
+        log.info("    size {}", .{packet_header.size});
+
+        const data = input_buffer.data[offset..packet_header.size];
+        offset += packet_header.size;
+
+        received_data.append(ReceivedData{
+            .peer_index = 0,
+            .packet_header = packet_header,
+            .data = data,
+        }) catch unreachable;
+    }
+
+    var peer = &peers.data[peer_index];
 
     var num_events: usize = 0;
     var events = mem.frame.alloc(Event, 128) catch unreachable;
@@ -360,18 +316,17 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
         }
         process_ack(data.peer_index, data.packet_header);
 
-        var byte_view = bb.ByteView{
-            .data = data.data,
-        };
-
         log.info("  packet id: {}", .{data.packet_header.id});
-        log.info("  packet size: {}", .{byte_view.data.len});
 
         // iterate over all message headers
         var i: u16 = 0;
-        while (byte_view.hasData() and i < data.packet_header.num_packets) : (i += 1) {
-            const header = byte_view.pop(headers.Header);
+        var message_offset: usize = 0;
+        while (message_offset < data.data.len and i < data.packet_header.num_packets) : (i += 1) {
+            var header: headers.Header = undefined;
+            common.serialize.memory_read_type(mem.frame, headers.Header, data.data, &message_offset, &header);
+
             const size = packet_meta.getMessageSize(header.kind);
+            const message = packet_meta.decodeKind(mem.frame, data.data, &message_offset, header.kind) catch unreachable;
 
             log.info("  Message", .{});
             log.info("    size: {}", .{size});
@@ -380,10 +335,9 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
             if (!header.reliable or peer.received_messages.get(header.id) == null) {
                 peer.received_messages.set(header.id, ReceivedMessageInfo{
                     .kind = header.kind,
-                    .data = byte_view.data[byte_view.bottom .. byte_view.bottom + size],
+                    .data = message,
                 });
             }
-            byte_view.advance(@intCast(size));
         }
     }
 
@@ -486,12 +440,12 @@ pub const Event = union(enum) {
 pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
     var their_sa: posix.sockaddr.storage = undefined;
     var sl: u32 = @sizeOf(posix.sockaddr.storage);
-    var received_data: std.BoundedArray(ReceivedData, 128) = .{};
+    var received_data: BoundedArray(ReceivedData, 128) = .{};
     var num_events: usize = 0;
     var events = mem.frame.alloc(Event, 128) catch unreachable;
 
     // Timeout disconnected peers
-    for (&peers.buffer, 0..) |*peer, i| {
+    for (&peers.data, 0..) |*peer, i| {
         if (peer.state == .Disconnected)
             continue;
         if (peer.timeout < std.time.ns_per_s / common.target_tickrate) {
@@ -525,7 +479,7 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
 
         // We reject as soon as possible
         const peer_index = findPeerIndex(address) orelse blk: {
-            if (peers.len == peers.buffer.len) {
+            if (peers.used == peers.data.len) {
                 // Skip all the data from this peer
                 log.info("Ignoring connection attempt from {} (no free connection slots)", .{address});
                 continue;
@@ -534,8 +488,8 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
             log.info("No entry found for {}, adding..", .{address});
             const index = findAvailablePeerIndex();
             log.info("  .. new index {}", .{index});
-            peers.len += 1; // we are really abusing BoundedArray here
-            var peer = &peers.buffer[index];
+            peers.used += 1; // we are really abusing BoundedArray here
+            var peer = &peers.data[index];
             std.debug.assert(peer.state == .Disconnected);
             peer.state = .Connecting;
             peer.address = address;
@@ -546,11 +500,14 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
         };
 
         // Reset peer_timeout since we received data from the peer.
-        peers.buffer[peer_index].timeout = peer_timeout;
+        peers.data[peer_index].timeout = peer_timeout;
 
         log.info("received {} bytes from ({}) {}", .{ nbytes, peer_index, address });
+        var offset: usize = 0;
         while (input_buffer.hasData()) {
-            const packet_header = input_buffer.pop(headers.BatchHeader);
+            var packet_header: headers.BatchHeader = undefined;
+            common.serialize.memory_read_type(mem.frame, headers.BatchHeader, &input_buffer.data, &offset, &packet_header);
+
             if (input_buffer.size() < packet_header.size) {
                 log.info("Received partial packet {}/{} bytes", .{ input_buffer.size(), packet_header.size });
                 break;
@@ -560,24 +517,23 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
                 break;
             }
 
-            const data = mem.frame.alloc(u8, packet_header.size) catch unreachable;
-            @memcpy(data[0..input_buffer.dataSlice().len], input_buffer.dataSlice());
-            input_buffer.bottom += packet_header.size;
+            const data = input_buffer.data[offset..packet_header.size];
+            offset += packet_header.size;
 
             received_data.append(ReceivedData{
-                .peer_index = peer_index,
+                .peer_index = 0,
                 .packet_header = packet_header,
                 .data = data,
-            }) catch unreachable;
+            });
         }
     }
 
-    var peers_with_data: std.BoundedArray(PeerIndex, max_peer_count) = .{};
+    var peers_with_data: BoundedArray(PeerIndex, max_peer_count) = .{};
 
     // TODO(anjo): This might be candidate for threading if there
     // are enough entries.
     for (received_data.slice()) |data| {
-        var peer = &peers.buffer[data.peer_index];
+        var peer = &peers.data[data.peer_index];
 
         // TODO(anjo): verbose
 
@@ -605,14 +561,14 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
                     .kind = header.kind,
                     .data = byte_view.data[byte_view.bottom .. byte_view.bottom + size],
                 });
-                peers_with_data.append(data.peer_index) catch unreachable;
+                peers_with_data.append(data.peer_index);
             }
             byte_view.advance(@intCast(size));
         }
     }
 
     for (peers_with_data.slice()) |index| {
-        const peer = &peers.buffer[index];
+        const peer = &peers.data[index];
 
         //
         // We deal with connections here, no need to force
@@ -635,7 +591,7 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
                                 .server_salt = server_salt,
                             });
 
-                            log.info("[{}/{}] {} connecting (awaiting challenge)", .{ peers.len, max_peer_count, peer.address.? });
+                            log.info("[{}/{}] {} connecting (awaiting challenge)", .{ peers.used, max_peer_count, peer.address.? });
                         },
                         .ConnectionChallengeResponse => {
                             const message: *align(1) packet.ConnectionChallengeResponse = @ptrCast(rmi.data.ptr);
@@ -653,7 +609,7 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
                                 pushMessage(index, packet.ConnectionDenied{});
                                 peer.state = .Disconnected;
                                 log.info("{} disconnected (failed challenge)", .{peer.address.?});
-                                peers.len -= 1;
+                                peers.used -= 1;
                             }
                         },
                         else => continue,
@@ -693,7 +649,7 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
 }
 
 pub fn processServer(host: *const Host) void {
-    for (peers.buffer, 0..) |peer, i| {
+    for (peers.data, 0..) |peer, i| {
         if (peer.state == .Disconnected)
             continue;
         process(host, @intCast(i));
@@ -710,7 +666,7 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
     }
     if (debug == null) {
         const crand = std.crypto.random;
-        var prng = std.rand.DefaultPrng.init(crand.int(u64));
+        var prng = std.Random.DefaultPrng.init(crand.int(u64));
 
         debug = DebugState{
             .rand = prng.random(),
@@ -719,74 +675,53 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
         };
     }
 
-    var peer = &peers.buffer[peer_index.?];
+    var peer = &peers.data[peer_index.?];
     std.debug.assert(peer.state != .Disconnected);
 
     var total_bytes_sent: u64 = 0;
 
-    var output_buffer = bb.ByteBufferSlice.init(mem.frame, 8192);
-    output_buffer.push(headers.BatchHeader{
+    var header = headers.BatchHeader{
         .num_packets = 0,
         .id = 0,
-    });
-    var header: *align(1) headers.BatchHeader = @ptrCast(&output_buffer.data[0]);
+    };
 
-    log.info("Constructing packet", .{});
+    var packet_bytes = common.serialize.StringBuilder.init(mem.frame);
+
     var have_reliable_packets = false;
     var packet_data: PacketData = .{};
     if (right_wrap_distance(peer.last_outgoing_acked_message_id, peer.current_message_id, peer.messages_in_flight.data.len) > 0) {
-        // TODO(anjo): verbose
-        //log.info("checking if we can add messages", .{});
         var id = peer.last_outgoing_acked_message_id;
-        while (id != peer.current_message_id and id != (@addWithOverflow(peer.last_outgoing_acked_message_id, message_receive_buffer_len - 1)[0]) % peer.messages_in_flight.data.len) : (id = @addWithOverflow(id, 1)[0]) {
-            // TODO(anjo): verbose
-            log.info("  checking id {}", .{id});
-
+        while (id != peer.current_message_id and id != (peer.last_outgoing_acked_message_id +% (message_receive_buffer_len - 1)) % peer.messages_in_flight.data.len) : (id +%= 1) {
             const index: u16 = id % @as(u16, @intCast(peer.messages_in_flight.data.len));
             if (peer.messages_in_flight.isset(index)) {
                 const rmi = peer.messages_in_flight.data[index];
 
-                {
-                    const h: *align(1) const headers.Header = @ptrCast(rmi.data.ptr);
-                    log.info("  Attempting to add message w. id {}", .{rmi.id});
-                    log.info("    ptr:  {*}", .{rmi.data.ptr});
-                    log.info("    size: {}", .{rmi.data.len});
-                    log.info("    header id: {}", .{h.id});
-                    log.info("    header reliable: {}", .{h.reliable});
-                    log.info("    kind: {}", .{h.kind});
-                }
+                std.debug.assert(rmi.reliable);
 
-                // TODO(anjo): verbose
-                //log.info("  found message in flight", .{});
-                if (rmi.data.len > output_buffer.remainingSize()) {
-                    log.info("  Packet {} of size {} too large for buffer {}/{}", .{ rmi.id, rmi.data.len, output_buffer.size(), output_buffer.data.len });
-                    if (!rmi.reliable or rmi.acked) {
-                        peer.messages_in_flight.unset(index);
-                    }
-                    break;
-                }
-                // TODO(anjo): verbose
-                //log.info("  message {} fits in buffer", .{@as(*align(1) const headers.Header, @ptrCast(rmi.data.ptr)).kind});
-                if (rmi.reliable and !rmi.acked) {
+                if (!rmi.acked) {
                     packet_data.ids.append(id) catch break;
                     have_reliable_packets = true;
                 } else {
                     peer.messages_in_flight.unset(index);
+                    break;
                 }
 
-                log.info("  Adding data of size {} bytes", .{rmi.data.len});
-                @memcpy(output_buffer.data[output_buffer.top .. output_buffer.top + rmi.data.len], rmi.data);
-                output_buffer.top += @intCast(rmi.data.len);
+                packet_bytes.write_bytes(rmi.data) catch unreachable;
+
                 header.num_packets += 1;
             }
         }
-    } else {
-        // TODO(anjo): verbose
-        //log.info("wrap {} {}", .{peer.last_outgoing_acked_message_id, peer.current_message_id});
-        log.info("  No messages in queue", .{});
     }
 
-    output_buffer_stat.samples.push(output_buffer.size());
+    if (peer.frame_bytes) |bytes| {
+        for (bytes.segments.items) |s| {
+            std.log.info("writing frame w. {}/{} bytes", .{ s.used, s.data.len });
+            packet_bytes.write_bytes(s.data[0..s.used]) catch unreachable;
+            //std.log.info("writing frame {}", .{s});
+            header.num_packets += s.num_writes;
+        }
+        peer.frame_bytes = null;
+    }
 
     //var i: u8 = 0;
     //while (i < entry.repeat) : (i += 1) {
@@ -794,30 +729,36 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
     //        continue;
 
     if (header.num_packets > 0) {
+        const size_pre_header = packet_bytes.get_size();
+
+        {
+            packet_bytes.insert = 0;
+            common.serialize.memory_write_type(&packet_bytes, header) catch {};
+        }
+
+        const output_buffer = packet_bytes.dump_to_buffer(mem.frame) catch unreachable;
+
         header.salt = peer.salt;
-        header.size = @as(u16, @intCast(output_buffer.size())) - @sizeOf(headers.BatchHeader);
+        header.size = @intCast(size_pre_header);
         header.id = peer.current_packet_id;
         header.reliable = have_reliable_packets;
         header.ack_bits = peer.ack_bits;
         header.last_packet_id = peer.last_incoming_acked_packet_id;
         log.info("  pushing packet {}", .{header.id});
 
-        peer.current_packet_id = @addWithOverflow(peer.current_packet_id, 1)[0];
+        peer.current_packet_id +%= 1;
         peer.packets_in_flight.set(header.id, packet_data);
 
         //if (log.timer.read() - entry.push_time < log.debug.delay)
         //    break;
 
         var entry = entries.push();
-        entry.batch.buffer = output_buffer;
-        entry.batch.header = @ptrCast(&entry.batch.buffer.data[0]);
+        entry.data = output_buffer;
         entry.push_time = timer.?.read();
         entry.address = peer.address;
     } else {
         log.info("  No packets in header", .{});
     }
-
-    //}
 
     if (entries.size > 0) {
         var entry = entries.peek();
@@ -826,7 +767,7 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
             const addr = if (entry.address != null) &entry.address.?.any else null;
             const len = if (entry.address != null) entry.address.?.getOsSockLen() else 0;
 
-            const data = entry.batch.buffer.data[0..entry.batch.buffer.top];
+            const data = entry.data;
             const bytes_sent = std.posix.sendto(host.fd, data, 0, addr, len) catch 0;
             if (bytes_sent != data.len) {
                 log.info("Tried to send {}, actually sent {}", .{ data.len, bytes_sent });
@@ -835,11 +776,7 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
             }
             std.debug.assert(bytes_sent == data.len);
 
-            // TODO(anjo): verbose
-            //log.info("sending packet {} with {} messsages in {} bytes", .{header.id, header.num_packets, output_buffer.top});
-
             total_bytes_sent += bytes_sent;
-            //net_stats.get(.NetOut).samples.push(total_bytes_sent);
         }
     } else {
         log.info("  No entries in queue", .{});
@@ -876,7 +813,7 @@ fn right_wrap_distance(a: u16, b: u16, len: u16) u16 {
 // acked.
 //
 pub fn process_ack(peer_index: PeerIndex, batch: headers.BatchHeader) void {
-    const peer = &peers.buffer[peer_index];
+    const peer = &peers.data[peer_index];
 
     // NOTE(anjo): If there's a really big delay between receiving packets
     // last_packed_id might have been overwritten and so be closer to
