@@ -16,6 +16,10 @@ pub const Profile = @import("profile.zig");
 pub const color = @import("color.zig");
 pub const serialize = @import("serialize.zig");
 pub const BoundedArray = @import("bounded_array.zig").BoundedArray;
+pub const Arena = @import("arena.zig").Arena;
+pub const ArenaIntrusiveList = @import("arena-intrusive-list.zig").ArenaIntrusiveList;
+pub const Pool = @import("pool.zig").Pool;
+pub const IntrusiveList = @import("intrusive-list.zig").IntrusiveList;
 
 const v2 = math.v2;
 const v3 = math.v3;
@@ -234,11 +238,11 @@ pub const Player = struct {
     in_editor: bool = false,
 
     // Position, velocity, and orientation
-    pos: v3,
-    vel: v3,
+    pos: v3 = .{ .x = 0, .y = 0, .z = 0 },
+    vel: v3 = .{ .x = 0, .y = 0, .z = 0 },
     dir: v3 = .{ .x = 1, .y = 0, .z = 0 },
-    yaw: f32,
-    pitch: f32,
+    yaw: f32 = 0,
+    pitch: f32 = 0,
 
     health: f32 = 100.0,
 
@@ -390,16 +394,17 @@ pub const WindowItem = union(enum) {
 };
 
 pub const WindowPersistentState = struct {
-    title: []const u8,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
+    x: f32 = 0,
+    y: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
     moving: bool = false,
+    initialized: bool = false,
 };
 
 pub const WindowState = struct {
     persistent: *WindowPersistentState,
+    title: []const u8,
     cursor_x: f32 = 0,
     cursor_y: f32 = 0,
     color: v3 = .{ .x = 60, .y = 0.5, .z = 0.5 },
@@ -413,28 +418,30 @@ pub const State = enum {
     console,
 };
 
+pub const Windows = enum(u8) {
+    pause,
+};
+const num_windows = @typeInfo(Windows).@"enum".fields.len;
+
 pub const Memory = struct {
     active_state: State = .gameplay,
 
     // System, things not relevant to gamestate
+    arena_frame: Arena = undefined,
+    arena_persistent: Arena = undefined,
+    animation_states: Pool = undefined,         // @CLIENT-ONLY
     pack: goosepack.Pack = undefined,
-    mem: MemoryAllocators = .{},
-    threadpool: std.Thread.Pool = undefined,
     log_memory: log.LogMemory = undefined,
-
-    // Animations
-    animation_states: std.ArrayList(AnimationState) = undefined,
 
     // game state
 
     players: BoundedArray(Player, max_players) = .{},
     entities: BoundedArray(Entity, 64) = .{},
 
-    // TODO(anjo): Client only
-    windows_persistent: std.ArrayList(WindowPersistentState) = undefined,
-    windows: std.ArrayList(WindowState) = undefined,
-
-    current_window: ?usize = null,
+    // @CLIENT-ONLY
+    windows_persistent: [num_windows]WindowPersistentState = [_]WindowPersistentState{.{}} ** num_windows,
+    windows: IntrusiveList(WindowState) = .{},
+    current_window: ?*WindowState = null,
     window_moving_offset: v2 = .{},
 
     // TODO: move to frame allocator

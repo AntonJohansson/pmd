@@ -118,6 +118,7 @@ pub fn build(b: *std.Build) !void {
         }),
         // TODO(anjo): temp
         .use_lld = false,
+        .use_llvm = true,
     });
     client.root_module.addObjectFile(b.path("third_party/glfw/build/src/libglfw3.a"));
     client.root_module.addIncludePath(b.path("third_party/glfw/include/GLFW"));
@@ -179,6 +180,8 @@ pub fn build(b: *std.Build) !void {
 }
 
 fn build_glfw(b: *std.Build) !void {
+    std.log.info("Building GLFW", .{});
+
     _ = try std.process.Child.run(.{
         .allocator = b.allocator,
         .argv = &[_][]const u8{ "mkdir", "-p", "third_party/glfw/build" },
@@ -188,6 +191,10 @@ fn build_glfw(b: *std.Build) !void {
         .allocator = b.allocator,
         .argv = &[_][]const u8{ "cmake", "-B", "third_party/glfw/build", "-S", "third_party/glfw", "-D", "GLFW_BUILD_X11=0", "-D", "GLFW_BUILD_WAYLAND=1" },
     });
+    if (res_cmake.stderr.len > 0) {
+        std.log.info("{s}", .{res_cmake.stderr});
+        return error.BuildFailed;
+    }
     std.log.info("{s}", .{res_cmake.stdout});
 
     const res_make = try std.process.Child.run(.{

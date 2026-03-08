@@ -2,6 +2,7 @@ const std = @import("std");
 const res = @import("res.zig");
 const build_options = @import("build_options");
 const disk = if (build_options.options.debug) @import("pack-disk") else struct {};
+const common = @import("common");
 
 const format_version = 1;
 const magic: u32 = 'g' | ('o' << 8) | ('s' << 16) | ('e' << 24);
@@ -69,26 +70,14 @@ const DiskError = error{
 
 pub const Pack = struct {
     header: Header = .{},
-    resources: ?std.ArrayList(Resource) = null,
-    resource_dirty: ?std.ArrayList(bool) = null,
-    entries: ?std.ArrayList(Entry) = null,
-    bytes: ?[]u8 = null,
+    resources: []Resource,
+    resource_dirty: []bool,
+    entries: []Entry,
+    bytes: []u8,
 };
 
-var frame: std.mem.Allocator = undefined;
-var persistent: std.mem.Allocator = undefined;
-pub fn setAllocators(_frame: std.mem.Allocator, _persistent: std.mem.Allocator) void {
-    frame = _frame;
-    persistent = _persistent;
-}
-
-pub fn init() Pack {
-    var pack = Pack{};
-    pack.resources = std.ArrayList(Resource){};
-    pack.entries = std.ArrayList(Entry){};
-    pack.resource_dirty = std.ArrayList(bool){};
-    return pack;
-}
+pub var arena_frame: *common.Arena = .{};
+pub var arena_persistent: *common.Arena = .{};
 
 pub fn load(pack: *Pack, bytes: []u8) !void {
     var offset: usize = 0;
@@ -101,10 +90,11 @@ pub fn load(pack: *Pack, bytes: []u8) !void {
     }
 
     if (pack.header.entry_table_count > 0) {
-        const entries = try pack.entries.?.addManyAsSlice(persistent, pack.header.entry_table_count);
-        try pack.resource_dirty.?.appendNTimes(persistent, false, pack.header.entry_table_count);
+        pack.entries = arena_persistent.alloc(Entry, pack.header.entry_table_count);
+        pack.resource_dirty = arena_persistent.alloc(bool, pack.header.entry_table_count);
+        @memset(pack.resource_dirty, false);
         offset = pack.header.entry_table_offset;
-        for (entries) |*e| {
+        for (pack.entries) |*e| {
             memoryReadType(@TypeOf(e.*), bytes, &offset, e);
         }
     }
@@ -113,7 +103,9 @@ pub fn load(pack: *Pack, bytes: []u8) !void {
 }
 
 pub fn saveToMemory(pack: *Pack) !StringBuilder {
-    var builder = StringBuilder.init(persistent);
+    var builder = StringBuilder{
+        .arena = &arena_persistent,
+    };
 
     const header_size = memorySizeOfType(pack.header);
     builder.base_offset = header_size;
@@ -312,11 +304,12 @@ pub fn entry_delete_child_tree(p: *Pack, start_id: usize) !void {
     // delete them as well, as to not leave entries behind that
     // originated from the same file.
     if (entry.children) |root_children| {
-        var child_queue = std.ArrayList(i32){};
-        defer child_queue.deinit(frame);
+        var child_queue = common.IntrusiveList(i32){
+            .arena = &arena_frame,
+        };
 
         for (root_children) |rc| {
-            try child_queue.append(frame, @intCast(root_id + @as(i64, @intCast(rc))));
+            child_queue.append(@intCast(root_id + @as(i64, @intCast(rc))));
         }
 
         while (child_queue.items.len > 0) {
@@ -325,7 +318,7 @@ pub fn entry_delete_child_tree(p: *Pack, start_id: usize) !void {
 
             if (child_entry.children) |entry_children| {
                 for (entry_children) |ec| {
-                    try child_queue.append(frame, @intCast(child_id.? + @as(i64, @intCast(ec))));
+                    child_queue.append(@intCast(child_id.? + @as(i64, @intCast(ec))));
                 }
             }
 
@@ -604,7 +597,7 @@ fn memoryReadType(comptime T: type, bytes: []u8, offset: *usize, value: anytype)
                 value.* = @as([*]ptr.child, @ptrCast(src_ptr))[0..len];
                 offset.* += len * @sizeOf(ptr.child);
             } else {
-                const slice = persistent.alloc(ptr.child, len) catch unreachable;
+                const slice = arena_persistent.alloc(ptr.child, len);
                 for (slice) |*v| {
                     memoryReadType(ptr.child, bytes, offset, v);
                 }

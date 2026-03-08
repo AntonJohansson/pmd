@@ -111,7 +111,7 @@ fn build_bind_for_primitive(prim: res.MeshPrimitive, material: res.Material) Mes
                 .sample_count = 1,
             };
             std.log.info("{} {} {}", .{ mat_image.width, mat_image.height, mat_image.channels });
-            desc.data.subimage[0][0] = sg.asRange(mat_image.pixels);
+            desc.data.mip_levels[0] = sg.asRange(mat_image.pixels);
             image = sg.makeImage(desc);
 
             smp = sg.makeSampler(.{
@@ -134,13 +134,13 @@ fn build_bind_for_primitive(prim: res.MeshPrimitive, material: res.Material) Mes
 }
 
 fn bind_for_mesh(model_id: u64, prim: res.MeshPrimitive, material: res.Material, mesh_index: u32, prim_index: u32) MeshBindings {
-    for (binds.buffer) |info| {
+    for (binds.data) |info| {
         if (info.id == model_id and info.mesh_index == mesh_index and info.prim_index == prim_index) {
             return info.mesh_binds;
         }
     }
     const mesh_binds = build_bind_for_primitive(prim, material);
-    binds.appendAssumeCapacity(.{ .id = model_id, .mesh_index = mesh_index, .prim_index = prim_index, .mesh_binds = mesh_binds });
+    binds.append(.{ .id = model_id, .mesh_index = mesh_index, .prim_index = prim_index, .mesh_binds = mesh_binds });
     return mesh_binds;
 }
 
@@ -414,10 +414,10 @@ fn deinit_bindings() void {
 }
 
 fn rebuild_bindings() void {
+    log.info("Rebuilding bindings", .{});
+
     if (bindings_initialized) {
         deinit_bindings();
-    } else {
-        bindings_initialized = true;
     }
 
     sampler_linear_clamped = sg.makeSampler(.{
@@ -453,6 +453,9 @@ fn rebuild_bindings() void {
         .data = sg.asRange(&cube_indices),
     });
     binding_cubemap.samplers[0] = sampler_linear_clamped;
+
+    bindings_initialized = true;
+    log.info("  done", .{});
 }
 
 // Shaders
@@ -467,7 +470,7 @@ var shd_voxelchunk: sg.Shader = undefined;
 var shd_texture: sg.Shader = undefined;
 
 fn shader_make_and_write_if_valid(shd: *sg.Shader, desc: sg.ShaderDesc) void {
-    std.log.info("Compiling shader {s}", .{desc.label});
+    log.info("Compiling shader {s}", .{desc.label});
     const tmp = sg.makeShader(desc);
     const state = sg.queryShaderState(tmp);
     const valid = state != .FAILED and state != .INVALID;
@@ -500,11 +503,10 @@ fn shaders_deinit() void {
 }
 
 fn rebuild_shaders() void {
+    log.info("Rebuilding shaders", .{});
     if (shaders_initialized) {
         // We instead deinit if makeShader succeeds
         //deinit_shaders();
-    } else {
-        shaders_initialized = true;
     }
 
     // 2d shader
@@ -528,11 +530,11 @@ fn rebuild_shaders() void {
         var shd_desc = shader_desc_from_pack("res/3d-pnt");
         specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertex3d, .VERTEX);
         specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragment3d, .FRAGMENT);
-        shd_desc.images[0] = .{ .stage = .FRAGMENT };
+        shd_desc.views[0] = .{ .texture = .{ .stage = .FRAGMENT } };
         shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
-        shd_desc.image_sampler_pairs[0] = .{
+        shd_desc.texture_sampler_pairs[0] = .{
             .stage = .FRAGMENT,
-            .image_slot = 0,
+            .view_slot = 0,
             .sampler_slot = 0,
             .glsl_name = "tex",
         };
@@ -544,9 +546,9 @@ fn rebuild_shaders() void {
         var shd_desc = shader_desc_from_pack("res/voxelchunk");
         //shd_desc.fs.images[0] = .{ .used = true }
         //shd_desc.fs.samplers[0] = .{ .used = true };
-        //shd_desc.fs.image_sampler_pairs[0] = .{
+        //shd_desc.fs.texture_sampler_pairs[0] = .{
         //    .used = true,
-        //    .image_slot = 0,
+        //    .view_slot = 0,
         //    .sampler_slot = 0,
         //    .glsl_name = "tex",
         //};
@@ -558,11 +560,11 @@ fn rebuild_shaders() void {
     // Postprocess shader
     {
         var shd_desc = shader_desc_from_pack("res/cc");
-        shd_desc.images[0] = .{ .stage = .FRAGMENT };
+        shd_desc.views[0] = .{ .texture = .{ .stage = .FRAGMENT } };
         shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
-        shd_desc.image_sampler_pairs[0] = .{
+        shd_desc.texture_sampler_pairs[0] = .{
             .stage = .FRAGMENT,
-            .image_slot = 0,
+            .view_slot = 0,
             .sampler_slot = 0,
             .glsl_name = "tex",
         };
@@ -573,11 +575,11 @@ fn rebuild_shaders() void {
         var shd_desc = shader_desc_from_pack("res/text");
         specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertexAtlas, .VERTEX);
         specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragmentAtlas, .FRAGMENT);
-        shd_desc.images[0] = .{ .stage = .FRAGMENT };
+        shd_desc.views[0] = .{ .texture = .{ .stage = .FRAGMENT } };
         shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
-        shd_desc.image_sampler_pairs[0] = .{
+        shd_desc.texture_sampler_pairs[0] = .{
             .stage = .FRAGMENT,
-            .image_slot = 0,
+            .view_slot = 0,
             .sampler_slot = 0,
             .glsl_name = "tex",
         };
@@ -609,11 +611,11 @@ fn rebuild_shaders() void {
             \\ }
         ;
 
-        shd_desc.images[0] = .{ .stage = .FRAGMENT };
+        shd_desc.views[0] = .{ .texture = .{ .stage = .FRAGMENT } };
         shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
-        shd_desc.image_sampler_pairs[0] = .{
+        shd_desc.texture_sampler_pairs[0] = .{
             .stage = .FRAGMENT,
-            .image_slot = 0,
+            .view_slot = 0,
             .sampler_slot = 0,
             .glsl_name = "tex",
         };
@@ -625,16 +627,20 @@ fn rebuild_shaders() void {
         var shd_desc = shader_desc_from_pack("res/cubemap");
         specify_uniforms(&shd_desc.uniform_blocks[0], UniformsVertex2d, .VERTEX);
         specify_uniforms(&shd_desc.uniform_blocks[1], UniformsFragment2d, .FRAGMENT);
-        shd_desc.images[0] = .{ .stage = .FRAGMENT, .image_type = .CUBE };
+        shd_desc.views[0] = .{ .texture = .{ .stage = .FRAGMENT } };
         shd_desc.samplers[0] = .{ .stage = .FRAGMENT };
-        shd_desc.image_sampler_pairs[0] = .{
+        shd_desc.texture_sampler_pairs[0] = .{
             .stage = .FRAGMENT,
-            .image_slot = 0,
+            .view_slot = 0,
             .sampler_slot = 0,
             .glsl_name = "cube",
         };
         shader_make_and_write_if_valid(&shd_cm, shd_desc);
     }
+
+    shaders_initialized = true;
+
+    log.info("  done", .{});
 }
 
 var images_initialized = false;
@@ -649,14 +655,14 @@ fn deinit_images() void {
 }
 
 fn rebuild_images(width: u32, height: u32) void {
+    log.info("Rebuilding images", .{});
+
     if (images_initialized) {
         deinit_images();
-    } else {
-        images_initialized = true;
     }
 
     image_3d_framebuffer = sg.makeImage(.{
-        .usage = .{ .render_attachment = true },
+        .usage = .{ .color_attachment = true },
         .width = @intCast(width),
         .height = @intCast(height),
         .pixel_format = .RGBA8,
@@ -664,7 +670,10 @@ fn rebuild_images(width: u32, height: u32) void {
     });
 
     image_3d_depthbuffer = sg.makeImage(.{
-        .usage = .{ .render_attachment = true },
+        .usage = .{
+            .color_attachment = true,
+            .depth_stencil_attachment = true,
+        },
         .width = @intCast(width),
         .height = @intCast(height),
         .pixel_format = .DEPTH,
@@ -672,12 +681,15 @@ fn rebuild_images(width: u32, height: u32) void {
     });
 
     image_2d_framebuffer = sg.makeImage(.{
-        .usage = .{ .render_attachment = true },
+        .usage = .{ .color_attachment = true },
         .width = @intCast(width),
         .height = @intCast(height),
         .pixel_format = .RGBA8,
         .sample_count = 1,
     });
+
+    images_initialized = true;
+    log.info("  done", .{});
 }
 
 var passes_initialized = false;
@@ -687,15 +699,13 @@ var pass_load_clear: sg.Pass = .{};
 var pass_load_swapchain: sg.Pass = .{};
 
 fn deinit_passes() void {
-    sg.destroyAttachments(pass_load_color_depth.attachments);
-    sg.destroyAttachments(pass_load_clear.attachments);
 }
 
 fn rebuild_passes(width: u32, height: u32) void {
+    log.info("Rebuilding passes", .{});
+
     if (passes_initialized) {
         deinit_passes();
-    } else {
-        passes_initialized = true;
     }
 
     pass_load.action.colors[0] = .{
@@ -706,10 +716,12 @@ fn rebuild_passes(width: u32, height: u32) void {
         pass_load_color_depth.action.colors[0] = .{
             .load_action = .LOAD,
         };
-        var attachments_desc = sg.AttachmentsDesc{};
-        attachments_desc.colors[0].image = image_3d_framebuffer;
-        attachments_desc.depth_stencil.image = image_3d_depthbuffer;
-        pass_load_color_depth.attachments = sg.makeAttachments(attachments_desc);
+        pass_load_color_depth.attachments.colors[0] = sg.makeView(.{
+            .color_attachment = .{ .image = image_3d_framebuffer },
+        });
+        pass_load_color_depth.attachments.depth_stencil = sg.makeView(.{
+            .depth_stencil_attachment = .{ .image = image_3d_depthbuffer },
+        });
     }
 
     {
@@ -717,9 +729,9 @@ fn rebuild_passes(width: u32, height: u32) void {
             .load_action = .LOAD,
             .clear_value = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
         };
-        var attachments_desc = sg.AttachmentsDesc{};
-        attachments_desc.colors[0].image = image_2d_framebuffer;
-        pass_load_clear.attachments = sg.makeAttachments(attachments_desc);
+        pass_load_clear.attachments.colors[0] = sg.makeView(.{
+            .color_attachment = .{ .image = image_2d_framebuffer },
+        });
     }
 
     {
@@ -729,6 +741,10 @@ fn rebuild_passes(width: u32, height: u32) void {
         pass_load_swapchain.swapchain.width = @intCast(width);
         pass_load_swapchain.swapchain.height = @intCast(height);
     }
+
+    passes_initialized = true;
+
+    log.info("  done", .{});
 }
 
 var pipelines_initialized = false;
@@ -778,17 +794,16 @@ fn deinit_pipelines() void {
 }
 
 fn rebuild_pipelines() void {
+    log.info("Rebuilding pipelines", .{});
     if (pipelines_initialized) {
         deinit_pipelines();
-    } else {
-        pipelines_initialized = true;
     }
 
     // Text pipeline
     {
         font = goosepack.resource_lookup(pack, "res/fonts/MononokiNerdFontMono-Regular").?.font;
         var data = sg.ImageData{};
-        data.subimage[0][0] = .{ .ptr = font.pixels.ptr, .size = font.pixels.len };
+        data.mip_levels[0] = .{ .ptr = font.pixels.ptr, .size = font.pixels.len };
         image_font_atlas = sg.makeImage(.{
             .width = font.width,
             .height = font.height,
@@ -971,9 +986,7 @@ fn rebuild_pipelines() void {
             .height = @intCast(cubemap.height),
             .pixel_format = .RGBA8,
         };
-        for (0..@intFromEnum(sg.CubeFace.NUM)) |i| {
-            img_desc.data.subimage[i][0] = sg.asRange(cubemap.faceSlice(@intCast(i)));
-        }
+        img_desc.data.mip_levels[0] = sg.asRange(cubemap.bytes);
         image_cubemap = sg.allocImage();
         sg.initImage(image_cubemap, img_desc);
     }
@@ -1023,6 +1036,10 @@ fn rebuild_pipelines() void {
         pip_desc.layout.attrs[1].format = .FLOAT2;
         pipeline_overlay_2d = sg.makePipeline(pip_desc);
     }
+
+    pipelines_initialized = true;
+
+    log.info("  done", .{});
 }
 
 const ChunkRenderInfo = struct {
@@ -1168,7 +1185,9 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     sg.beginPass(pass_load_color_depth);
                     sg.applyViewport(view_width * @as(i32, @intCast(col_index)), view_height * @as(i32, @intCast(row_index)), view_width, view_height, true);
                     sg.applyPipeline(pipeline_cubemap);
-                    binding_cubemap.images[0] = image_cubemap;
+                    binding_cubemap.views[0] = sg.makeView(.{
+                        .texture = .{.image = image_cubemap},
+                    });
                     sg.applyBindings(binding_cubemap);
                     const scale = 80000.0;
                     const model = m4.modelWithRotations(.{}, .{ .x = scale, .y = scale, .z = scale }, .{ .x = std.math.pi / 2.0, .y = 0.0, .z = 0 });
@@ -1223,7 +1242,9 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 const x: f32 = 2.0 * text.pos.x - 1.0;
                 const y: f32 = 2.0 * text.pos.y - 1.0;
 
-                binding_textured_rectangle.images[0] = image_font_atlas;
+                binding_textured_rectangle.views[0] = sg.makeView(.{
+                    .texture = .{.image = image_font_atlas},
+                });
                 sg.applyPipeline(pipeline_text);
                 sg.applyBindings(binding_textured_rectangle);
 
@@ -1295,7 +1316,9 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     }
                     var mesh_binds = bind_for_mesh(cmd.model_id, p, material, cmd.mesh_index, @intCast(prim_index));
                     if (material.image != null) {
-                        mesh_binds.bind.images[0] = mesh_binds.image;
+                        mesh_binds.bind.views[0] = sg.makeView(.{
+                            .texture = .{.image = mesh_binds.image},
+                        });
                         mesh_binds.bind.samplers[0] = mesh_binds.sampler;
                     }
                     sg.applyPipeline(mesh_binds.pip);
@@ -1558,7 +1581,9 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
     }
 
     {
-        binding_textured_rectangle.images[0] = image_3d_framebuffer;
+        binding_textured_rectangle.views[0] = sg.makeView(.{
+            .color_attachment = .{.image = image_3d_framebuffer},
+        });
         sg.beginPass(pass_load_swapchain);
         sg.applyPipeline(pipeline_postprocess);
         sg.applyBindings(binding_textured_rectangle);
@@ -1569,7 +1594,9 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
     // TODO(anjo): Move 2d to separate buffer and process here, get rid of this
     // shader
     {
-        binding_textured_rectangle.images[0] = image_2d_framebuffer;
+        binding_textured_rectangle.views[0] = sg.makeView(.{
+            .color_attachment = .{.image = image_2d_framebuffer},
+        });
         sg.beginPass(pass_load_swapchain);
         sg.applyPipeline(pipeline_overlay_2d);
         sg.applyBindings(binding_textured_rectangle);

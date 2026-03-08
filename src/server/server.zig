@@ -176,10 +176,12 @@ pub fn main() !void {
                                 const message: *align(1) packet.PlayerJoinRequest = @ptrCast(e.data);
                                 _ = message;
 
-                                const player = Player{};
+                                const player = Player{
+                                    .id = common.newEntityId(),
+                                    .pos = .{.x = 0, .y = 0},
+                                };
 
                                 var peer = &peers[e.peer_index];
-                                player.id = common.newEntityId();
                                 peer.ids.append(player.id);
                                 memory.players.append(player);
 
@@ -191,14 +193,14 @@ pub fn main() !void {
                                 });
 
                                 // Add to respawn queue
-                                memory.respawns.appendAssumeCapacity(.{
+                                memory.respawns.append(.{
                                     .id = player.id,
                                     .time_left = 1.0,
                                 });
 
                                 // Send peer joined packet to all other clients
                                 net.pushMessageToAllOtherPeers(e.peer_index, packet.PeerJoined{
-                                    .player = player.*,
+                                    .player = player,
                                 });
 
                                 // Send peer joined to packed to new connection, informing of all other clients
@@ -252,7 +254,7 @@ pub fn main() !void {
                                 if (common.findEntityById(memory.entities.slice(), message.entity.id)) |entity| {
                                     entity.* = message.entity;
                                 } else {
-                                    memory.entities.appendAssumeCapacity(message.entity);
+                                    memory.entities.append(message.entity);
                                 }
                                 net.pushMessageToAllOtherPeers(e.peer_index, message.*);
                             },
@@ -277,81 +279,81 @@ pub fn main() !void {
                 });
             }
 
-            for (memory.new_spawns.constSlice()) |p| {
+            for (memory.new_spawns.slice()) |p| {
                 net.pushMessageToAllPeers(packet.SpawnPlayer{
                     .player = p.*,
                 });
             }
-            memory.new_spawns.resize(0) catch unreachable;
+            memory.new_spawns.clear();
 
-            if (memory.new_damage.len > 0) {
+            if (memory.new_damage.used > 0) {
                 var p = packet.NewDamage{};
-                @memcpy(p.new_damage[0..memory.new_damage.len], memory.new_damage.constSlice());
-                p.num_damage = @intCast(memory.new_damage.len);
-                memory.new_damage.resize(0) catch unreachable;
+                @memcpy(p.new_damage[0..memory.new_damage.used], memory.new_damage.slice());
+                p.num_damage = @intCast(memory.new_damage.used);
+                memory.new_damage.clear();
                 net.pushMessageToAllPeers(p);
             }
 
-            if (memory.new_sounds.len > 0) {
+            if (memory.new_sounds.used > 0) {
                 var p = packet.NewSounds{};
-                @memcpy(p.new_sounds[0..memory.new_sounds.len], memory.new_sounds.constSlice());
-                p.num_sounds = @intCast(memory.new_sounds.len);
-                memory.new_sounds.resize(0) catch unreachable;
+                @memcpy(p.new_sounds[0..memory.new_sounds.used], memory.new_sounds.slice());
+                p.num_sounds = @intCast(memory.new_sounds.used);
+                memory.new_sounds.clear();
                 net.pushMessageToAllPeers(p);
             }
 
-            if (memory.new_hitscans.len > 0) {
-                for (memory.new_hitscans.constSlice()) |h| {
-                    memory.hitscans.appendAssumeCapacity(h);
+            if (memory.new_hitscans.used > 0) {
+                for (memory.new_hitscans.slice()) |h| {
+                    memory.hitscans.append(h);
                 }
 
                 var p = packet.NewHitscans{};
-                @memcpy(p.new_hitscans[0..memory.new_hitscans.len], memory.new_hitscans.constSlice());
-                p.num_hitscans = @intCast(memory.new_hitscans.len);
-                memory.new_hitscans.resize(0) catch unreachable;
+                @memcpy(p.new_hitscans[0..memory.new_hitscans.used], memory.new_hitscans.slice());
+                p.num_hitscans = @intCast(memory.new_hitscans.used);
+                memory.new_hitscans.clear();
                 net.pushMessageToAllPeers(p);
             }
 
-            if (memory.new_nades.len > 0) {
-                for (memory.new_nades.constSlice()) |n| {
-                    memory.nades.appendAssumeCapacity(n);
+            if (memory.new_nades.used > 0) {
+                for (memory.new_nades.slice()) |n| {
+                    memory.nades.append(n);
                 }
 
                 var p = packet.NewNades{};
-                @memcpy(p.new_nades[0..memory.new_nades.len], memory.new_nades.constSlice());
-                p.num_nades = @intCast(memory.new_nades.len);
-                memory.new_nades.resize(0) catch unreachable;
+                @memcpy(p.new_nades[0..memory.new_nades.used], memory.new_nades.slice());
+                p.num_nades = @intCast(memory.new_nades.used);
+                memory.new_nades.clear();
                 net.pushMessageToAllPeers(p);
             }
 
-            if (memory.new_explosions.len > 0) {
-                for (memory.new_explosions.constSlice()) |e| {
-                    memory.explosions.appendAssumeCapacity(e);
+            if (memory.new_explosions.used > 0) {
+                for (memory.new_explosions.slice()) |e| {
+                    memory.explosions.append(e);
                 }
 
                 var p = packet.NewExplosions{};
-                @memcpy(p.new_explosions[0..memory.new_explosions.len], memory.new_explosions.constSlice());
-                p.num_explosions = @intCast(memory.new_explosions.len);
-                memory.explosions.resize(0) catch unreachable;
+                @memcpy(p.new_explosions[0..memory.new_explosions.used], memory.new_explosions.slice());
+                p.num_explosions = @intCast(memory.new_explosions.used);
+                memory.explosions.clear();
                 net.pushMessageToAllPeers(p);
             }
 
-            if (memory.new_kills.len > 0) {
-                for (memory.new_kills.constSlice()) |k| {
+            if (memory.new_kills.used > 0) {
+                for (memory.new_kills.slice()) |k| {
                     net.pushMessageToAllPeers(packet.Kill{
                         .from = k.from,
                         .to = k.to,
                     });
                 }
-                memory.new_kills.resize(0) catch unreachable;
+                memory.new_kills.clear();
             }
 
             //
             // Queue player updates
             //
             net.pushMessageToAllPeers(packet.ServerPlayerUpdate{
-                .players = memory.players.buffer,
-                .num_players = memory.players.len,
+                .players = memory.players.data,
+                .num_players = memory.players.used,
             });
 
             //
@@ -382,7 +384,7 @@ pub fn main() !void {
                 const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(frame_time));
                 if (time_left > std.time.us_per_s) {
                     // if we have at least 1us left, sleep
-                    std.time.sleep(@intCast(time_left));
+                    std.Thread.sleep(@intCast(time_left));
                 }
 
                 // spin for the remaining time

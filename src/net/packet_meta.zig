@@ -51,14 +51,14 @@ pub fn mapKindToMessage(comptime kind: MessageKind) type {
     return @field(packet, @tagName(kind));
 }
 
-pub fn decodeKind(allocator: std.mem.Allocator, data: []u8, offset: *usize, kind: MessageKind) ![]u8 {
+pub fn decode_kind(arena: *common.Arena, data: []u8, offset: *usize, kind: MessageKind) []u8 {
     switch (kind) {
         inline else => |k| {
             const size = getMessageSize(k);
-            const output = try allocator.alloc(u8, size);
+            const output = arena.alloc(u8, size);
             const T = mapKindToMessage(k);
             var message_data: T = undefined;
-            common.serialize.memory_read_type(allocator, T, data, offset, &message_data);
+            common.serialize.memory_read_type(arena, T, data, offset, &message_data);
             @memcpy(output, @as([*]u8, @ptrCast(&message_data))[0..size]);
             return output;
         },

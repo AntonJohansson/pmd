@@ -28,6 +28,8 @@ const ChunkMap = common.ChunkMap;
 const VoxelFaceArray = MultiThreadedArray(primitive.VoxelTransform, 128);
 
 pub fn map_init(map: *Map, allocator: std.mem.Allocator) !void {
+    const tset = try allocator.alloc(u8, 10);
+    defer allocator.free(tset);
     map.* = Map{
         .chunks = ChunkMap.init(allocator),
     };

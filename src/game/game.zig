@@ -72,12 +72,27 @@ var sniper_trigger_animation: common.res.Animation = undefined;
 
 var weapon_model: m4 = undefined;
 
+fn testtt(memory: *Memory) void {
+    const out = memory.testfn(123);
+    std.log.info("testfn ret {}", .{out});
+}
+
 export fn init(memory: *Memory) bool {
+
+
+    testtt(memory);
+
+    std.log.info("game ptr: {*}", .{memory});
+    std.log.info("vtable ptr: {*}", .{&memory.mem.persistent.ptr});
+    const etst = memory.mem.frame.alloc(u8, 11) catch return false;
+    std.log.info("do i get here", .{});
+    defer memory.mem.persistent.free(etst);
     voxels.map_init(&map, memory.mem.persistent) catch return false;
     const chunk = voxels.add_chunk(&map, .{ 1, 0, 0 }) catch return false;
     voxels.chunk_build_terrain(memory, chunk);
     voxels.chunk_build_faces(memory, chunk);
     goosepack.setAllocators(memory.mem.frame, memory.mem.persistent);
+    
 
     common.sniper.tree = from_model(memory, "res/models/weapons/sniper v2", &.{
         .{ .id = common.res.id("res/models/weapons/sniper bolt"), .index = &common.sniper.id_bolt },
@@ -532,44 +547,34 @@ fn readEntitiesFromDisk(memory: *common.Memory) !void {
     }
 }
 
-fn pushWindow(memory: *Memory, cmd: *draw_api.CommandBuffer, title: []const u8, x: f32, y: f32) bool {
-    var persistent: ?*common.WindowPersistentState = null;
-    for (memory.windows_persistent.items) |*p| {
-        if (std.mem.eql(u8, p.title, title)) {
-            persistent = p;
-            //win.children = std.ArrayList(common.WindowItem).init(memory.mem.frame);
-            //memory.current_window = i;
-        }
+fn pushWindow(memory: *Memory, cmd: *draw_api.CommandBuffer, window: common.Window, title: []const u8, x: f32, y: f32) bool {
+    const persistent = &memory.windows_persistent[@intFromEnum(window)]; 
+    if (!persistent.initialized) {
+        @branchHint(.unlikely);
+        persistent.x = x;
+        persistent.y = y;
+        persistent.w = 0.2;
+        persistent.h = 0.2;
+        persistent.initialized = true;
     }
 
-    if (persistent == null) {
-        persistent = memory.windows_persistent.addOne(memory.mem.persistent) catch unreachable;
-        persistent.?.* = .{
-            .title = title,
-            .x = x,
-            .y = y,
-            .w = 0.20,
-            .h = 0.20,
-        };
-    }
-
-    const window = memory.windows.addOne(memory.mem.frame) catch unreachable;
-    window.* = .{
-        .persistent = persistent.?,
+    const w = memory.windows.alloc();
+    w.* = .{
+        .persistent = persistent,
+        .title = title,
         .cursor_x = 0,
         .cursor_y = 1,
     };
 
-    memory.current_window = memory.windows.items.len - 1;
+    memory.current_window = w;
 
-    drawWindow(cmd, window);
+    draw_window(cmd, w);
 
     return true;
 }
 
 fn pushText(memory: *Memory, cmd: *draw_api.CommandBuffer, text: []const u8) void {
-    const index = memory.current_window.?;
-    const window = &memory.windows.items[index];
+    const window = memory.current_window;
 
     var text_prim = primitive.Text{
         .pos = .{
@@ -687,7 +692,7 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
                         }
                     }
                     if (!inserted) {
-                        arr.append(memory.mem.persistent, state) catch unreachable;
+                        arr.append(memory.mem.frame, state) catch unreachable;
                     }
                 } else {
                     var arr = std.ArrayList(*common.AnimationState){};
@@ -1349,7 +1354,7 @@ fn raycastAgainstEntities(memory: *Memory, pos: v3, dir: v3, skip_id: ?common.En
 //}
 
 const top_bar_height = 0.01;
-fn drawWindow(cmd: *draw_api.CommandBuffer, window: *common.WindowState) void {
+fn draw_window(cmd: *draw_api.CommandBuffer, window: *common.WindowState) void {
     //var parent = if (window.parent) |p| &windows.items[p] else null;
     //var w = if (parent) |p| p.w else 1;
     //_ = w;
@@ -1640,30 +1645,33 @@ export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer,
         memory.cursor_pos.y = std.math.clamp(memory.cursor_pos.y, 0, 1);
 
         // check window collisions
-        for (memory.windows.items) |*win| {
-            if (memory.cursor_pos.x >= win.persistent.x and
-                memory.cursor_pos.y >= win.persistent.y + win.persistent.h - top_bar_height and
-                memory.cursor_pos.x <= win.persistent.x + win.persistent.w and
-                memory.cursor_pos.y <= win.persistent.y + win.persistent.h)
+        var maybew = memory.windows.first;
+        while (maybew) |w| {
+            if (memory.cursor_pos.x >= w.persistent.x and
+                memory.cursor_pos.y >= w.persistent.y + w.persistent.h - top_bar_height and
+                memory.cursor_pos.x <= w.persistent.x + w.persistent.w and
+                memory.cursor_pos.y <= w.persistent.y + w.persistent.h)
             {
-                win.hover = true;
+                w.hover = true;
             } else {
-                win.hover = false;
+                w.hover = false;
             }
 
             if (input.isset(.Interact)) {
-                if (win.persistent.moving) {
-                    win.persistent.moving = false;
-                } else if (win.hover) {
-                    memory.window_moving_offset = v2.sub(.{ .x = win.persistent.x, .y = win.persistent.y }, memory.cursor_pos);
-                    win.persistent.moving = true;
+                if (w.persistent.moving) {
+                    w.persistent.moving = false;
+                } else if (w.hover) {
+                    memory.window_moving_offset = v2.sub(.{ .x = w.persistent.x, .y = w.persistent.y }, memory.cursor_pos);
+                    w.persistent.moving = true;
                 }
             }
 
-            if (win.persistent.moving) {
-                win.persistent.x = memory.cursor_pos.x + memory.window_moving_offset.x;
-                win.persistent.y = memory.cursor_pos.y + memory.window_moving_offset.y;
+            if (w.persistent.moving) {
+                w.persistent.x = memory.cursor_pos.x + memory.window_moving_offset.x;
+                w.persistent.y = memory.cursor_pos.y + memory.window_moving_offset.y;
             }
+
+            maybew = w.next;
         }
 
         //for (memory.windows.?.items) |*win| {

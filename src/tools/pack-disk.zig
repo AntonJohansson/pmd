@@ -109,7 +109,7 @@ pub fn read_file_to_memory_zero_terminate(path: []const u8, allocator: std.mem.A
     var file_reader = file.reader(&buffer);
     const reader = &file_reader.interface;
     try reader.readSliceAll(retbuf[0 .. size - 1]);
-    retbuf[retbuf.len] = 0;
+    retbuf[retbuf.len-1] = 0;
     return retbuf;
 }
 

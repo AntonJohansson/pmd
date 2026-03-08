@@ -21,6 +21,9 @@ const draw_api = common.draw_api;
 const draw = @import("draw.zig");
 const disk = if (build_options.options.debug) @import("pack-disk") else struct {};
 
+const Arena = common.Arena;
+const Pool = common.Pool;
+
 const cl = @import("command_meta.zig");
 
 const math = common.math;
@@ -39,6 +42,11 @@ const packet_meta = net.packet_meta;
 const sokol = @import("sokol");
 const sa = sokol.audio;
 const slog = sokol.log;
+
+fn testfn(a: i32) i32 {
+    std.log.info("testfn {}", .{a});
+    return 2 * a;
+}
 
 const c = @cImport({
     @cInclude("glfw3.h");
@@ -346,9 +354,9 @@ fn charCallback(window: ?*c.GLFWwindow, codepoint: c_uint) callconv(.c) void {
         return;
     }
 
-    if (memory.console_input.used < memory.console_input.buffer.len - 1) {
-        memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
-        memory.console_input.buffer[memory.console_input.used] = 0;
+    if (memory.console_input.used < memory.console_input.data.len - 1) {
+        memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char)))));
+        memory.console_input.data[memory.console_input.used] = 0;
         memory.console_input_index += 1;
     }
 }
@@ -377,22 +385,29 @@ pub fn connect(ip: []const u8, port: u16) void {
     net.pushMessage(server_index.?, packet.ConnectionRequest{ .client_salt = crand.int(u64) });
 }
 
-pub fn main() !void {
-    // Setup the allocators we'll be using
-    // 1. GeneralPurposeAllocator for persitent data that will exist accross frames
-    //    and has to be freed manually.
-    // 2. ArenaAllocator for temporary data that during a frame
-    var general_purpose_allocator: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    const page_size = std.heap.page_size_min;
-    var fixed_allocator = std.heap.FixedBufferAllocator.init(try std.heap.page_allocator.alignedAlloc(u8, null, 128000 * page_size));
-    defer std.heap.page_allocator.free(fixed_allocator.buffer);
-    //var fixed_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    memory.mem.frame = fixed_allocator.threadSafeAllocator();
-    memory.mem.persistent = general_purpose_allocator.allocator();
+// C calling convention necessary since this function might
+// be called across a library boundary.
+const page_size = std.heap.page_size_min;
+fn page_alloc(num_pages: usize) callconv(.c) []u8 {
+    return std.heap.page_allocator.alignedAlloc(u8, null, num_pages * page_size) catch unreachable;
+}
 
-    memory.windows_persistent = std.ArrayList(common.WindowPersistentState){};
-    memory.animation_states = std.ArrayList(common.AnimationState){};
-    memory.log_memory = try common.log.LogMemory.init(memory.mem.persistent, memory.mem.frame, null, false);
+const KiB = 1024;
+const MiB = 1024 * KiB;
+const GiB = 1024 * MiB;
+
+pub fn main() !void {
+    memory.arena_frame = Arena{ .memory = page_alloc(1024) };
+    memory.arena_persistent = Arena{ .memory = page_alloc(1) };
+    memory.animation_states = Arena{ .memory = page_alloc(1) };
+    const arena_log_persistent = Arena{ .memory = page_alloc(1) };
+    const arena_log_messages = Pool{ .arena = .{ .memory = page_alloc(1) } };
+    const arena_res = Arena{ .memory = page_alloc(@divTrunc(1*GiB, page_size)) };
+
+    memory.windows.arena = memory.arena_frame;
+
+    const mirror_to_stdio = true;
+    memory.log_memory = try common.log.LogMemory.init(&memory.frame, arena_log_persistent, arena_log_messages, null, mirror_to_stdio);
     log = memory.log_memory.group_log(.general);
 
     if (build_options.options.debug) {
@@ -400,19 +415,17 @@ pub fn main() !void {
         disk.persistent = memory.mem.persistent;
     }
 
-    memory.profile.init(memory.mem.persistent);
+    const num_cpus = std.Thread.getCpuCount() catch 1;
+
+    memory.profile.init(&memory.arena_persistent, num_cpus);
     defer memory.profile.deinit();
 
-    const num_cpus = std.Thread.getCpuCount() catch 1;
-    try memory.threadpool.init(.{
-        .allocator = memory.mem.persistent,
-        .n_jobs = @intCast(num_cpus - 1),
-    });
-    defer memory.threadpool.deinit();
-
-    net.mem = memory.mem;
-    res.mem = memory.mem;
+    net.arena_frame = &memory.arena_frame;
+    net.arena_persistent = common.ArenaIntrusiveList{
+        .arena = &memory.arena_persistent,
+    };
     net.init(&memory.log_memory);
+    res.arena = arena_res;
 
     //
     // Load pack
@@ -420,17 +433,10 @@ pub fn main() !void {
 
     goosepack.setAllocators(memory.mem.frame, memory.mem.persistent);
 
-    var pack_in_memory: ?[]u8 = undefined;
-    defer {
-        if (pack_in_memory) |bytes| memory.mem.persistent.free(bytes);
-    }
-
-    {
-        pack_in_memory = res.readFileToMemory(memory.mem.persistent, "res.gp") catch null;
-        memory.pack = goosepack.init();
-        if (pack_in_memory) |bytes| {
-            try goosepack.load(&memory.pack, bytes);
-        }
+    var pack_in_memory: ?[]u8 = res.read_file_to_memory("res.gp") catch null;
+    memory.pack = goosepack.init();
+    if (pack_in_memory) |bytes| {
+        try goosepack.load(&memory.pack, bytes);
     }
 
     //
@@ -514,6 +520,21 @@ pub fn main() !void {
     try module.open(memory.mem.persistent);
     defer module.close();
 
+    memory.testfn = testfn;
+
+    {
+        const etst = memory.mem.frame.alloc(u8, 11) catch unreachable;
+        std.log.info("{any}", .{etst});
+    }
+    {
+        const etst = memory.mem.frame.alloc(u8, 11) catch unreachable;
+        std.log.info("{any}", .{etst});
+    }
+    {
+        const etst = memory.mem.frame.alloc(u8, 11) catch unreachable;
+        std.log.info("{any}", .{etst});
+    }
+    std.log.info("vtable ptr: {*}", .{&memory.mem.persistent.ptr});
     if (!module.function_table.init(&memory)) {
         log.err("Failed to initialize module: {s}", .{module.name});
         return;
@@ -548,7 +569,7 @@ pub fn main() !void {
 
     var connected = false;
 
-    @memset(&memory.console_input.buffer, 0);
+    @memset(&memory.console_input.data, 0);
 
     var old_mouse_pos: v2 = .{ .x = 0.0, .y = 0.0 };
 
@@ -560,8 +581,8 @@ pub fn main() !void {
 
         log.info("---- Starting tick {}", .{tick});
 
-        memory.windows = std.ArrayList(common.WindowState).init(memory.mem.frame);
-        memory.map_mods = std.ArrayList(common.MapModify).init(memory.mem.frame);
+        memory.windows = std.ArrayList(common.WindowState){};
+        memory.map_mods = std.ArrayList(common.MapModify){};
 
         {
             scroll_delta = 0.0;
@@ -605,7 +626,7 @@ pub fn main() !void {
                             for (local_players.slice()) |*lp| {
                                 lp.id = null;
                             }
-                            memory.players.len = 0;
+                            memory.players.used = 0;
                             log.info("connected", .{});
                             connected = true;
                         },
@@ -646,14 +667,15 @@ pub fn main() !void {
                                 },
                                 .PlayerJoinResponse => {
                                     const message: *align(1) packet.PlayerJoinResponse = @ptrCast(e.data);
-                                    const player = try memory.players.addOne();
-                                    player.id = message.id;
+                                    memory.players.append(.{
+                                        .id = message.id,
+                                    });
 
                                     var local_player_id: ?usize = null;
                                     for (local_players.slice(), 0..) |*lp, i| {
                                         if (lp.id == null) {
                                             local_player_id = i;
-                                            lp.id = player.id;
+                                            lp.id = message.id;
                                             break;
                                         }
                                     }
@@ -661,24 +683,23 @@ pub fn main() !void {
                                     std.debug.assert(local_player_id != null);
                                     log.info("Player joined", .{});
                                     log.info("  local player id: {}", .{local_player_id.?});
-                                    log.info("  game player id: {}", .{player.id});
+                                    log.info("  game player id: {}", .{message.id});
                                 },
                                 .PeerJoined => {
                                     const message: *align(1) packet.PeerJoined = @ptrCast(e.data);
-                                    const player = try memory.players.addOne();
-                                    player.* = message.player;
-                                    log.info("Player connected {}", .{player.id});
+                                    memory.players.append(message.player);
+                                    log.info("Player connected {}", .{message.player.id});
                                 },
                                 .PeerDisconnected => {
                                     const message: *align(1) packet.PeerDisconnected = @ptrCast(e.data);
                                     const index = common.findIndexById(memory.players.slice(), message.id);
                                     if (index != null)
-                                        _ = memory.players.swapRemove(index.?);
+                                        _ = memory.players.swap_remove(index.?);
                                     log.info("Player {} disconnected", .{message.id});
                                 },
                                 .SpawnPlayer => {
                                     const message: *align(1) packet.SpawnPlayer = @ptrCast(e.data);
-                                    const player = common.findPlayerById(&memory.players.buffer, message.player.id) orelse unreachable;
+                                    const player = common.findPlayerById(&memory.players.data, message.player.id) orelse unreachable;
                                     player.* = message.player;
                                     log.info("Spawning", .{});
                                 },
@@ -686,7 +707,7 @@ pub fn main() !void {
                                     const message: *align(1) packet.PlayerUpdateAuth = @ptrCast(e.data);
                                     const local_player = findLocalPlayerById(local_players.slice(), message.player.id);
                                     if (local_player != null) {
-                                        const player = common.findPlayerById(&memory.players.buffer, message.player.id);
+                                        const player = common.findPlayerById(&memory.players.data, message.player.id);
 
                                         var auth_player = message.player;
                                         var offset = @as(i64, @intCast(message.tick)) - @as(i64, @intCast(tick)) + 2;
@@ -713,8 +734,11 @@ pub fn main() !void {
                                     for (message.players[0..message.num_players]) |player| {
                                         if (findLocalPlayerById(local_players.slice(), player.id) != null)
                                             continue;
-                                        const current_player = common.findPlayerById(&memory.players.buffer, player.id) orelse try memory.players.addOne();
-                                        current_player.* = player;
+                                        if (common.findPlayerById(&memory.players.data, player.id)) |p| {
+                                            p.* = player;
+                                        } else {
+                                            memory.players.append(player);
+                                        }
                                     }
                                 },
                                 .NewSounds => {
@@ -727,7 +751,7 @@ pub fn main() !void {
                                         // updated locally
                                         if (s.type != .death) {
                                             var local = false;
-                                            for (local_players.constSlice()) |lp| {
+                                            for (local_players.slice()) |lp| {
                                                 if (lp.id == s.id_from) {
                                                     local = true;
                                                     break;
@@ -736,14 +760,14 @@ pub fn main() !void {
                                             if (local)
                                                 continue;
                                         }
-                                        memory.new_sounds.appendAssumeCapacity(s);
+                                        memory.new_sounds.append(s);
                                     }
                                 },
                                 .NewHitscans => {
                                     const message: *align(1) packet.NewHitscans = @ptrCast(e.data);
                                     for (message.new_hitscans[0..message.num_hitscans]) |h| {
                                         var local = false;
-                                        for (local_players.constSlice()) |lp| {
+                                        for (local_players.slice()) |lp| {
                                             if (lp.id == h.id_from) {
                                                 local = true;
                                                 break;
@@ -751,7 +775,7 @@ pub fn main() !void {
                                         }
                                         if (local)
                                             continue;
-                                        memory.new_hitscans.appendAssumeCapacity(h);
+                                        memory.new_hitscans.append(h);
                                     }
                                 },
                                 .NewExplosions => {
@@ -770,7 +794,7 @@ pub fn main() !void {
                                     std.log.info("received map mods from server", .{});
                                     const message: *align(1) packet.NewMapMods = @ptrCast(e.data);
                                     for (message.mods[0..message.num_mods]) |m| {
-                                        memory.map_mods.append(m) catch unreachable;
+                                        memory.map_mods.append(memory.mem.frame, m) catch unreachable;
                                     }
                                 },
                                 .Kill => {
@@ -785,7 +809,7 @@ pub fn main() !void {
                                     if (common.findEntityById(memory.entities.slice(), message.entity.id)) |entity| {
                                         entity.* = message.entity;
                                     } else {
-                                        memory.entities.appendAssumeCapacity(message.entity);
+                                        memory.entities.append(message.entity);
                                     }
                                 },
                                 else => {
@@ -833,7 +857,7 @@ pub fn main() !void {
                                         // TODO: don't perform attempts to read/write net
                                         // if we're not connected.
                                         {
-                                            const lp = local_players.addOneAssumeCapacity();
+                                            var lp = LocalPlayer{};
                                             if (!connected) {
                                                 lp.id = common.newEntityId();
                                             } else {
@@ -857,13 +881,15 @@ pub fn main() !void {
                                                     .yaw = 0,
                                                     .pitch = 0,
                                                 };
-                                                memory.players.appendAssumeCapacity(player);
+                                                memory.players.append(player);
 
-                                                memory.respawns.appendAssumeCapacity(.{
+                                                memory.respawns.append(.{
                                                     .id = lp.id.?,
                                                     .time_left = 0.0,
                                                 });
                                             }
+
+                                            local_players.append(lp);
                                         }
                                     }
                                 } else {
@@ -891,7 +917,7 @@ pub fn main() !void {
                                                 // TODO: don't perform attempts to read/write net
                                                 // if we're not connected.
                                                 {
-                                                    const lp = local_players.addOneAssumeCapacity();
+                                                    var lp = LocalPlayer{};
                                                     if (!connected) {
                                                         lp.id = common.newEntityId();
                                                     } else {
@@ -910,13 +936,15 @@ pub fn main() !void {
                                                             .yaw = 0,
                                                             .pitch = 0,
                                                         };
-                                                        memory.players.appendAssumeCapacity(player);
+                                                        memory.players.append(player);
 
-                                                        memory.respawns.appendAssumeCapacity(.{
+                                                        memory.respawns.append(.{
                                                             .id = lp.id.?,
                                                             .time_left = 0.0,
                                                         });
                                                     }
+
+                                                    local_players.append(lp);
                                                 }
 
                                                 break;
@@ -1087,7 +1115,7 @@ pub fn main() !void {
                             // push input state
                             lp.input_buffer.push(lp.input);
 
-                            const player = common.findPlayerById(&memory.players.buffer, lp.id.?);
+                            const player = common.findPlayerById(&memory.players.data, lp.id.?);
 
                             if (connected) {
                                 net.pushMessage(server_index.?, packet.PlayerUpdate{
@@ -1129,27 +1157,27 @@ pub fn main() !void {
                                 if (memory.console_input_index > 0 and (glfw_get_key(window, .left) == .press or last_key == .left and repeat)) {
                                     memory.console_input_index -= 1;
                                 }
-                                if (memory.console_input_index < memory.console_input.len and (glfw_get_key(window, .right) == .press or last_key == .right and repeat)) {
+                                if (memory.console_input_index < memory.console_input.used and (glfw_get_key(window, .right) == .press or last_key == .right and repeat)) {
                                     memory.console_input_index += 1;
                                 }
                                 if (memory.console_input_index > 0 and (glfw_get_key(window, .backspace) == .press or last_key == .backspace and repeat)) {
-                                    _ = memory.console_input.orderedRemove(memory.console_input_index - 1);
-                                    memory.console_input.buffer[memory.console_input.len] = 0;
+                                    _ = memory.console_input.ordered_remove(memory.console_input_index - 1);
+                                    memory.console_input.data[memory.console_input.used] = 0;
                                     memory.console_input_index -= 1;
                                 }
-                                if (memory.console_input.len < memory.console_input.buffer.len - 1 and (last_char >= 32 and last_char <= 126 and repeat)) {
-                                    memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char))))) catch {};
-                                    memory.console_input.buffer[memory.console_input.len] = 0;
+                                if (memory.console_input.used < memory.console_input.data.len - 1 and (last_char >= 32 and last_char <= 126 and repeat)) {
+                                    memory.console_input.append(@as(u8, @truncate(@as(u32, @intCast(last_char)))));
+                                    memory.console_input.data[memory.console_input.used] = 0;
                                     memory.console_input_index += 1;
                                 }
 
-                                if (lp.input.isset(.Enter) and memory.console_input.len > 0) {
+                                if (lp.input.isset(.Enter) and memory.console_input.used > 0) {
                                     command.dodododododododo(memory.console_input.slice());
                                     std.log.info("Running command: {s}", .{memory.console_input.slice()});
 
                                     memory.console_input_index = 0;
-                                    memory.console_input.len = 0;
-                                    memory.console_input.buffer[0] = 0;
+                                    memory.console_input.used = 0;
+                                    memory.console_input.data[0] = 0;
                                 }
                             }
 
@@ -1167,33 +1195,33 @@ pub fn main() !void {
                     }
 
                     // Move new_* to actual persistent buffers
-                    for (memory.new_sounds.constSlice()) |s| {
+                    for (memory.new_sounds.slice()) |s| {
                         _ = s;
                         //playing_sounds.appendAssumeCapacity(.{
                         //    .samples = sound_file_map[@intFromEnum(s.type)].samples,
                         //    .volume = sound_file_map[@intFromEnum(s.type)].volume,
                         //});
                     }
-                    memory.new_sounds.resize(0) catch unreachable;
+                    memory.new_sounds.clear();
 
-                    for (memory.new_hitscans.constSlice()) |h| {
-                        memory.hitscans.appendAssumeCapacity(h);
+                    for (memory.new_hitscans.slice()) |h| {
+                        memory.hitscans.append(h);
                     }
-                    memory.new_hitscans.resize(0) catch unreachable;
+                    memory.new_hitscans.clear();
 
-                    for (memory.new_nades.constSlice()) |n| {
-                        memory.nades.appendAssumeCapacity(n);
+                    for (memory.new_nades.slice()) |n| {
+                        memory.nades.append(n);
                     }
-                    memory.new_nades.resize(0) catch unreachable;
+                    memory.new_nades.clear();
 
-                    for (memory.new_explosions.constSlice()) |e| {
-                        memory.explosions.appendAssumeCapacity(e);
+                    for (memory.new_explosions.slice()) |e| {
+                        memory.explosions.append(e);
                     }
-                    memory.explosions.resize(0) catch unreachable;
+                    memory.explosions.clear();
 
-                    memory.new_damage.resize(0) catch unreachable;
+                    memory.new_damage.clear();
 
-                    memory.new_spawns.resize(0) catch unreachable;
+                    memory.new_spawns.clear();
                 }
             }
 
@@ -1230,7 +1258,7 @@ pub fn main() !void {
                 {
                     const block = memory.profile.begin("draw collect", 0);
                     defer memory.profile.end(block);
-                    for (local_players.constSlice()) |lp| {
+                    for (local_players.slice()) |lp| {
                         if (lp.id == null) {
                             continue;
                         }
@@ -1241,7 +1269,7 @@ pub fn main() !void {
                 {
                     const block = memory.profile.begin("draw", 0);
                     defer memory.profile.end(block);
-                    draw.process(&command_buffer, @intCast(width), @intCast(height), @intCast(local_players.len));
+                    draw.process(&command_buffer, @intCast(width), @intCast(height), @intCast(local_players.used));
                 }
 
                 c.glfwSwapBuffers(window);
@@ -1271,10 +1299,10 @@ pub fn main() !void {
                 }
 
                 var index: usize = 0;
-                while (index < playing_sounds.len) {
-                    const s = playing_sounds.constSlice()[index];
+                while (index < playing_sounds.used) {
+                    const s = playing_sounds.slice()[index];
                     if (s.index == s.samples.len) {
-                        _ = playing_sounds.swapRemove(index);
+                        _ = playing_sounds.swap_remove(index);
                     } else {
                         index += 1;
                     }
@@ -1290,7 +1318,7 @@ pub fn main() !void {
 
             // In debug mode, check for updates to the pack
             if (build_options.options.debug) {
-                if (tick % config.Vars.pack_update_check_interval_ns == 0) {
+                if (tick % config.vars.pack_update_check_interval_ns == 0) {
                     const block = memory.profile.begin("pack update", 0);
                     memory.profile.end(block);
 
@@ -1339,7 +1367,7 @@ pub fn main() !void {
                 const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(frame_time));
                 if (time_left > std.time.us_per_s) {
                     // if we have at least 1us left, sleep
-                    std.time.sleep(@intCast(time_left));
+                    std.Thread.sleep(@intCast(time_left));
                 }
 
                 // spin for the remaining time
@@ -1354,8 +1382,8 @@ pub fn main() !void {
 }
 
 fn appendSliceAssumeForceDstAlignment(comptime alignment: usize, comptime T: type, bounded_array: anytype, src: []align(alignment) const T) void {
-    const old_len = bounded_array.len;
-    bounded_array.len = @intCast(bounded_array.len + src.len);
+    const old_len = bounded_array.used;
+    bounded_array.used = @intCast(bounded_array.used + src.len);
     @memcpy(@as([]align(alignment) T, @ptrCast(bounded_array.slice()[old_len..][0..src.len])), src);
 }
 

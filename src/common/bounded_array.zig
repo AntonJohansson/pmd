@@ -25,9 +25,21 @@ pub fn BoundedArray(T: type, N: usize) type {
             return tmp;
         }
 
+        pub fn ordered_remove(self: *Self, index: usize) T {
+            std.debug.assert(index < self.used and self.used > 0);
+            const tmp = self.data[index];
+            const len = self.used-1 - index;
+            @memmove(self.data[index..index+len], self.data[index+1..index+len]);
+            return tmp;
+        }
+
         pub fn last(self: *Self) *T {
             std.debug.assert(self.used > 0);
             return &self.data[self.used - 1];
+        }
+
+        pub fn clear(self: *Self) void {
+            self.used = 0;
         }
     };
 }

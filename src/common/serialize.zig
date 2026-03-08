@@ -1,4 +1,7 @@
 const std = @import("std");
+const common = @import("common");
+const IntrusiveList = common.IntrusiveList;
+const assert = std.debug.assert;
 
 fn memory_size_of_int_type(comptime T: type) usize {
     return @divFloor(@typeInfo(T).int.bits + 7, 8);
@@ -13,7 +16,7 @@ fn read_int(comptime T: type, bytes: []u8, offset: *usize) T {
     return @truncate(value);
 }
 
-pub fn memory_read_type(allocator: std.mem.Allocator, comptime T: type, bytes: []u8, offset: *usize, value: anytype) void {
+pub fn memory_read_type(arena: *common.Arena, comptime T: type, bytes: []u8, offset: *usize, value: anytype) void {
     const ti = @typeInfo(T);
     switch (ti) {
         .bool => {
@@ -42,28 +45,28 @@ pub fn memory_read_type(allocator: std.mem.Allocator, comptime T: type, bytes: [
                 value.* = @as([*]ptr.child, @ptrCast(src_ptr))[0..len];
                 offset.* += len * @sizeOf(ptr.child);
             } else {
-                const slice = allocator.alloc(ptr.child, len) catch unreachable;
+                const slice = arena.alloc(ptr.child, len);
                 for (slice) |*v| {
-                    memory_read_type(allocator, ptr.child, bytes, offset, v);
+                    memory_read_type(arena, ptr.child, bytes, offset, v);
                 }
                 value.* = slice;
             }
         },
         .array => |arr| {
             for (value) |*v| {
-                memory_read_type(allocator, arr.child, bytes, offset, v);
+                memory_read_type(arena, arr.child, bytes, offset, v);
             }
         },
         .@"struct" => |s| {
             inline for (s.fields) |field| {
-                memory_read_type(allocator, field.type, bytes, offset, &@field(value, field.name));
+                memory_read_type(arena, field.type, bytes, offset, &@field(value, field.name));
             }
         },
         .optional => |o| {
             const nonnull = read_int(u8, bytes, offset);
             if (nonnull != 0) {
                 var tmp: o.child = undefined;
-                memory_read_type(allocator, o.child, bytes, offset, &tmp);
+                memory_read_type(arena, o.child, bytes, offset, &tmp);
                 value.* = tmp;
             } else {
                 value.* = null;
@@ -131,161 +134,122 @@ fn align_int_to(value: usize, alignment: u8) usize {
     return alignment * @divFloor(value + alignment - 1, alignment);
 }
 
+const segment_size: usize = 4096;
 const Segment = struct {
     used: usize = undefined,
-    data: []u8 = undefined,
     num_writes: u16 = 0,
+    data: [segment_size]u8 = undefined,
 };
 
 pub const StringBuilder = struct {
-    segments: std.ArrayList(Segment) = undefined,
-    allocator: std.mem.Allocator = undefined,
-    arena: std.heap.ArenaAllocator = undefined,
-    insert: usize = 0,
-    last_segment: ?Segment = null,
-    append: bool = true,
-    base_offset: usize = 0,
-    segment_size: usize = 4096,
+    segments: IntrusiveList(Segment),
 
-    pub fn init(allocator: std.mem.Allocator) StringBuilder {
-        return StringBuilder{
-            .segments = std.ArrayList(Segment){},
-            .allocator = allocator,
-            .arena = std.heap.ArenaAllocator.init(allocator),
-        };
-    }
+    // TODO(anjo): remove?
+    //pub fn clear(self: *StringBuilder) void {
+    //    self.segments.clear();
+    //    self.arena.clear();
+    //    const arena = self.arena;
+    //    const segments = self.arena;
+    //    const allocator = self.allocator;
+    //    self.* = .{
+    //        .segments = segments,
+    //        .allocator = allocator,
+    //        .arena = arena,
+    //    };
+    //}
 
-    pub fn deinit(self: *StringBuilder) void {
-        self.segments.deinit(self.allocator);
-        self.arena.deinit();
-    }
-
-    pub fn clear(self: *StringBuilder) void {
-        self.segments.clear();
-        self.arena.clear();
-        const arena = self.arena;
-        const segments = self.arena;
-        const allocator = self.allocator;
-        self.* = .{
-            .segments = segments,
-            .allocator = allocator,
-            .arena = arena,
-        };
-    }
-
-    fn addSegmentBySlice(self: *StringBuilder, bytes: []u8) !void {
-        try self.segments.insert(self.allocator, self.insert, Segment{
+    fn add_segment_by_slice(self: *StringBuilder, bytes: []u8) void {
+        const segment = self.segments.append();
+        segment.* = .{
             .data = bytes,
             .used = bytes.len,
-        });
-        if (self.segments.items.len > 0) {
-            self.insert += 1;
-        }
-        self.append = true;
+        };
     }
 
-    fn add_segment_by_size(self: *StringBuilder, size: usize) !*Segment {
+    fn add_segment_by_size(self: *StringBuilder, size: usize) *Segment {
         const actual_size = @max(size, self.segment_size);
         std.log.info("add_segment_by_size: {} {}", .{ size, actual_size });
         const slice = try self.arena.allocator().alloc(u8, actual_size);
-        try self.segments.insert(self.allocator, self.insert, Segment{
+        const segment = self.segments.append();
+        segment.* = .{
             .data = slice,
             .used = 0,
-        });
-        if (self.segments.items.len > 0) {
-            self.insert += 1;
-        }
-        self.append = true;
-        return &self.segments.items[self.insert - 1];
-    }
-
-    fn get_last_segment(self: *StringBuilder) ?*Segment {
-        const len = self.segments.items.len;
-        if (len == 0 or self.insert > len or self.insert == 0 or !self.append and self.segments.items[self.insert - 1].used > 0) {
-            return null;
-        }
-        std.debug.assert(self.insert > 0);
-        return &self.segments.items[self.insert - 1];
+        };
+        return self.segments.tail;
     }
 
     pub fn get_size(self: *StringBuilder) usize {
         var size: usize = 0;
-        for (self.segments.items) |s| {
-            size += s.used;
+        var maybe = self.segments.head;
+        while (maybe) |ptr| {
+            size += ptr.value.used;
+            maybe = ptr.next;
         }
         return size;
     }
 
-    pub fn get_offset(self: *StringBuilder) usize {
-        var offset: usize = self.base_offset;
-        for (self.segments.items[0..self.insert]) |s| {
-            offset += s.used;
-        }
-        return offset;
-    }
-
-    fn align_to(self: *StringBuilder, alignment: u8) !void {
-        if (self.get_last_segment()) |last| {
+    fn align_to(self: *StringBuilder, alignment: u8) void {
+        if (self.segments.tail) |tail| {
             const offset = self.get_offset();
-            const start = offset - last.used;
+            const start = offset - tail.value.used;
             if (offset % alignment != 0) {
                 const next = align_int_to(offset, alignment);
                 const next_offset = next - start;
-                std.debug.assert(next_offset < last.data.len);
-                last.used = next_offset;
+                std.debug.assert(next_offset < tail.value.data.len);
+                tail.value.used = next_offset;
             }
         }
     }
 
-    fn get_segment_fitting(self: *StringBuilder, size: usize) !*Segment {
-        if (self.get_last_segment()) |last| {
-            const free = last.data.len - last.used;
+    fn get_segment_fitting(self: *StringBuilder, size: usize) *Segment {
+        if (self.segments.tail) |tail| {
+            const free = tail.used.data.len - tail.used.used;
             if (size <= free) {
-                std.log.info("Returning last segment {}/{}!", .{ last.used, last.data.len });
-                return last;
+                std.log.info("Returning last segment {}/{}!", .{ tail.used.used, tail.used.data.len });
+                return tail.used;
             }
         }
 
         return try self.add_segment_by_size(size);
     }
 
-    pub fn write_bytes(self: *StringBuilder, bytes: []const u8) !void {
-        const segment = try self.get_segment_fitting(bytes.len);
+    pub fn write_bytes(self: *StringBuilder, bytes: []const u8) void {
+        const segment = self.get_segment_fitting(bytes.len);
         @memcpy(segment.data[segment.used..(segment.used + bytes.len)], bytes);
         segment.num_writes += 1;
         segment.used += bytes.len;
     }
 
-    fn write_int(self: *StringBuilder, comptime T: type, value: T) !void {
+    fn write_int(self: *StringBuilder, comptime T: type, value: T) void {
         const size = comptime memory_size_of_int_type(T);
         var buf: [size]u8 = undefined;
         std.mem.writeInt(std.meta.Int(@typeInfo(T).int.signedness, 8 * size), &buf, value, .little);
-        try self.write_bytes(&buf);
+        self.write_bytes(&buf);
     }
 
-    fn write_float(self: *StringBuilder, comptime T: type, value: T) !void {
+    fn write_float(self: *StringBuilder, comptime T: type, value: T) void {
         const IntT = std.meta.Int(.unsigned, @typeInfo(T).float.bits);
-        try self.write_int(IntT, @bitCast(value));
+        self.write_int(IntT, @bitCast(value));
     }
 
-    pub fn dump_to_buffer(self: *StringBuilder, allocator: std.mem.Allocator) ![]u8 {
-        const size = self.get_size();
-        std.debug.assert(size > 0);
-        const slice = try allocator.alloc(u8, size);
+    pub fn dump_to_buffer(self: *StringBuilder, buffer: []u8) []u8 {
         var i: usize = 0;
-        for (self.segments.items) |s| {
-            @memcpy(slice[i..(s.used + i)], s.data[0..s.used]);
-            i += s.used;
+        var maybe = self.segments.head;
+        while (maybe) |ptr| {
+            @memcpy(buffer[i..(ptr.value.used + i)], ptr.value.data[0..ptr.value.used]);
+            i += ptr.value.used;
+            maybe = ptr.next;
         }
-        return slice;
     }
 
     pub fn dump_to_file(self: *StringBuilder, path: []const u8) !void {
         const file = try std.fs.cwd().createFile(path, .{});
         const writer = file.writer();
         defer file.close();
-        for (self.segments.items) |s| {
-            try writer.writeAll(s.data[0..s.used]);
+        var maybe = self.segments.head;
+        while (maybe) |ptr| {
+            try writer.writeAll(ptr.value.data[0..ptr.value.used]);
+            maybe = ptr.next;
         }
     }
 };

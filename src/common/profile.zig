@@ -1,11 +1,13 @@
 const std = @import("std");
+const common = @import("common");
+const Arena = common.Arena;
 
 const Self = @This();
 
 pub const FrameBlock = struct {
-    start_tsc: u64,
-    start_pagefault_count: u64,
-    start_cachemiss_count: u64,
+    start_tsc: u64 = 0,
+    start_pagefault_count: u64 = 0,
+    start_cachemiss_count: u64 = 0,
     elapsed_tsc: u64 = 0,
     elapsed_pagefault_count: u64 = 0,
     elapsed_cachemiss_count: u64 = 0,
@@ -101,8 +103,6 @@ pub const AnchorMap = struct {
     }
 };
 
-var allocator: std.mem.Allocator = undefined;
-
 used_thread_indices: std.atomic.Value(u8) = undefined,
 thread_indices: []usize = undefined,
 anchor_maps: []AnchorMap = undefined,
@@ -116,8 +116,8 @@ timer_freq: u64 = 0,
 cachemiss_fd: i32 = 0,
 
 // Frame values
-block_current_frame: FrameBlock = undefined,
-block_last_frame: FrameBlock = undefined,
+block_current_frame: FrameBlock = .{},
+block_last_frame: FrameBlock = .{},
 
 // Should be called from the main thread, not thread safe
 pub fn begin_frame(self: *Self) void {
@@ -206,9 +206,7 @@ pub fn end(self: *Self, b: Block) void {
     map.global_parent_id = b.parent_id;
 }
 
-pub fn init(self: *Self, _allocator: std.mem.Allocator) void {
-    allocator = _allocator;
-
+pub fn init(self: *Self, arena: *Arena, thread_count: usize) void {
     self.used_thread_indices = std.atomic.Value(u8).init(0);
     self.cachemiss_fd = init_cachemiss_fd();
     self.start_tsc = read_tsc();
@@ -216,24 +214,13 @@ pub fn init(self: *Self, _allocator: std.mem.Allocator) void {
     self.start_pagefault = read_pagefault_count();
     self.timer_freq = estimate_cpu_timer_freq();
 
-    const thread_count = std.Thread.getCpuCount() catch 1;
-    self.thread_indices = allocator.alloc(usize, thread_count) catch unreachable;
-    self.anchor_maps = allocator.alloc(AnchorMap, thread_count) catch unreachable;
-}
-
-pub fn free_indices(self: *Self) void {
-    allocator.free(self.thread_indices);
-}
-
-pub fn free_anchors(self: *Self) void {
-    allocator.free(self.anchor_maps);
+    self.thread_indices = arena.alloc(usize, thread_count);
+    self.anchor_maps = arena.alloc(AnchorMap, thread_count);
 }
 
 pub fn deinit(self: *Self) void {
     _ = std.os.linux.ioctl(self.cachemiss_fd, std.os.linux.PERF.EVENT_IOC.RESET, 0);
     _ = std.os.linux.close(self.cachemiss_fd);
-    self.free_indices();
-    self.free_anchors();
 }
 
 pub fn get_thread_index(self: *Self, _id: usize) ?u8 {
@@ -266,7 +253,7 @@ pub fn total_elapsed(self: *Self) TotalElapsed {
     return .{
         .tsc_elapsed = read_tsc() - self.start_tsc,
         .pagefault_elapsed = read_pagefault_count() - self.start_pagefault,
-        .cachemiss_elapsed = self.read_cachemiss_count(),// - self.start_cachemiss,
+        .cachemiss_elapsed = self.read_cachemiss_count(), // - self.start_cachemiss,
     };
 }
 
@@ -275,12 +262,12 @@ pub fn print(self: *Self) void {
     print_anchors(self, total.tsc_elapsed, total.pagefault_elapsed, total.cachemiss_elapsed);
 }
 
-pub fn duplicate(self: *Self) !*Self {
-    const dup: *Self = @ptrCast((try allocator.alloc(Self, 1)).ptr);
+pub fn duplicate(self: *Self, arena: *Arena) !*Self {
+    const dup: *Self = @ptrCast((arena.alloc(Self, 1)).ptr);
     dup.* = self.*;
     // NOTE: We don't need to copy thread_indices, as these don't change across
     // frames, and the array only grows monotonically :)
-    dup.anchor_maps = try allocator.alloc(AnchorMap, self.anchor_maps.len);
+    dup.anchor_maps = arena.alloc(AnchorMap, self.anchor_maps.len);
     for (self.anchor_maps_slice(), 0..) |map, i| {
         dup.anchor_maps[i] = map;
     }
@@ -288,8 +275,7 @@ pub fn duplicate(self: *Self) !*Self {
 }
 
 fn print_anchors(self: *Self, tsc_elapsed: u64, pagefault_elapsed: u64, cachemiss_elapsed: u64) void {
-    std.log.info("{s:16} {s:10} {s:16} {s:5} {s:10} {s:6} {s:5} {s:10} {s:9} {s:5} {s:10} {s:10} {s:10}\n",
-                 .{"name", "samples", "tsc", "%", "% w/chld", "faults", "%", "% w/chld", "l1 misses", "%", "% w/chld", "mib", "gib/s"});
+    std.log.info("{s:16} {s:10} {s:16} {s:5} {s:10} {s:6} {s:5} {s:10} {s:9} {s:5} {s:10} {s:10} {s:10}\n", .{ "name", "samples", "tsc", "%", "% w/chld", "faults", "%", "% w/chld", "l1 misses", "%", "% w/chld", "mib", "gib/s" });
     for (self.anchor_maps_slice()) |*map| {
         for (map.anchor_values()) |*a| {
             if (a.tsc_elapsed_inclusive > 0) {
@@ -325,8 +311,8 @@ fn print_elapsed_time(timer_freq: u64, tsc_elapsed: u64, pagefault_elapsed: u64,
     var bytecount_mib: f32 = 0;
     var bytecount_gibps: f32 = 0;
     if (anchor.processed_bytecount > 0) {
-        const mib = 1024.0*1024.0;
-        const gib = mib*1024.0;
+        const mib = 1024.0 * 1024.0;
+        const gib = mib * 1024.0;
 
         const float_bytecount: f32 = @floatFromInt(anchor.processed_bytecount);
         const seconds = @as(f32, @floatFromInt(anchor.tsc_elapsed_inclusive)) / @as(f32, @floatFromInt(timer_freq));
@@ -335,8 +321,7 @@ fn print_elapsed_time(timer_freq: u64, tsc_elapsed: u64, pagefault_elapsed: u64,
         bytecount_gibps = bytes_per_sec / gib;
     }
 
-    std.log.info("{s:16} {:10} {:16} {d:5.2} {d:10.2} {:6} {d:5.2} {d:10.2} {:9} {d:5.2} {d:10.2} {d:10.2} {d:10.2}",
-    .{
+    std.log.info("{s:16} {:10} {:16} {d:5.2} {d:10.2} {:6} {d:5.2} {d:10.2} {:9} {d:5.2} {d:10.2} {d:10.2} {d:10.2}", .{
         anchor.label,
         anchor.hitcount,
         anchor.tsc_elapsed_exclusive,
@@ -352,7 +337,6 @@ fn print_elapsed_time(timer_freq: u64, tsc_elapsed: u64, pagefault_elapsed: u64,
         bytecount_gibps,
     });
 }
-
 
 fn read_pagefault_count() u64 {
     var usage: std.os.linux.rusage = undefined;

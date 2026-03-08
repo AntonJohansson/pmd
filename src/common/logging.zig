@@ -1,4 +1,7 @@
 const std = @import("std");
+const common = @import("common");
+const Arena = common.Arena;
+const Pool = common.Pool;
 
 const logdir = "log";
 
@@ -21,16 +24,23 @@ pub const Message = struct {
     message: []const u8,
 };
 
+fn arena_print(arena: *Arena, fmt: []const u8, args: anytype) []u8 {
+    const buf = arena.memory[arena.top..];
+    const str = std.fmt.bufPrint(buf, fmt, args) catch unreachable;
+    arena.top += str.len;
+    return str;
+}
+
 pub const LogMemory = struct {
-    messages: std.ArrayList(Message) = undefined,
+    messages: Pool(Message),
+    persistent: Arena,
+    frame: *Arena,
     mirror_to_stdio: bool = false,
     file: ?std.fs.File = null,
-    persistent: std.mem.Allocator,
-    frame: std.mem.Allocator,
 
-    pub fn init(persistent: std.mem.Allocator, frame: std.mem.Allocator, file: ?[]const u8, mirror_to_stdio: bool) !LogMemory {
+    pub fn init(frame: *Arena, persistent: Arena, messages: Pool, file: ?[]const u8, mirror_to_stdio: bool) !LogMemory {
         var logmem = LogMemory{
-            .messages = std.ArrayList(Message){},
+            .messages = messages,
             .mirror_to_stdio = mirror_to_stdio,
             .persistent = persistent,
             .frame = frame,
@@ -49,26 +59,25 @@ pub const LogMemory = struct {
         return logmem;
     }
 
-    pub fn deinit() void {}
-
     pub fn append(memory: *LogMemory, comptime group: Group, comptime severity: Severity, comptime fmt: []const u8, args: anytype) void {
-        const str = std.fmt.allocPrint(memory.persistent, fmt, args) catch return;
-
-        memory.messages.append(memory.persistent, .{
+        const str = arena_print(&memory.persistent, fmt, args);
+        const message = memory.messages.alloc();
+        message.* = .{
             .group = group,
             .severity = severity,
             .message = str,
-        }) catch return;
+        };
 
         if (memory.mirror_to_stdio) {
-            const head = std.fmt.allocPrint(memory.frame, "[{s}] [{s}]: ", .{ @tagName(group), @tagName(severity) }) catch return;
+            const head = arena_print(memory.frame, "[{s}][{s}]: ", .{ @tagName(group), @tagName(severity) });
             var stdout = std.fs.File.stdout();
-            var buffer: [1024]u8 = undefined;
+            var buffer: [1024]u8 = undefined; // TODO(anjo): move somewhere
             var stdout_writer = stdout.writer(&buffer);
             const writer = &stdout_writer.interface;
             _ = writer.writeAll(head) catch return;
             _ = writer.writeAll(str) catch return;
             _ = writer.writeAll("\n") catch return;
+            writer.flush() catch return;
         }
     }
 

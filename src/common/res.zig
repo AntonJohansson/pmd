@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 
 const common = @import("common.zig");
 const profile = common.profile;
@@ -23,7 +24,7 @@ pub const dir_res = "./res/";
 pub const dir_audio = dir_res ++ "audio/";
 
 // Memory
-pub var mem: common.MemoryAllocators = .{};
+pub var arena: *common.Arena = .{};
 
 pub const Id = u32;
 
@@ -37,11 +38,13 @@ pub fn runtime_pack_id(path: []const u8) Id {
     return std.hash.Murmur3_32.hash(path);
 }
 
-pub fn readFileToMemory(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+pub fn read_file_to_memory(path: []const u8) ![]u8 {
     const file = try std.fs.cwd().openFile(path, .{});
     const size = (try file.stat()).size;
-    const buf = try file.readToEndAllocOptions(allocator, size, null, std.mem.Alignment.of(u64), null);
-    return buf;
+    const buffer = arena.alloc(u8, size);
+    const bytes_read = try file.read(buffer);
+    assert(bytes_read == size);
+    return buffer;
 }
 
 //
@@ -407,9 +410,9 @@ const sound_info_map = blk: {
     break :blk map;
 };
 
-pub fn loadAudio(st: SoundType) !void {
+pub fn load_audio(st: SoundType) !void {
     const info = sound_info_map[@intFromEnum(st)];
-    const buf = try readFileToMemory(info.path);
+    const buf = try read_file_to_memory(info.path);
 
     var err: c_int = undefined;
     const vorbis = c.stb_vorbis_open_memory(buf.ptr, @intCast(buf.len), &err, null) orelse {
@@ -420,7 +423,7 @@ pub fn loadAudio(st: SoundType) !void {
 
     const vorbis_info = c.stb_vorbis_get_info(vorbis);
     const num_samples: usize = @as(c_uint, @intCast(vorbis_info.channels)) * c.stb_vorbis_stream_length_in_samples(vorbis);
-    info.samples = try mem.persistent.alloc(f32, num_samples);
+    info.samples = arena.alloc(f32, num_samples);
     const samples_per_channel = c.stb_vorbis_get_samples_float_interleaved(vorbis, vorbis_info.channels, &info.samples[0], @intCast(num_samples));
     std.debug.assert(samples_per_channel * 2 == num_samples);
 }
