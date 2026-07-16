@@ -24,7 +24,7 @@ pub const dir_res = "./res/";
 pub const dir_audio = dir_res ++ "audio/";
 
 // Memory
-pub var arena: *common.Arena = .{};
+pub var arena: *common.Arena = undefined;
 
 pub const Id = u32;
 

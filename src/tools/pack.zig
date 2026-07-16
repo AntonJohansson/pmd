@@ -3,12 +3,13 @@ const disk = @import("pack-disk");
 const common = @import("common");
 const goosepack = common.goosepack;
 
-var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-const gpa = gpa_state.allocator();
-var arena_state = std.heap.ArenaAllocator.init(gpa);
-var arena = arena_state.allocator();
-
 pub fn main() !void {
+    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+    const gpa = gpa_state.allocator();
+    var arena_frame = common.Arena{ .memory = try std.heap.page_allocator.alloc(u8, 1024 * 1024 * 1024) };
+    var arena_persisent_state = common.Arena{ .memory = try std.heap.page_allocator.alloc(u8, 1024 * 1024 * 1024)};
+    var arena_persistent = common.ArenaFreelist{ .arena = &arena_persisent_state };
+
     var buffer: [1024]u8 = undefined;
     var stdout_file = std.fs.File.stdout();
     var stdout_writer = stdout_file.writer(&buffer);
@@ -24,14 +25,15 @@ pub fn main() !void {
 
     const gp_str = args[1];
 
-    goosepack.setAllocators(arena, arena);
-    var p = goosepack.init();
+    var pack = goosepack.Pack{};
 
-    disk.persistent = gpa;
-    disk.frame = gpa;
-    const pack_in_memory: ?[]u8 = disk.read_file_to_memory(gp_str, gpa) catch null;
+    disk.arena_frame = &arena_frame;
+    disk.arena_persistent = &arena_persistent;
+    goosepack.arena_frame = &arena_frame;
+    goosepack.arena_persistent = &arena_persistent;
+    const pack_in_memory: ?[]u8 = disk.read_file_to_persistent_memory(gp_str) catch null;
     if (pack_in_memory != null) {
-        try goosepack.load(&p, pack_in_memory.?);
+        try goosepack.load(&pack, pack_in_memory.?);
     }
 
     {
@@ -50,24 +52,24 @@ pub fn main() !void {
             .list => {
                 switch (args.len) {
                     3 => {
-                        try stdout.print("gosepack version: {}\n", .{p.header.format_version});
-                        try stdout.print("file iteration: {}\n", .{p.header.file_iteration});
+                        try stdout.print("gosepack version: {}\n", .{pack.header.format_version});
+                        try stdout.print("file iteration: {}\n", .{pack.header.file_iteration});
                         try stdout.print("size: {} MiB\n\n", .{pack_in_memory.?.len / 1024 / 1024});
 
                         try stdout.print("{s:4} {s:32} {s:16} {s:16} {s:16}\n", .{ "id", "name", "type", "offset", "size" });
-                        for (p.entries.?.items, 0..) |e, i| {
+                        for (pack.entries, 0..) |e, i| {
                             try stdout.print("{:3}: {s:32} {s:16} {:16} {:16}\n", .{ i, e.name, @tagName(e.type), e.offset, e.size });
                         }
                     },
                     4 => {
                         const id = try std.fmt.parseInt(usize, args[3], 10);
-                        if (id >= p.entries.?.items.len) {
+                        if (id >= pack.entries.len) {
                             printUsage();
                             return;
                         }
                         // TODO(anjo): this double switch on entry
-                        const entry = p.entries.?.items[id];
-                        const resource = goosepack.getResource(&p, id);
+                        const entry = pack.entries[id];
+                        const resource = goosepack.getResource(&pack, id);
                         switch (entry.type) {
                             .text => {
                                 try stdout.writeAll(resource.text.bytes);
@@ -136,20 +138,20 @@ pub fn main() !void {
                         type: goosepack.ResourceType,
                         name: []const u8,
                         srcs: []goosepack.EntrySrc,
-                    }).init(arena);
+                    }).init(gpa);
                     var worklist = std.ArrayList([]const u8){};
-                    try worklist.append(arena, path);
+                    try worklist.append(gpa, path);
 
                     while (worklist.pop()) |workitem| {
                         const dir = try std.fs.cwd().openDir(workitem, .{ .iterate = true });
                         var it = dir.iterate();
                         while (try it.next()) |e| {
-                            const item_path = try std.fs.path.join(arena, &[_][]const u8{ workitem, e.name });
+                            const item_path = try std.fs.path.join(gpa, &[_][]const u8{ workitem, e.name });
                             switch (e.kind) {
                                 .file => {
                                     const basename = std.fs.path.stem(e.name);
                                     const extension = std.fs.path.extension(e.name);
-                                    const name = try std.fs.path.join(arena, &[_][]const u8{ workitem, basename });
+                                    const name = try std.fs.path.join(gpa, &[_][]const u8{ workitem, basename });
 
                                     if (std.mem.eql(u8, extension, ".vert") or
                                         std.mem.eql(u8, extension, ".frag"))
@@ -197,7 +199,7 @@ pub fn main() !void {
                                                 };
                                                 for (srcs, 0..) |*s, i| {
                                                     s.* = .{
-                                                        .path = try std.fs.path.join(arena, &[_][]const u8{
+                                                        .path = try std.fs.path.join(gpa, &[_][]const u8{
                                                             workitem,
                                                             filenames[i],
                                                         }),
@@ -257,7 +259,7 @@ pub fn main() !void {
                                     }
                                 },
                                 .directory => {
-                                    try worklist.append(arena, item_path);
+                                    try worklist.append(gpa, item_path);
                                 },
                                 else => unreachable,
                             }
@@ -267,23 +269,23 @@ pub fn main() !void {
                     var it = map.iterator();
                     while (it.next()) |e| {
                         try stdout.print("adding {s:32}: {s:16}\n", .{ e.key_ptr.*, @tagName(e.value_ptr.type) });
-                        _ = try disk.load_resource(&p, e.value_ptr.srcs, e.value_ptr.name, e.value_ptr.type);
+                        _ = try disk.load_resource(&pack, e.value_ptr.srcs, e.value_ptr.name, e.value_ptr.type);
                     }
                 } else {
                     const ext = std.fs.path.extension(path);
                     const name = path[0 .. path.len - ext.len];
                     std.log.info("name {s}", .{name});
-                    if (goosepack.entry_lookup(&p, name)) |ei| {
-                        const entry = p.entries.?.items[ei.index];
+                    if (goosepack.entry_lookup(&pack, name)) |ei| {
+                        const entry = pack.entries[ei.index];
                         std.log.info("always found \n{s}\n", .{entry.name});
                         if (goosepack.has_entry_been_modified(entry)) {
                             std.log.info("modified", .{});
-                            goosepack.entry_delete(&p, entry);
+                            goosepack.entry_delete(&pack, entry);
                             const srcs = try gpa.alloc(goosepack.EntrySrc, 1);
                             srcs[0] = .{
                                 .path = path,
                             };
-                            _ = try disk.load_resource(&p, srcs, name, res_type);
+                            _ = try disk.load_resource(&pack, srcs, name, res_type);
                         } else {
                             std.log.info("not modified", .{});
                         }
@@ -292,7 +294,7 @@ pub fn main() !void {
                         srcs[0] = .{
                             .path = path,
                         };
-                        _ = try disk.load_resource(&p, srcs, name, res_type);
+                        _ = try disk.load_resource(&pack, srcs, name, res_type);
                     }
                 }
             },
@@ -302,17 +304,17 @@ pub fn main() !void {
                     return;
                 }
                 const id = try std.fmt.parseInt(usize, args[3], 10);
-                if (id >= p.entries.?.items.len) {
+                if (id >= pack.entries.len) {
                     std.log.err("{} not a valid entry id", .{id});
                     try stdout.print("{s:4} {s:32} {s:16} {s:16} {s:16}\n", .{ "id", "name", "type", "offset", "size" });
-                    for (p.entries.?.items, 0..) |e, i| {
+                    for (pack.entries, 0..) |e, i| {
                         try stdout.print("{:3}: {s:32} {s:16} {:16} {:16}\n", .{ i, e.name, @tagName(e.type), e.offset, e.size });
                     }
                     try stdout.flush();
                     return;
                 }
 
-                try goosepack.entry_delete_child_tree(&p, id);
+                try goosepack.entry_delete_child_tree(&pack, id);
             },
             .update => {
                 if (pack_in_memory == null) {
@@ -320,14 +322,14 @@ pub fn main() !void {
                     return;
                 }
 
-                _ = try disk.collect_and_update_entries(&p);
+                _ = try disk.collect_and_update_entries(&pack);
             },
         }
     }
 
-    try goosepack.saveToFile(&p, gp_str);
+    try disk.generate_pack_ids(&pack);
 
-    arena_state.deinit();
+    try goosepack.save_to_file(&pack, gp_str);
 
     try stdout.flush();
 }

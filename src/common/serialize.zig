@@ -1,5 +1,5 @@
 const std = @import("std");
-const common = @import("common");
+const common = @import("common.zig");
 const IntrusiveList = common.IntrusiveList;
 const assert = std.debug.assert;
 
@@ -76,22 +76,22 @@ pub fn memory_read_type(arena: *common.Arena, comptime T: type, bytes: []u8, off
     }
 }
 
-pub fn memory_write_type(builder: *StringBuilder, value: anytype) !void {
+pub fn memory_write_type(builder: *StringBuilder, value: anytype) void {
     const base_type = @TypeOf(value);
     const ti = @typeInfo(base_type);
 
     switch (ti) {
         .bool => {
-            try builder.write_int(u8, @intFromBool(value));
+            builder.write_int(u8, @intFromBool(value));
         },
         .int => {
-            try builder.write_int(base_type, value);
+            builder.write_int(base_type, value);
         },
         .float => {
-            try builder.write_float(base_type, value);
+            builder.write_float(base_type, value);
         },
         .@"enum" => |e| {
-            try builder.write_int(e.tag_type, @intFromEnum(value));
+            builder.write_int(e.tag_type, @intFromEnum(value));
         },
         .pointer => |ptr| {
             std.debug.assert(ptr.size == .slice);
@@ -100,30 +100,30 @@ pub fn memory_write_type(builder: *StringBuilder, value: anytype) !void {
             if (@typeInfo(ptr.child) == .int or @typeInfo(ptr.child) == .float) {
                 const num_bytes = @sizeOf(ptr.child) * value.len;
                 const byte_slice: [*]const u8 = @ptrCast(value.ptr);
-                try builder.align_to(@alignOf(ptr.child));
-                try builder.write_bytes(byte_slice[0..num_bytes]);
+                builder.align_to(@alignOf(ptr.child));
+                builder.write_bytes(byte_slice[0..num_bytes]);
             } else {
                 for (value) |v| {
-                    try memory_write_type(builder, v);
+                    memory_write_type(builder, v);
                 }
             }
         },
         .array => {
             for (value) |v| {
-                try memory_write_type(builder, v);
+                memory_write_type(builder, v);
             }
         },
         .@"struct" => |s| {
             inline for (s.fields) |field| {
-                try memory_write_type(builder, @field(value, field.name));
+                memory_write_type(builder, @field(value, field.name));
             }
         },
         .optional => {
             if (value != null) {
-                try builder.write_int(u8, 1);
-                try memory_write_type(builder, value.?);
+                builder.write_int(u8, 1);
+                memory_write_type(builder, value.?);
             } else {
-                try builder.write_int(u8, 0);
+                builder.write_int(u8, 0);
             }
         },
         else => @compileError("Unhandled type in writing data " ++ @typeName(base_type)),
@@ -138,11 +138,12 @@ const segment_size: usize = 4096;
 const Segment = struct {
     used: usize = undefined,
     num_writes: u16 = 0,
-    data: [segment_size]u8 = undefined,
+    data: []u8 = undefined,
 };
 
 pub const StringBuilder = struct {
     segments: IntrusiveList(Segment),
+    base_offset: usize = 0,
 
     // TODO(anjo): remove?
     //pub fn clear(self: *StringBuilder) void {
@@ -158,24 +159,27 @@ pub const StringBuilder = struct {
     //    };
     //}
 
-    fn add_segment_by_slice(self: *StringBuilder, bytes: []u8) void {
-        const segment = self.segments.append();
-        segment.* = .{
-            .data = bytes,
-            .used = bytes.len,
+    pub fn subbuilder(self: *StringBuilder) StringBuilder {
+        return .{
+            .segments = self.segments.sublist(),
         };
     }
 
+    fn add_segment_by_slice(self: *StringBuilder, bytes: []u8) void {
+        self.segments.append(.{
+            .data = bytes,
+            .used = bytes.len,
+        });
+    }
+
     fn add_segment_by_size(self: *StringBuilder, size: usize) *Segment {
-        const actual_size = @max(size, self.segment_size);
-        std.log.info("add_segment_by_size: {} {}", .{ size, actual_size });
-        const slice = try self.arena.allocator().alloc(u8, actual_size);
-        const segment = self.segments.append();
-        segment.* = .{
+        const actual_size = @max(size, segment_size);
+        const slice = self.segments.arena.alloc(u8, actual_size);
+        self.segments.append(.{
             .data = slice,
             .used = 0,
-        };
-        return self.segments.tail;
+        });
+        return &self.segments.tail.?.value;
     }
 
     pub fn get_size(self: *StringBuilder) usize {
@@ -188,7 +192,11 @@ pub const StringBuilder = struct {
         return size;
     }
 
-    fn align_to(self: *StringBuilder, alignment: u8) void {
+    pub fn get_offset(self: *StringBuilder) usize {
+        return self.base_offset + self.get_size();
+    }
+
+    pub fn align_to(self: *StringBuilder, alignment: u8) void {
         if (self.segments.tail) |tail| {
             const offset = self.get_offset();
             const start = offset - tail.value.used;
@@ -203,14 +211,13 @@ pub const StringBuilder = struct {
 
     fn get_segment_fitting(self: *StringBuilder, size: usize) *Segment {
         if (self.segments.tail) |tail| {
-            const free = tail.used.data.len - tail.used.used;
+            const free = tail.value.data.len - tail.value.used;
             if (size <= free) {
-                std.log.info("Returning last segment {}/{}!", .{ tail.used.used, tail.used.data.len });
-                return tail.used;
+                return &tail.value;
             }
         }
 
-        return try self.add_segment_by_size(size);
+        return self.add_segment_by_size(size);
     }
 
     pub fn write_bytes(self: *StringBuilder, bytes: []const u8) void {
@@ -220,19 +227,19 @@ pub const StringBuilder = struct {
         segment.used += bytes.len;
     }
 
-    fn write_int(self: *StringBuilder, comptime T: type, value: T) void {
+    pub fn write_int(self: *StringBuilder, comptime T: type, value: T) void {
         const size = comptime memory_size_of_int_type(T);
         var buf: [size]u8 = undefined;
         std.mem.writeInt(std.meta.Int(@typeInfo(T).int.signedness, 8 * size), &buf, value, .little);
         self.write_bytes(&buf);
     }
 
-    fn write_float(self: *StringBuilder, comptime T: type, value: T) void {
+    pub fn write_float(self: *StringBuilder, comptime T: type, value: T) void {
         const IntT = std.meta.Int(.unsigned, @typeInfo(T).float.bits);
         self.write_int(IntT, @bitCast(value));
     }
 
-    pub fn dump_to_buffer(self: *StringBuilder, buffer: []u8) []u8 {
+    pub fn dump_to_buffer(self: *StringBuilder, buffer: []u8) void {
         var i: usize = 0;
         var maybe = self.segments.head;
         while (maybe) |ptr| {
@@ -243,13 +250,16 @@ pub const StringBuilder = struct {
     }
 
     pub fn dump_to_file(self: *StringBuilder, path: []const u8) !void {
+        var buffer: [1024]u8 = undefined;
         const file = try std.fs.cwd().createFile(path, .{});
-        const writer = file.writer();
+        var writer = file.writer(&buffer);
+        const wi = &writer.interface;
         defer file.close();
         var maybe = self.segments.head;
         while (maybe) |ptr| {
-            try writer.writeAll(ptr.value.data[0..ptr.value.used]);
+            try wi.writeAll(ptr.value.data[0..ptr.value.used]);
             maybe = ptr.next;
         }
+        try wi.flush();
     }
 };

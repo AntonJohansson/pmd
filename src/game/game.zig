@@ -8,7 +8,9 @@ const voxels = @import("voxels.zig");
 
 const common = @import("common");
 const BoundedArray = common.BoundedArray;
+const BoundedSlice = common.BoundedSlice;
 const Memory = common.Memory;
+const ThreadState = common.ThreadState;
 const Player = common.Player;
 const Input = common.Input;
 const hsv_to_rgb = common.color.hsv_to_rgb;
@@ -40,6 +42,8 @@ const m4 = math.m4;
 
 const draw_api = common.draw_api;
 
+const ui = @import("ui.zig");
+
 const widget_length = 20.0;
 const widget_thickness = 2.0;
 const widget_size_x = v3{ .x = widget_length, .y = widget_thickness, .z = widget_thickness };
@@ -53,9 +57,6 @@ const widget_size_plane_xz = v3{ .x = widget_plane_length, .y = widget_plane_thi
 
 const global_plane_size = v2{ .x = 100.0, .y = 100.0 };
 const ground_plane_size = v2{ .x = 10000.0, .y = 10000.0 };
-
-const fontsize = 1.0 / 30.0;
-const window_fontsize = 1.0 / 60.0;
 
 const grid_size = 32;
 const tile_size = 32.0;
@@ -72,74 +73,74 @@ var sniper_trigger_animation: common.res.Animation = undefined;
 
 var weapon_model: m4 = undefined;
 
-fn testtt(memory: *Memory) void {
-    const out = memory.testfn(123);
-    std.log.info("testfn ret {}", .{out});
-}
-
-export fn init(memory: *Memory) bool {
-
-
-    testtt(memory);
-
-    std.log.info("game ptr: {*}", .{memory});
-    std.log.info("vtable ptr: {*}", .{&memory.mem.persistent.ptr});
-    const etst = memory.mem.frame.alloc(u8, 11) catch return false;
-    std.log.info("do i get here", .{});
-    defer memory.mem.persistent.free(etst);
-    voxels.map_init(&map, memory.mem.persistent) catch return false;
-    const chunk = voxels.add_chunk(&map, .{ 1, 0, 0 }) catch return false;
-    voxels.chunk_build_terrain(memory, chunk);
-    voxels.chunk_build_faces(memory, chunk);
-    goosepack.setAllocators(memory.mem.frame, memory.mem.persistent);
-    
-
-    common.sniper.tree = from_model(memory, "res/models/weapons/sniper v2", &.{
-        .{ .id = common.res.id("res/models/weapons/sniper bolt"), .index = &common.sniper.id_bolt },
-        .{ .id = common.res.id("res/models/weapons/sniper bullet exit"), .index = &common.sniper.id_barrel },
-        .{ .id = common.res.id("res/models/weapons/sniper iron sight aim"), .index = &common.sniper.id_aim },
-    }) orelse {
-        return false;
-    };
-
-    common.pistol.tree = from_model(memory, "res/models/weapons/pittol", &.{
-        .{ .id = common.res.id("res/models/weapons/pittol bullet exit"), .index = &common.pistol.id_barrel },
-        .{ .id = common.res.id("res/models/weapons/pittol iron sight"), .index = &common.pistol.id_aim },
-    }) orelse {
-        return false;
-    };
-
-    {
-        const anim_name = "res/models/weapons/animation/bolt back";
-        const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
-            std.log.info("unable to find animation {s}", .{anim_name});
-            return false;
-        };
-        sniper_bolt_back_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
+var chunk: *common.Chunk = undefined;
+export fn init(ts: *ThreadState, memory: *Memory) bool {
+    if (ts.is_main()) {
+        voxels.map_init(&map, &ts.arena_persistent);
+        chunk = voxels.add_chunk(&map, .{ 1, 0, 0 });
     }
 
-    {
-        const anim_name = "res/models/weapons/animation/bolt forward";
-        const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
-            std.log.info("unable to find animation {s}", .{anim_name});
-            return false;
-        };
-        sniper_bolt_forward_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
-    }
+    memory.barrier.wait();
 
-    {
-        const anim_name = "res/models/weapons/animation/fire";
-        const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
-            std.log.info("unable to find animation {s}", .{anim_name});
+    const block = ts.profile.begin("init chunkbuild", 0);
+    voxels.chunk_build_terrain(ts, chunk);
+    voxels.chunk_build_faces(ts, memory, chunk);
+    ts.profile.end(block);
+
+    memory.barrier.wait();
+
+    if (ts.is_main()) {
+        goosepack.arena_persistent = &ts.arena_persistent;
+        goosepack.arena_frame = &ts.arena_frame;
+
+        common.sniper.tree = from_model(memory, "res/models/weapons/sniper v2", &.{
+            .{ .id = common.res.id("res/models/weapons/sniper bolt"), .index = &common.sniper.id_bolt },
+            .{ .id = common.res.id("res/models/weapons/sniper bullet exit"), .index = &common.sniper.id_barrel },
+            .{ .id = common.res.id("res/models/weapons/sniper iron sight aim"), .index = &common.sniper.id_aim },
+        }) orelse {
             return false;
         };
-        sniper_trigger_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
+
+        common.pistol.tree = from_model(memory, "res/models/weapons/pittol", &.{
+            .{ .id = common.res.id("res/models/weapons/pittol bullet exit"), .index = &common.pistol.id_barrel },
+            .{ .id = common.res.id("res/models/weapons/pittol iron sight"), .index = &common.pistol.id_aim },
+        }) orelse {
+            return false;
+        };
+
+        {
+            const anim_name = "res/models/weapons/animation/bolt back";
+            const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
+                std.log.info("unable to find animation {s}", .{anim_name});
+                return false;
+            };
+            sniper_bolt_back_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
+        }
+
+        {
+            const anim_name = "res/models/weapons/animation/bolt forward";
+            const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
+                std.log.info("unable to find animation {s}", .{anim_name});
+                return false;
+            };
+            sniper_bolt_forward_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
+        }
+
+        {
+            const anim_name = "res/models/weapons/animation/fire";
+            const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
+                std.log.info("unable to find animation {s}", .{anim_name});
+                return false;
+            };
+            sniper_trigger_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
+        }
     }
 
     return true;
 }
 
-export fn deinit(memory: *Memory) void {
+export fn deinit(ts: *ThreadState, memory: *Memory) void {
+    _ = ts;
     _ = memory;
 }
 
@@ -547,62 +548,12 @@ fn readEntitiesFromDisk(memory: *common.Memory) !void {
     }
 }
 
-fn pushWindow(memory: *Memory, cmd: *draw_api.CommandBuffer, window: common.Window, title: []const u8, x: f32, y: f32) bool {
-    const persistent = &memory.windows_persistent[@intFromEnum(window)]; 
-    if (!persistent.initialized) {
-        @branchHint(.unlikely);
-        persistent.x = x;
-        persistent.y = y;
-        persistent.w = 0.2;
-        persistent.h = 0.2;
-        persistent.initialized = true;
-    }
+export fn update(ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
+    goosepack.arena_persistent = &ts.arena_persistent;
+    goosepack.arena_frame = &ts.arena_frame;
 
-    const w = memory.windows.alloc();
-    w.* = .{
-        .persistent = persistent,
-        .title = title,
-        .cursor_x = 0,
-        .cursor_y = 1,
-    };
-
-    memory.current_window = w;
-
-    draw_window(cmd, w);
-
-    return true;
-}
-
-fn pushText(memory: *Memory, cmd: *draw_api.CommandBuffer, text: []const u8) void {
-    const window = memory.current_window;
-
-    var text_prim = primitive.Text{
-        .pos = .{
-            .x = window.persistent.x + window.persistent.w * window.cursor_x,
-            .y = window.persistent.y + window.persistent.h * window.cursor_y - top_bar_height - window_fontsize,
-        },
-        .str = undefined,
-        .len = text.len,
-        .size = window_fontsize,
-        .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
-        .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
-    };
-    @memset(&text_prim.str, 0);
-    const dst: []u8 = &text_prim.str;
-    @memcpy(dst[0..text.len], text);
-    cmd.push(text_prim, hsv_to_rgb(100, 0.5, 0.5));
-    window.cursor_y -= window_fontsize / window.persistent.h;
-
-    //memory.windows.items[index].children.append(.{
-    //    .text = .{
-    //        .str = text,
-    //    },
-    //}) catch unreachable;
-}
-
-export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
     if (player.in_editor) {
-        voxels.edit(memory, player, input, &map) catch {};
+        voxels.edit(ts, memory, player, input, &map);
     }
 
     // TODO(anjo): move
@@ -647,108 +598,126 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
     {
         const tree = &player.weapons[0].?.tree;
         if (input.isset(.bolt_back)) {
-            memory.animation_states.append(memory.mem.persistent, .{
+            memory.animation_states.push().* = .{
                 .begin_time = time_seconds(memory),
                 .playback_speed = 1.5,
                 .animation = &sniper_bolt_back_animation,
                 .tree = tree,
                 .index = common.sniper.id_bolt,
-            }) catch unreachable;
+            };
         }
         if (input.isset(.bolt_forward)) {
-            memory.animation_states.append(memory.mem.persistent, .{
+            memory.animation_states.push().* = .{
                 .begin_time = time_seconds(memory),
                 .playback_speed = 1.5,
                 .animation = &sniper_bolt_forward_animation,
                 .tree = tree,
                 .index = common.sniper.id_bolt,
-            }) catch unreachable;
+            };
         }
 
         // TODO(anjo): @parallelize
-        for (memory.animation_states.items) |*state| {
+        for (0..memory.animation_states.len) |i| {
+            const state = memory.animation_states.at(i);
             transform_animation(state, time_seconds(memory));
         }
 
-        var i: usize = 0;
-        while (i < memory.animation_states.items.len) {
-            if (memory.animation_states.items[i].finished) {
-                _ = memory.animation_states.swapRemove(i);
-            } else {
-                i += 1;
-            }
-        }
+        // TODO(anjo): @SYNC
 
         {
-            var anim_map = std.AutoHashMap(struct { res_id: common.res.Id, id: u8 }, std.ArrayList(*common.AnimationState)).init(memory.mem.frame);
-            for (memory.animation_states.items) |*state| {
-                if (anim_map.getPtr(.{ .res_id = state.tree.id, .id = state.index })) |arr| {
-                    var inserted = false;
-                    for (arr.items, 0..) |x, j| {
-                        if (state.begin_time < x.begin_time) {
-                            arr.insert(memory.mem.frame, j, state) catch unreachable;
-                            inserted = true;
-                            break;
-                        }
-                    }
-                    if (!inserted) {
-                        arr.append(memory.mem.frame, state) catch unreachable;
-                    }
+            var i: usize = 0;
+            while (i < memory.animation_states.len) {
+                if (memory.animation_states.at(i).finished) {
+                    _ = memory.animation_states.swap_remove(i);
                 } else {
-                    var arr = std.ArrayList(*common.AnimationState){};
-                    arr.append(memory.mem.frame, state) catch unreachable;
-                    anim_map.put(.{ .res_id = state.tree.id, .id = state.index }, arr) catch unreachable;
-                }
-            }
-
-            const t = time_seconds(memory);
-            var it = anim_map.iterator();
-            while (it.next()) |pair| {
-                std.log.info("blending: {}", .{pair.value_ptr.items.len});
-
-                if (pair.value_ptr.items.len > 1) {
-                    const weights = memory.mem.frame.alloc(f32, pair.value_ptr.items.len) catch unreachable;
-                    const tfs = memory.mem.frame.alloc(math.Transform, pair.value_ptr.items.len) catch unreachable;
-
-                    var max_index: usize = 0;
-                    var max_time: f32 = 0;
-                    for (pair.value_ptr.items, 0..) |state, j| {
-                        if (state.end_time > max_time) {
-                            max_time = state.end_time;
-                            max_index = j;
-                        }
-                    }
-
-                    for (pair.value_ptr.items, 0..) |state, j| {
-                        const half_len = 0.5 * (state.end_time - state.begin_time) / state.playback_speed;
-                        const middle = state.begin_time + half_len;
-                        tfs[j] = .{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
-                        if (j == 0) {
-                            weights[j] = 1.0 - (1.0 / (2.0 * half_len)) * (t - state.begin_time);
-                        } else if (j == max_index) {
-                            weights[j] = (1.0 / (2.0 * half_len)) * (t - state.begin_time);
-                        } else {
-                            weights[j] = 1.0 - (1.0 / half_len) * @abs(t - middle);
-                        }
-                    }
-                    const node = &pair.value_ptr.items[0].tree.nodes[pair.key_ptr.id];
-                    const tf = math.transform_blend(tfs, weights);
-                    node.transform = m4.from_transform(tf);
-                } else {
-                    const state = pair.value_ptr.items[0];
-                    const node = &state.tree.nodes[pair.key_ptr.id];
-                    const tf = math.Transform{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
-                    node.transform = m4.from_transform(tf);
-                }
-            }
-
-            for (memory.animation_states.items) |*state| {
-                transform_animation(state, time_seconds(memory));
-                if (state.tree.flags.dirty == 1) {
-                    update_dirty_nodes(state.tree);
+                    i += 1;
                 }
             }
         }
+
+        // TODO(anjo): FIX
+        //{
+        //    var anim_map = std.AutoHashMap(struct { res_id: common.res.Id, id: u8 }, std.ArrayList(*common.AnimationState)).init(memory.mem.frame);
+        //    for (memory.animation_states.items) |*state| {
+        //        if (anim_map.getPtr(.{ .res_id = state.tree.id, .id = state.index })) |arr| {
+        //            var inserted = false;
+        //            for (arr.items, 0..) |x, j| {
+        //                if (state.begin_time < x.begin_time) {
+        //                    arr.insert(memory.mem.frame, j, state) catch unreachable;
+        //                    inserted = true;
+        //                    break;
+        //                }
+        //            }
+        //            if (!inserted) {
+        //                arr.append(memory.mem.frame, state) catch unreachable;
+        //            }
+        //        } else {
+        //            var arr = std.ArrayList(*common.AnimationState){};
+        //            arr.append(memory.mem.frame, state) catch unreachable;
+        //            anim_map.put(.{ .res_id = state.tree.id, .id = state.index }, arr) catch unreachable;
+        //        }
+        //    }
+
+        //    const t = time_seconds(memory);
+
+        //    for (memory.animation_states.data, 0..) |*state, i| {
+        //        var tfs = BoundedSlice(math.Transform) {
+        //            .data = memory.arena_frame.alloc(math.Transform, memory.animation_states.len),
+        //        };
+
+        //        for ((i+1)..memory.animation_states.len) |j| {
+        //            const other_state = &memory.animation_states.data[j];
+
+        //        }
+        //    }
+
+        //    var it = anim_map.iterator();
+        //    while (it.next()) |pair| {
+        //        std.log.info("blending: {}", .{pair.value_ptr.items.len});
+
+        //        if (pair.value_ptr.items.len > 1) {
+        //            const weights = memory.mem.frame.alloc(f32, pair.value_ptr.items.len) catch unreachable;
+        //            const tfs = memory.mem.frame.alloc(math.Transform, pair.value_ptr.items.len) catch unreachable;
+
+        //            var max_index: usize = 0;
+        //            var max_time: f32 = 0;
+        //            for (pair.value_ptr.items, 0..) |state, j| {
+        //                if (state.end_time > max_time) {
+        //                    max_time = state.end_time;
+        //                    max_index = j;
+        //                }
+        //            }
+
+        //            for (pair.value_ptr.items, 0..) |state, j| {
+        //                const half_len = 0.5 * (state.end_time - state.begin_time) / state.playback_speed;
+        //                const middle = state.begin_time + half_len;
+        //                tfs[j] = .{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
+        //                if (j == 0) {
+        //                    weights[j] = 1.0 - (1.0 / (2.0 * half_len)) * (t - state.begin_time);
+        //                } else if (j == max_index) {
+        //                    weights[j] = (1.0 / (2.0 * half_len)) * (t - state.begin_time);
+        //                } else {
+        //                    weights[j] = 1.0 - (1.0 / half_len) * @abs(t - middle);
+        //                }
+        //            }
+        //            const node = &pair.value_ptr.items[0].tree.nodes[pair.key_ptr.id];
+        //            const tf = math.transform_blend(tfs, weights);
+        //            node.transform = m4.from_transform(tf);
+        //        } else {
+        //            const state = pair.value_ptr.items[0];
+        //            const node = &state.tree.nodes[pair.key_ptr.id];
+        //            const tf = math.Transform{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
+        //            node.transform = m4.from_transform(tf);
+        //        }
+        //    }
+
+        //    for (memory.animation_states.items) |*state| {
+        //        transform_animation(state, time_seconds(memory));
+        //        if (state.tree.flags.dirty == 1) {
+        //            update_dirty_nodes(state.tree);
+        //        }
+        //    }
+        //}
     }
 
     if (input.isset(.to_editor)) {
@@ -809,7 +778,8 @@ export fn update(vars: *const Vars, memory: *Memory, player: *Player, input: *co
     }
 }
 
-export fn authorizedPlayerUpdate(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
+export fn authorizedPlayerUpdate(ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
+    _ = ts;
     _ = dt;
     _ = vars;
     if (player.in_editor) {
@@ -827,7 +797,8 @@ export fn authorizedPlayerUpdate(vars: *const Vars, memory: *Memory, player: *Pl
     }
 }
 
-export fn authorizedUpdate(vars: *const Vars, memory: *Memory, dt: f32) void {
+export fn authorizedUpdate(ts: *ThreadState, vars: *const Vars, memory: *Memory, dt: f32) void {
+    _ = ts;
     _ = vars;
 
     // Handle respawns
@@ -887,20 +858,20 @@ export fn authorizedUpdate(vars: *const Vars, memory: *Memory, dt: f32) void {
     }
 }
 
-export fn server_update(vars: *const Vars, memory: *Memory, dt: f32) void {
+export fn server_update(ts: *ThreadState, vars: *const Vars, memory: *Memory, dt: f32) void {
     _ = dt;
     _ = vars;
-    if (memory.map_mods.items.len > 0) {
-        _ = voxels.apply_modify(memory, &map, memory.map_mods.items);
+    if (memory.map_mods.used > 0) {
+        _ = voxels.apply_modify(ts, &map, memory.map_mods.slice());
     }
 }
 
-export fn client_update(vars: *const Vars, memory: *Memory, dt: f32) void {
+export fn client_update(ts: *ThreadState, vars: *const Vars, memory: *Memory, dt: f32) void {
     _ = dt;
     _ = vars;
-    if (memory.map_mods.items.len > 0) {
-        const dirty_chunks = voxels.apply_modify(memory, &map, memory.map_mods.items);
-        voxels.rebuild_chunks(memory, &map, dirty_chunks);
+    if (memory.map_mods.used > 0) {
+        const dirty_chunks = voxels.apply_modify(ts, &map, memory.map_mods.slice());
+        voxels.rebuild_chunks(ts, memory, &map, dirty_chunks);
     }
 }
 
@@ -1353,614 +1324,525 @@ fn raycastAgainstEntities(memory: *Memory, pos: v3, dir: v3, skip_id: ?common.En
 //    }
 //}
 
-const top_bar_height = 0.01;
-fn draw_window(cmd: *draw_api.CommandBuffer, window: *common.WindowState) void {
-    //var parent = if (window.parent) |p| &windows.items[p] else null;
-    //var w = if (parent) |p| p.w else 1;
-    //_ = w;
-    //var h = if (parent) |p| p.h else 1;
-    //_ = h;
-    //if (parent) |p| {
-    //    p.cursor_y -= window.h;
-    //}
-    //var x = if (parent) |p| p.x + p.cursor_x else 0;
-    //var y = if (parent) |p| p.y + p.cursor_y else 0;
-
-    // background
-    cmd.push(primitive.Rectangle{ .pos = .{
-        .x = window.persistent.x,
-        .y = window.persistent.y,
-    }, .size = .{
-        .x = window.persistent.w,
-        .y = window.persistent.h - top_bar_height,
-    } }, hsv_to_rgb(
-        window.color.x,
-        window.color.y,
-        window.color.z,
-    ));
-
-    const top_bar_color_factor: f32 = if (window.persistent.moving or window.hover) 0.8 else 1.5;
-
-    // top bar
-    cmd.push(primitive.Rectangle{ .pos = .{
-        .x = window.persistent.x,
-        .y = window.persistent.y + window.persistent.h - top_bar_height,
-    }, .size = .{
-        .x = window.persistent.w,
-        .y = top_bar_height,
-    } }, hsv_to_rgb(
-        window.color.x,
-        window.color.y,
-        window.color.z * top_bar_color_factor,
-    ));
-
-    window.cursor_x = 0;
-    window.cursor_y = 1;
-    //for (window.children.items) |item| {
-    //    switch (item) {
-    //        .text => |t| {
-    //            var text = primitive.Text{
-    //                .pos = .{
-    //                    .x = window.x + window.w * window.cursor_x,
-    //                    .y = window.y + window.h * window.cursor_y - top_bar_height - window_fontsize,
-    //                },
-    //                .str = undefined,
-    //                .len = t.str.len,
-    //                .size = window_fontsize,
-    //                .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
-    //                .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
-    //            };
-    //            @memset(&text.str, 0);
-    //            const dst: []u8 = &text.str;
-    //            @memcpy(dst[0..t.str.len], t.str);
-    //            cmd.push(text, hsv_to_rgb(t.color.x, t.color.y, t.color.z));
-
-    //            window.cursor_y -= window_fontsize / window.h;
-    //        },
-    //        else => {},
-    //    }
-    //}
-}
-
 const bl = 100;
 const a0 = math.Quat.fromAxisAngle(.{ .x = 1 }, 0);
 const a1 = math.Quat.fromAxisAngle(.{ .x = 1 }, 0);
 const b0 = math.Quat.fromAxisAngle(.{ .x = 1 }, std.math.pi / 4.0);
 const b1 = math.Quat.fromAxisAngle(.{ .x = 1 }, std.math.pi / 4.0);
 
-export fn draw(vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer, player_id: common.EntityId, input: *const Input) void {
-    _ = vars;
-    const player = common.findPlayerById(memory.players.slice(), player_id) orelse return;
-    if (player.state == .dead) {
-        return;
-    }
-    const camera = player.camera;
-
-    cmd.push(camera, .{});
-
-    //draw_model(memory, cmd, "res/models/brog/frog", true, m4.modelWithRotations(.{ .x = 50, .y = 0, .z = 20 }, .{ .x = 20, .y = 20, .z = 20 }, .{
-    //    .x = 0,
-    //    .y = 0,
-    //    .z = @as(f32, @floatFromInt(memory.time)) / 1e9,
-    //}));
-
-    if (player.weapons[0]) |weapon| {
-        draw_model(cmd, &weapon.tree, m4.modelWithRotations(.{ .x = 100, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
-            .x = 0,
-            .y = 0,
-            .z = -std.math.pi / 2.0, //@as(f32, @floatFromInt(memory.time)) / 1e9,
-        }), true);
-    }
-
-    {
-        const tree = from_model(memory, "res/models/weapons/.308 bullet", &.{}) orelse {
+export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_api.CommandBuffer, player_id: common.EntityId, input: *const Input) void {
+    if (ts.is_main()) {
+        _ = vars;
+        const player = common.findPlayerById(memory.players.slice(), player_id) orelse return;
+        if (player.state == .dead) {
             return;
-        };
-        draw_model(cmd, &tree, m4.mul(m4.modelWithRotations(.{ .x = 100, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
-            .x = 0,
-            .y = 0,
-            .z = -std.math.pi / 2.0, //@as(f32, @floatFromInt(memory.time)) / 1e9,
-        }), common.sniper.tree.nodes[common.sniper.id_bolt].root_transform), true);
-    }
+        }
+        const camera = player.camera;
 
-    voxels.draw(memory, cmd, player, input, &map);
+        cmd.push(camera, .{});
 
-    // Draw map(?)
-    var prng = std.Random.DefaultPrng.init(0);
-    const rand = prng.random();
+        //draw_model(memory, cmd, "res/models/brog/frog", true, m4.modelWithRotations(.{ .x = 50, .y = 0, .z = 20 }, .{ .x = 20, .y = 20, .z = 20 }, .{
+        //    .x = 0,
+        //    .y = 0,
+        //    .z = @as(f32, @floatFromInt(memory.time)) / 1e9,
+        //}));
 
-    // pick
-    {
-        const vp = m4.mul(camera.proj, camera.view);
-        const inv_vp = m4.inverse(vp);
-
-        const dev_x = 2 * (memory.cursor_pos.x - 0.5);
-        const dev_y = 2 * (memory.cursor_pos.y - 0.5);
-        var near = m4.mulv(inv_vp, v4{ .x = dev_x, .y = dev_y, .z = 0.0, .w = 1 });
-        near.x /= near.w;
-        near.y /= near.w;
-        near.z /= near.w;
-        var far = m4.mulv(inv_vp, v4{ .x = dev_x, .y = dev_y, .z = 1.0, .w = 1 });
-        far.x /= far.w;
-        far.y /= far.w;
-        far.z /= far.w;
-
-        const d = v3.normalize(v3.sub(.{ .x = far.x, .y = far.y, .z = far.z }, .{ .x = near.x, .y = near.y, .z = near.z }));
-        const p = v3.add(camera.pos, v3.scale(15.0, d));
-        _ = p;
-
-        //cmd.push(primitive.Cube{
-        //    .model = m4.modelWithRotations(
-        //        p,
-        //        .{ .x = 20, .y = 20, .z = 20 },
-        //        .{ .x = 0, .y = 0, .z = 0 },
-        //    ),
-        //}, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
-    }
-
-    for (memory.entities.slice()) |e| {
-        var plane = e.plane;
-        plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x, .y = global_plane_size.y, .z = 1 });
-        cmd.push(plane, hsv_to_rgb(10, 0.6, 0.7));
-        plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x - 10, .y = global_plane_size.y - 10, .z = 2 });
-        cmd.push(plane, hsv_to_rgb(10, 0.6, 0.5));
-    }
-
-    if (player.in_editor and memory.selected_entity != null) {
-        drawWidget(cmd, &memory.widget);
-    }
-
-    // Draw players
-    const player_cube_size = 10;
-    for (memory.players.slice()) |p| {
-        if (p.id == player_id)
-            continue;
-        if (p.state == .alive) {
-            const height = player_height(&p);
-
-            const pos = v3{
-                .x = p.pos.x,
-                .y = p.pos.y,
-                .z = p.pos.z + tile_base_height + tile_max_height + height / 2,
-            };
-            const scale = v3{
-                .x = player_cube_size,
-                .y = player_cube_size,
-                .z = height,
-            };
-            const rot = v3{
+        if (player.weapons[0]) |weapon| {
+            draw_model(cmd, &weapon.tree, m4.modelWithRotations(.{ .x = 100, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
                 .x = 0,
-                .y = p.pitch,
-                .z = p.yaw,
-            };
-            const model = m4.modelWithRotations(pos, scale, rot);
-            cmd.push(primitive.Cube{
-                .model = model,
-            }, playerRandomColor(p.id, rand));
-        } else {
-            const height = player_height(&p);
-
-            const pos = v3{
-                .x = p.pos.x,
-                .y = p.pos.y,
-                .z = p.pos.z + tile_base_height + tile_max_height + height / 2,
-            };
-            const scale = v3{
-                .x = player_cube_size,
-                .y = player_cube_size,
-                .z = height,
-            };
-            const rot = v3{
-                .x = 0,
-                .y = p.pitch + std.math.pi / 2.0,
-                .z = p.yaw,
-            };
-            const model = m4.modelWithRotations(pos, scale, rot);
-            cmd.push(primitive.Cube{
-                .model = model,
-            }, playerRandomColor(p.id, rand));
+                .y = 0,
+                .z = -std.math.pi / 2.0, //@as(f32, @floatFromInt(memory.time)) / 1e9,
+            }), true);
         }
-    }
-
-    //cmd.push(primitive.Cube{
-    //    .model = m4.modelWithRotations(.{ .x = -20, .y = 500 * @sin(0.1 * @as(f32, @floatFromInt(memory.time)) / 1e9), .z = 40 }, .{ .x = 10, .y = 10, .z = 10 }, .{
-    //        .x = 0,
-    //        .y = 0,
-    //        .z = 0,
-    //    }),
-    //}, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
-
-    for (memory.players.slice()) |p| {
-        if (p.state == .dead) {
-            continue;
-        }
-        // Draw weapons
-        if (!player.in_editor) {
-            if (p.weapons[p.weapon_current]) |weapon| {
-                switch (weapon.type) {
-                    .sniper => {
-                        draw_model(cmd, &weapon.tree, weapon_model, true);
-                    },
-                    .pistol => {
-                        draw_model(cmd, &weapon.tree, weapon_model, true);
-                    },
-                    .nade => {},
-                }
-            }
-        }
-    }
-
-    // Draw tracers for hitscans
-    for (memory.hitscans.slice()) |h| {
-        var col = playerRandomColor(h.id_from, rand);
-        col.a = @intFromFloat(255.0 * h.time_left / h.total_time);
-        cmd.push(primitive.Cube{
-            .model = m4.modelFromXDir(
-                v3.add(h.ray.pos, v3.scale(h.ray.len / 2 + 2, h.ray.dir)),
-                .{ .x = h.ray.len, .y = h.width, .z = h.width },
-                h.ray.dir,
-            ),
-        }, col);
-    }
-
-    cmd.push(primitive.End3d{}, .{});
-
-    cmd.push(primitive.Camera2d{
-        .target = memory.target,
-        .zoom = memory.zoom,
-    }, .{});
-    //    if (vars.speedometer) {
-    //        graphAppend(&memory.vel_graph, v3.len(memory.players.buffer[0].vel));
-    //        drawGraph(b, &memory.vel_graph,
-    //            .{.x = 10, .y = 80 + 200},
-    //            .{.x = 200, .y = 100},
-    //            .{.x = 10, .y = 10},
-    //            15, 0.75, 0.5);
-    //    }
-
-    if (memory.active_state == .pause) {
-        if (pushWindow(memory, cmd, "wow", 0.5, 0.5)) {
-            pushText(memory, cmd, "haha");
-            pushText(memory, cmd, "abcarstratrastarst");
-            pushText(memory, cmd, "haha");
-            pushText(memory, cmd, "haha");
-            pushText(memory, cmd, "haha");
-            pushText(memory, cmd, "haha");
-            pushText(memory, cmd, "haha");
-            pushText(memory, cmd, "haha");
-            //const index = memory.current_window.?;
-            //memory.windows.?.items[index].children.append(.{
-            //    .text = .{
-            //        .str = memory.console_input.slice(),
-            //    },
-            //}) catch unreachable;
-        }
-    }
-
-    if (memory.active_state == .pause) {
-        // update cursor position
-        memory.cursor_pos.x += input.cursor_delta.x;
-        memory.cursor_pos.y -= input.cursor_delta.y;
-        memory.cursor_pos.x = std.math.clamp(memory.cursor_pos.x, 0, 1);
-        memory.cursor_pos.y = std.math.clamp(memory.cursor_pos.y, 0, 1);
-
-        // check window collisions
-        var maybew = memory.windows.first;
-        while (maybew) |w| {
-            if (memory.cursor_pos.x >= w.persistent.x and
-                memory.cursor_pos.y >= w.persistent.y + w.persistent.h - top_bar_height and
-                memory.cursor_pos.x <= w.persistent.x + w.persistent.w and
-                memory.cursor_pos.y <= w.persistent.y + w.persistent.h)
-            {
-                w.hover = true;
-            } else {
-                w.hover = false;
-            }
-
-            if (input.isset(.Interact)) {
-                if (w.persistent.moving) {
-                    w.persistent.moving = false;
-                } else if (w.hover) {
-                    memory.window_moving_offset = v2.sub(.{ .x = w.persistent.x, .y = w.persistent.y }, memory.cursor_pos);
-                    w.persistent.moving = true;
-                }
-            }
-
-            if (w.persistent.moving) {
-                w.persistent.x = memory.cursor_pos.x + memory.window_moving_offset.x;
-                w.persistent.y = memory.cursor_pos.y + memory.window_moving_offset.y;
-            }
-
-            maybew = w.next;
-        }
-
-        //for (memory.windows.?.items) |*win| {
-        //    if (win.moving) {}
-        //}
-    }
-
-    if (memory.active_state == .console) {
-        //    if (!mouse_enabled) {
-        //        mouse_enabled = true;
-        //        raylib.EnableCursor();
-        //    }
-        const console_height = 1.0 / 3.0;
-        cmd.push(primitive.Rectangle{ .pos = .{
-            .x = 0,
-            .y = 1 - (console_height - fontsize),
-        }, .size = .{
-            .x = 1,
-            .y = console_height,
-        } }, hsv_to_rgb(200, 0.5, 0.25));
-        cmd.push(primitive.Rectangle{ .pos = .{
-            .x = 0,
-            .y = 1 - console_height,
-        }, .size = .{
-            .x = 1,
-            .y = fontsize,
-        } }, hsv_to_rgb(200, 0.5, 0.1));
 
         {
+            const tree = from_model(memory, "res/models/weapons/.308 bullet", &.{}) orelse {
+                return;
+            };
+            draw_model(cmd, &tree, m4.mul(m4.modelWithRotations(.{ .x = 100, .y = 0, .z = 20 }, .{ .x = 10, .y = 10, .z = 10 }, .{
+                .x = 0,
+                .y = 0,
+                .z = -std.math.pi / 2.0, //@as(f32, @floatFromInt(memory.time)) / 1e9,
+            }), common.sniper.tree.nodes[common.sniper.id_bolt].root_transform), true);
+        }
+
+        // Draw map(?)
+        voxels.draw(memory, cmd, player, input, &map);
+        cmd.push(primitive.Cube{
+            .model = m4.modelWithRotations(
+                .{ .x = @cos(memory.sun_angle), .y = 0, .z = @sin(memory.sun_angle) },
+                .{ .x = 20, .y = 20, .z = 20 },
+                .{ .x = 0, .y = 0, .z = 0 },
+            ),
+        }, hsv_to_rgb(60.0, 0.5, 0.8));
+        var prng = std.Random.DefaultPrng.init(0);
+        const rand = prng.random();
+
+        // pick
+        {
+            const vp = m4.mul(camera.proj, camera.view);
+            const inv_vp = m4.inverse(vp);
+
+            const dev_x = 2 * (memory.cursor_pos.x - 0.5);
+            const dev_y = 2 * (memory.cursor_pos.y - 0.5);
+            var near = m4.mulv(inv_vp, v4{ .x = dev_x, .y = dev_y, .z = 0.0, .w = 1 });
+            near.x /= near.w;
+            near.y /= near.w;
+            near.z /= near.w;
+            var far = m4.mulv(inv_vp, v4{ .x = dev_x, .y = dev_y, .z = 1.0, .w = 1 });
+            far.x /= far.w;
+            far.y /= far.w;
+            far.z /= far.w;
+
+            const d = v3.normalize(v3.sub(.{ .x = far.x, .y = far.y, .z = far.z }, .{ .x = near.x, .y = near.y, .z = near.z }));
+            const p = v3.add(camera.pos, v3.scale(15.0, d));
+            _ = p;
+
+            //cmd.push(primitive.Cube{
+            //    .model = m4.modelWithRotations(
+            //        p,
+            //        .{ .x = 20, .y = 20, .z = 20 },
+            //        .{ .x = 0, .y = 0, .z = 0 },
+            //    ),
+            //}, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+        }
+
+        for (memory.entities.slice()) |e| {
+            var plane = e.plane;
+            plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x, .y = global_plane_size.y, .z = 1 });
+            cmd.push(plane, hsv_to_rgb(10, 0.6, 0.7));
+            plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x - 10, .y = global_plane_size.y - 10, .z = 2 });
+            cmd.push(plane, hsv_to_rgb(10, 0.6, 0.5));
+        }
+
+        if (player.in_editor and memory.selected_entity != null) {
+            drawWidget(cmd, &memory.widget);
+        }
+
+        // Draw players
+        const player_cube_size = 10;
+        for (memory.players.slice()) |p| {
+            if (p.id == player_id)
+                continue;
+            if (p.state == .alive) {
+                const height = player_height(&p);
+
+                const pos = v3{
+                    .x = p.pos.x,
+                    .y = p.pos.y,
+                    .z = p.pos.z + tile_base_height + tile_max_height + height / 2,
+                };
+                const scale = v3{
+                    .x = player_cube_size,
+                    .y = player_cube_size,
+                    .z = height,
+                };
+                const rot = v3{
+                    .x = 0,
+                    .y = p.pitch,
+                    .z = p.yaw,
+                };
+                const model = m4.modelWithRotations(pos, scale, rot);
+                cmd.push(primitive.Cube{
+                    .model = model,
+                }, playerRandomColor(p.id, rand));
+            } else {
+                const height = player_height(&p);
+
+                const pos = v3{
+                    .x = p.pos.x,
+                    .y = p.pos.y,
+                    .z = p.pos.z + tile_base_height + tile_max_height + height / 2,
+                };
+                const scale = v3{
+                    .x = player_cube_size,
+                    .y = player_cube_size,
+                    .z = height,
+                };
+                const rot = v3{
+                    .x = 0,
+                    .y = p.pitch + std.math.pi / 2.0,
+                    .z = p.yaw,
+                };
+                const model = m4.modelWithRotations(pos, scale, rot);
+                cmd.push(primitive.Cube{
+                    .model = model,
+                }, playerRandomColor(p.id, rand));
+            }
+        }
+
+        //cmd.push(primitive.Cube{
+        //    .model = m4.modelWithRotations(.{ .x = -20, .y = 500 * @sin(0.1 * @as(f32, @floatFromInt(memory.time)) / 1e9), .z = 40 }, .{ .x = 10, .y = 10, .z = 10 }, .{
+        //        .x = 0,
+        //        .y = 0,
+        //        .z = 0,
+        //    }),
+        //}, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
+
+        for (memory.players.slice()) |p| {
+            if (p.state == .dead) {
+                continue;
+            }
+            // Draw weapons
+            if (!player.in_editor) {
+                if (p.weapons[p.weapon_current]) |weapon| {
+                    switch (weapon.type) {
+                        .sniper => {
+                            draw_model(cmd, &weapon.tree, weapon_model, true);
+                        },
+                        .pistol => {
+                            draw_model(cmd, &weapon.tree, weapon_model, true);
+                        },
+                        .nade => {},
+                    }
+                }
+            }
+        }
+
+        // Draw tracers for hitscans
+        for (memory.hitscans.slice()) |h| {
+            var col = playerRandomColor(h.id_from, rand);
+            col.a = @intFromFloat(255.0 * h.time_left / h.total_time);
+            cmd.push(primitive.Cube{
+                .model = m4.modelFromXDir(
+                    v3.add(h.ray.pos, v3.scale(h.ray.len / 2 + 2, h.ray.dir)),
+                    .{ .x = h.ray.len, .y = h.width, .z = h.width },
+                    h.ray.dir,
+                ),
+            }, col);
+        }
+
+        cmd.push(primitive.End3d{}, .{});
+
+        cmd.push(primitive.Camera2d{
+            .target = memory.target,
+            .zoom = memory.zoom,
+        }, .{});
+        //    if (vars.speedometer) {
+        //        graphAppend(&memory.vel_graph, v3.len(memory.players.buffer[0].vel));
+        //        drawGraph(b, &memory.vel_graph,
+        //            .{.x = 10, .y = 80 + 200},
+        //            .{.x = 200, .y = 100},
+        //            .{.x = 10, .y = 10},
+        //            15, 0.75, 0.5);
+        //    }
+
+        if (memory.active_state == .pause) {
+            if (ui.begin_window(ts, memory, .pause, "wow", 0.5, 0.5)) {
+                ui.push_text(ts, "haha");
+                ui.push_text(ts, "abcarstratrastarst");
+                ui.push_text(ts, "haha");
+                ui.push_text(ts, "haha");
+                ui.push_text(ts, "haha");
+                _ = ui.button(ts, "button");
+                ui.push_text(ts, "haha");
+                ui.push_text(ts, "haha");
+                ui.push_text(ts, "haha");
+                //const index = memory.current_window.?;
+                //memory.windows.?.items[index].children.append(.{
+                //    .text = .{
+                //        .str = memory.console_input.slice(),
+                //    },
+                //}) catch unreachable;
+                ui.end_window(memory, cmd);
+            }
+        }
+
+        if (memory.active_state == .pause) {
+            // update cursor position
+            memory.cursor_pos.x += input.cursor_delta.x;
+            memory.cursor_pos.y -= input.cursor_delta.y;
+            memory.cursor_pos.x = std.math.clamp(memory.cursor_pos.x, 0, 1);
+            memory.cursor_pos.y = std.math.clamp(memory.cursor_pos.y, 0, 1);
+
+            // check window collisions
+            ui.window_mouse_collision(memory, input);
+
+            //for (memory.windows.?.items) |*win| {
+            //    if (win.moving) {}
+            //}
+        }
+
+        if (memory.active_state == .console) {
+            //    if (!mouse_enabled) {
+            //        mouse_enabled = true;
+            //        raylib.EnableCursor();
+            //    }
+            const console_height = 1.0 / 3.0;
+            cmd.push(primitive.Rectangle{ .pos = .{
+                .x = 0,
+                .y = 1 - (console_height - ui.fontsize),
+            }, .size = .{
+                .x = 1,
+                .y = console_height,
+            } }, hsv_to_rgb(200, 0.5, 0.25));
+            cmd.push(primitive.Rectangle{ .pos = .{
+                .x = 0,
+                .y = 1 - console_height,
+            }, .size = .{
+                .x = 1,
+                .y = ui.fontsize,
+            } }, hsv_to_rgb(200, 0.5, 0.1));
+
+            // TODO(anjo): Move console rendering to ui code
+            //{
+            //    var text = primitive.Text{
+            //        .pos = .{
+            //            .x = 0,
+            //            .y = 1.0 - console_height,
+            //        },
+            //        .str = undefined,
+            //        .len = memory.console_input.used,
+            //        .size = ui.fontsize,
+            //        .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
+            //        .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
+            //    };
+            //    @memset(&text.str, 0);
+            //    const dst: []u8 = &text.str;
+            //    @memcpy(dst[0..memory.console_input.slice().len], memory.console_input.slice());
+            //    cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
+            //}
+        }
+
+        {
+            const y: f32 = 1.0 - ui.fontsize;
             var text = primitive.Text{
                 .pos = .{
                     .x = 0,
-                    .y = 1.0 - console_height,
+                    .y = y,
                 },
                 .str = undefined,
-                .len = memory.console_input.used,
-                .size = fontsize,
+                .size = ui.fontsize,
                 .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
                 .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
             };
-            @memset(&text.str, 0);
-            const dst: []u8 = &text.str;
-            @memcpy(dst[0..memory.console_input.slice().len], memory.console_input.slice());
-            cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
-        }
-    }
 
-    {
-        const y: f32 = 1.0 - fontsize;
-        var text = primitive.Text{
-            .pos = .{
-                .x = 0,
-                .y = y,
-            },
-            .str = undefined,
-            .len = 0,
-            .size = fontsize,
-            .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
-            .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
-        };
-        @memset(&text.str, 0);
+            {
+                const elapsed: f32 = @floatFromInt(ts.profile.block_last_frame.elapsed_tsc);
+                const freq: f32 = @floatFromInt(ts.profile.timer_freq);
+                const last_frametime = freq / elapsed;
+                text.str = common.cstr_fmt(&ts.arena_frame, "fps: {d:5.0}", .{last_frametime});
+                text.pos.x = 0.0;
+                cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
+            }
 
-        @memset(&text.str, 0);
-        {
-            const elapsed: f32 = @floatFromInt(memory.profile.block_last_frame.elapsed_tsc);
-            const freq: f32 = @floatFromInt(memory.profile.timer_freq);
-            const last_frametime = freq / elapsed;
-            const str = std.fmt.bufPrint(&text.str, "fps: {d:5.0}", .{last_frametime}) catch unreachable;
-            text.len = str.len;
-            text.pos.x = 0.0;
-            cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
-        }
+            {
+                text.str = common.cstr_fmt(&ts.arena_frame, "speed: {d:5.0}", .{v3.len(memory.players.data[0].vel)});
+                text.pos.x = 1.0 - 0.3;
+                cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
+            }
 
-        @memset(&text.str, 0);
-        {
-            const str = std.fmt.bufPrint(&text.str, "speed: {d:5.0}", .{v3.len(memory.players.data[0].vel)}) catch unreachable;
-            text.len = str.len;
-            text.pos.x = 1.0 - 0.3;
-            cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
-        }
-
-        // ammo
-        @memset(&text.str, 0);
-        if (player.weapons[player.weapon_current]) |weapon| {
-            const size = 0.05;
-            const str = std.fmt.bufPrint(&text.str, "{}", .{weapon.ammo}) catch unreachable;
-            text.len = str.len;
-            text.pos.x = 1.0 - 3 * size + size + size / 4.0;
-            text.pos.y = 0.05;
-            cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
-        }
-
-        // killfeed
-        {
-            var i: usize = 0;
-            while (i < memory.killfeed.size) : (i += 1) {
-                const index = (memory.killfeed.bottom + i) % memory.killfeed.data.len;
-                const entry = &memory.killfeed.data[index];
-
+            // ammo
+            if (player.weapons[player.weapon_current]) |weapon| {
                 const size = 0.05;
-                cmd.push(primitive.Rectangle{
-                    .pos = .{
-                        .x = 1.0 - 3 * size,
-                        .y = 1.0 - (size + 1.5 * size * @as(f32, @floatFromInt(i))),
-                    },
-                    .size = .{ .x = size, .y = size },
-                }, playerColor(entry.from));
+                text.str = common.cstr_fmt(&ts.arena_frame, "{}", .{weapon.ammo});
+                text.pos.x = 1.0 - 3 * size + size + size / 4.0;
+                text.pos.y = 0.05;
+                cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
+            }
 
-                cmd.push(primitive.Rectangle{
-                    .pos = .{
-                        .x = 1.0 - 3 * size + 2 * size,
-                        .y = 1.0 - (size + 1.5 * size * @as(f32, @floatFromInt(i))),
-                    },
-                    .size = .{ .x = size, .y = size },
-                }, playerColor(entry.to));
+            // killfeed
+            {
+                var i: usize = 0;
+                while (i < memory.killfeed.size) : (i += 1) {
+                    const index = (memory.killfeed.bottom + i) % memory.killfeed.data.len;
+                    const entry = &memory.killfeed.data[index];
 
-                @memset(&text.str, 0);
-                {
-                    const str = std.fmt.bufPrint(&text.str, ">", .{}) catch unreachable;
-                    text.len = str.len;
-                    text.pos.x = 1.0 - 3 * size + size + size / 4.0;
-                    text.pos.y = 1.0 - (size - size / 4.0 + 1.5 * size * @as(f32, @floatFromInt(i)));
-                    cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
+                    const size = 0.05;
+                    cmd.push(primitive.Rectangle{
+                        .pos = .{
+                            .x = 1.0 - 3 * size,
+                            .y = 1.0 - (size + 1.5 * size * @as(f32, @floatFromInt(i))),
+                        },
+                        .size = .{ .x = size, .y = size },
+                    }, playerColor(entry.from));
+
+                    cmd.push(primitive.Rectangle{
+                        .pos = .{
+                            .x = 1.0 - 3 * size + 2 * size,
+                            .y = 1.0 - (size + 1.5 * size * @as(f32, @floatFromInt(i))),
+                        },
+                        .size = .{ .x = size, .y = size },
+                    }, playerColor(entry.to));
+
+                    {
+                        text.str = ">";
+                        text.pos.x = 1.0 - 3 * size + size + size / 4.0;
+                        text.pos.y = 1.0 - (size - size / 4.0 + 1.5 * size * @as(f32, @floatFromInt(i)));
+                        cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
+                    }
                 }
+            }
+        }
+
+        if (memory.active_state == .pause) {
+            // cursor
+            const cursor_size = 0.01;
+            cmd.push(primitive.Rectangle{
+                .pos = .{
+                    .x = memory.cursor_pos.x - cursor_size / 2.0,
+                    .y = memory.cursor_pos.y - cursor_size / 2.0,
+                },
+                .size = .{
+                    .x = cursor_size,
+                    .y = cursor_size,
+                },
+            }, hsv_to_rgb(350, 0.75, 0.75));
+        } else {
+            //const weapon = player.weapons[player.weapon_current];
+            const zoom_fire = false; //weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
+
+            // Crosshair
+            if (memory.active_state == .pause) {
+                const cursor_thickness = 0.004;
+                const color = hsv_to_rgb(
+                    (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
+                    0.3,
+                    0.9,
+                );
+                cmd.push(primitive.Rectangle{
+                    .pos = .{
+                        .x = 0.5 - cursor_thickness / 2.0,
+                        .y = 0.5 - cursor_thickness / 2.0,
+                    },
+                    .size = .{
+                        .x = cursor_thickness,
+                        .y = cursor_thickness,
+                    },
+                }, color);
+            } else if (!zoom_fire) {
+                //const cursor_thickness = 0.004;
+                //const cursor_length = 0.01;
+                //const cursor_gap = 0.03;
+                //const color = hsv_to_rgb(
+                //    (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
+                //    0.3,
+                //    0.9,
+                //);
+                //cmd.push(primitive.Rectangle{
+                //    .pos = .{
+                //        .x = 0.5 - cursor_gap / 2.0 - cursor_length,
+                //        .y = 0.5 - cursor_thickness / 2.0,
+                //    },
+                //    .size = .{
+                //        .x = cursor_length,
+                //        .y = cursor_thickness,
+                //    },
+                //}, color);
+                //cmd.push(primitive.Rectangle{
+                //    .pos = .{
+                //        .x = 0.5 + cursor_gap / 2.0,
+                //        .y = 0.5 - cursor_thickness / 2.0,
+                //    },
+                //    .size = .{
+                //        .x = cursor_length,
+                //        .y = cursor_thickness,
+                //    },
+                //}, color);
+                //cmd.push(primitive.Rectangle{
+                //    .pos = .{
+                //        .x = 0.5 - cursor_thickness / 2.0,
+                //        .y = 0.5 + cursor_gap / 2.0,
+                //    },
+                //    .size = .{
+                //        .x = cursor_thickness,
+                //        .y = cursor_length,
+                //    },
+                //}, color);
+                //cmd.push(primitive.Rectangle{
+                //    .pos = .{
+                //        .x = 0.5 - cursor_thickness / 2.0,
+                //        .y = 0.5 - cursor_gap / 2.0 - cursor_length,
+                //    },
+                //    .size = .{
+                //        .x = cursor_thickness,
+                //        .y = cursor_length,
+                //    },
+                //}, color);
+            } else if (zoom_fire) {
+                // Sniper crosshair
+                const cursor_thickness = 0.0025;
+                const gap = 0.75;
+
+                const color = Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
+
+                cmd.push(primitive.Rectangle{
+                    .pos = .{
+                        .x = 0.0,
+                        .y = 0.5 - cursor_thickness / 2.0,
+                    },
+                    .size = .{
+                        .x = 1.0,
+                        .y = cursor_thickness,
+                    },
+                }, color);
+                cmd.push(primitive.Rectangle{
+                    .pos = .{
+                        .x = 0.5 - cursor_thickness / 2.0,
+                        .y = 0.0,
+                    },
+                    .size = .{
+                        .x = cursor_thickness,
+                        .y = 1.0,
+                    },
+                }, color);
+
+                cmd.push(primitive.Rectangle{
+                    .pos = .{
+                        .x = 0.0,
+                        .y = 0.5 + gap / 2.0,
+                    },
+                    .size = .{
+                        .x = 1.0,
+                        .y = 0.5 - gap / 2.0,
+                    },
+                }, color);
+                cmd.push(primitive.Rectangle{
+                    .pos = .{
+                        .x = 0.0,
+                        .y = 0.0,
+                    },
+                    .size = .{
+                        .x = 1.0,
+                        .y = 0.5 - gap / 2.0,
+                    },
+                }, color);
+
+                cmd.push(primitive.Rectangle{
+                    .pos = .{
+                        .x = 0.5 + gap / 2.0,
+                        .y = 0.0,
+                    },
+                    .size = .{
+                        .x = 0.5 - gap / 2.0,
+                        .y = 1.0,
+                    },
+                }, color);
+                cmd.push(primitive.Rectangle{
+                    .pos = .{
+                        .x = 0.0,
+                        .y = 0.0,
+                    },
+                    .size = .{
+                        .x = 0.5 - gap / 2.0,
+                        .y = 1.0,
+                    },
+                }, color);
             }
         }
     }
 
-    if (memory.active_state == .pause) {
-        // cursor
-        const cursor_size = 0.01;
-        cmd.push(primitive.Rectangle{
-            .pos = .{
-                .x = memory.cursor_pos.x - cursor_size / 2.0,
-                .y = memory.cursor_pos.y - cursor_size / 2.0,
-            },
-            .size = .{
-                .x = cursor_size,
-                .y = cursor_size,
-            },
-        }, hsv_to_rgb(350, 0.75, 0.75));
-    } else {
-        //const weapon = player.weapons[player.weapon_current];
-        const zoom_fire = false; //weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
-
-        // Crosshair
-        if (memory.active_state == .pause) {
-            const cursor_thickness = 0.004;
-            const color = hsv_to_rgb(
-                (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
-                0.3,
-                0.9,
-            );
-            cmd.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.5 - cursor_thickness / 2.0,
-                    .y = 0.5 - cursor_thickness / 2.0,
-                },
-                .size = .{
-                    .x = cursor_thickness,
-                    .y = cursor_thickness,
-                },
-            }, color);
-        } else if (!zoom_fire) {
-            //const cursor_thickness = 0.004;
-            //const cursor_length = 0.01;
-            //const cursor_gap = 0.03;
-            //const color = hsv_to_rgb(
-            //    (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
-            //    0.3,
-            //    0.9,
-            //);
-            //cmd.push(primitive.Rectangle{
-            //    .pos = .{
-            //        .x = 0.5 - cursor_gap / 2.0 - cursor_length,
-            //        .y = 0.5 - cursor_thickness / 2.0,
-            //    },
-            //    .size = .{
-            //        .x = cursor_length,
-            //        .y = cursor_thickness,
-            //    },
-            //}, color);
-            //cmd.push(primitive.Rectangle{
-            //    .pos = .{
-            //        .x = 0.5 + cursor_gap / 2.0,
-            //        .y = 0.5 - cursor_thickness / 2.0,
-            //    },
-            //    .size = .{
-            //        .x = cursor_length,
-            //        .y = cursor_thickness,
-            //    },
-            //}, color);
-            //cmd.push(primitive.Rectangle{
-            //    .pos = .{
-            //        .x = 0.5 - cursor_thickness / 2.0,
-            //        .y = 0.5 + cursor_gap / 2.0,
-            //    },
-            //    .size = .{
-            //        .x = cursor_thickness,
-            //        .y = cursor_length,
-            //    },
-            //}, color);
-            //cmd.push(primitive.Rectangle{
-            //    .pos = .{
-            //        .x = 0.5 - cursor_thickness / 2.0,
-            //        .y = 0.5 - cursor_gap / 2.0 - cursor_length,
-            //    },
-            //    .size = .{
-            //        .x = cursor_thickness,
-            //        .y = cursor_length,
-            //    },
-            //}, color);
-        } else if (zoom_fire) {
-            // Sniper crosshair
-            const cursor_thickness = 0.0025;
-            const gap = 0.75;
-
-            const color = Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
-
-            cmd.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.0,
-                    .y = 0.5 - cursor_thickness / 2.0,
-                },
-                .size = .{
-                    .x = 1.0,
-                    .y = cursor_thickness,
-                },
-            }, color);
-            cmd.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.5 - cursor_thickness / 2.0,
-                    .y = 0.0,
-                },
-                .size = .{
-                    .x = cursor_thickness,
-                    .y = 1.0,
-                },
-            }, color);
-
-            cmd.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.0,
-                    .y = 0.5 + gap / 2.0,
-                },
-                .size = .{
-                    .x = 1.0,
-                    .y = 0.5 - gap / 2.0,
-                },
-            }, color);
-            cmd.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.0,
-                    .y = 0.0,
-                },
-                .size = .{
-                    .x = 1.0,
-                    .y = 0.5 - gap / 2.0,
-                },
-            }, color);
-
-            cmd.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.5 + gap / 2.0,
-                    .y = 0.0,
-                },
-                .size = .{
-                    .x = 0.5 - gap / 2.0,
-                    .y = 1.0,
-                },
-            }, color);
-            cmd.push(primitive.Rectangle{
-                .pos = .{
-                    .x = 0.0,
-                    .y = 0.0,
-                },
-                .size = .{
-                    .x = 0.5 - gap / 2.0,
-                    .y = 1.0,
-                },
-            }, color);
-        }
-    }
+    memory.barrier.wait();
 
     if (input.isset(.DebugShowData)) {
-        ui_profile.draw(memory, cmd, input);
+        ui_profile.draw(ts, memory, cmd, input);
     }
 
-    cmd.push(primitive.End2d{}, .{});
+    memory.barrier.wait();
+
+    if (ts.is_main()) {
+        cmd.push(primitive.End2d{}, .{});
+    }
 }
 
 fn playerColor(id: common.EntityId) Color {

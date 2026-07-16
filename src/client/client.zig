@@ -11,6 +11,7 @@ const camera = common.camera;
 const config = common.config;
 const Vars = config.Vars;
 const Memory = common.Memory;
+const ThreadState = common.ThreadState;
 const Player = common.Player;
 const EntityId = common.EntityId;
 const Input = common.Input;
@@ -43,16 +44,13 @@ const sokol = @import("sokol");
 const sa = sokol.audio;
 const slog = sokol.log;
 
-fn testfn(a: i32) i32 {
-    std.log.info("testfn {}", .{a});
-    return 2 * a;
-}
-
 const c = @cImport({
     @cInclude("glfw3.h");
 });
 
-var log: common.log.GroupLog(.general) = undefined;
+threadlocal var log: common.log.GroupLog(.general) = undefined;
+
+var ii: usize = 0;
 
 //
 // State
@@ -287,8 +285,8 @@ const LocalPlayer = struct {
     id: ?EntityId = null,
 };
 
-fn findLocalPlayerById(local_players: []LocalPlayer, id: EntityId) ?*LocalPlayer {
-    for (local_players) |*l| {
+fn findLocalPlayerById(lp: []LocalPlayer, id: EntityId) ?*LocalPlayer {
+    for (lp) |*l| {
         if (l.id != null and l.id.? == id)
             return l;
     }
@@ -296,6 +294,16 @@ fn findLocalPlayerById(local_players: []LocalPlayer, id: EntityId) ?*LocalPlayer
 }
 
 var memory: Memory = .{};
+const Module = code_module.CodeModule(struct {
+    init: *fn (ts: *ThreadState, memory: *Memory) callconv(.c) bool,
+    deinit: *fn (ts: *ThreadState, memory: *Memory) callconv(.c) void,
+    update: *fn (ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) callconv(.c) void,
+    authorizedPlayerUpdate: *fn (ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) callconv(.c) void,
+    authorizedUpdate: *fn (ts: *ThreadState, vars: *const Vars, memory: *Memory, dt: f32) callconv(.c) void,
+    client_update: *fn (ts: *ThreadState, vars: *const Vars, memory: *Memory, dt: f32) callconv(.c) void,
+    draw: *fn (ts: *ThreadState, vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, player_id: common.EntityId, input: *const Input) callconv(.c) void,
+});
+var module: Module = undefined;
 
 //
 // glfw globals and callbacks for collecting inputs
@@ -388,62 +396,218 @@ pub fn connect(ip: []const u8, port: u16) void {
 // C calling convention necessary since this function might
 // be called across a library boundary.
 const page_size = std.heap.page_size_min;
-fn page_alloc(num_pages: usize) callconv(.c) []u8 {
-    return std.heap.page_allocator.alignedAlloc(u8, null, num_pages * page_size) catch unreachable;
+fn page_alloc(size: usize) []u8 {
+    const aligned_size = page_size * @divTrunc(size+page_size, page_size);
+    return std.heap.page_allocator.alignedAlloc(u8, null, aligned_size) catch unreachable;
 }
 
 const KiB = 1024;
 const MiB = 1024 * KiB;
 const GiB = 1024 * MiB;
 
-pub fn main() !void {
-    memory.arena_frame = Arena{ .memory = page_alloc(1024) };
-    memory.arena_persistent = Arena{ .memory = page_alloc(1) };
-    memory.animation_states = Arena{ .memory = page_alloc(1) };
-    const arena_log_persistent = Arena{ .memory = page_alloc(1) };
-    const arena_log_messages = Pool{ .arena = .{ .memory = page_alloc(1) } };
-    const arena_res = Arena{ .memory = page_alloc(@divTrunc(1*GiB, page_size)) };
+//
+// START SYSTEM INIT
+//
 
-    memory.windows.arena = memory.arena_frame;
+const max_num_threads = 16;
+var num_threads: usize = 0;
+var threads: [max_num_threads - 1]std.Thread = undefined;
+var main_thread_id: std.Thread.Id = undefined;
 
-    const mirror_to_stdio = true;
-    memory.log_memory = try common.log.LogMemory.init(&memory.frame, arena_log_persistent, arena_log_messages, null, mirror_to_stdio);
-    log = memory.log_memory.group_log(.general);
+threadlocal var ts: common.ThreadState = undefined;
 
-    if (build_options.options.debug) {
-        disk.frame = memory.mem.frame;
-        disk.persistent = memory.mem.persistent;
+var startup_futex = std.atomic.Value(u32).init(0);
+
+fn system_init() void {
+    num_threads = 8;
+    main_thread_id = std.Thread.getCurrentId();
+    for (threads[0..(num_threads - 1)], 0..) |*t, i| {
+        t.* = std.Thread.spawn(.{}, thread_main, .{ i + 1, num_threads }) catch {
+            std.log.err("Failed spawning thread {}", .{i});
+            std.process.exit(1);
+        };
     }
+}
+
+fn system_deinit() void {
+    for (threads[0..(num_threads - 1)]) |*t| {
+        t.join();
+    }
+}
+
+//
+// END SYSTEM INIT
+//
+
+
+// Draw state
+var command_buffer: draw_api.CommandBuffer = .{};
+
+// Player state
+var local_players: BoundedArray(LocalPlayer, 16) = .{};
+
+pub fn main() void {
+    system_init();
+    thread_main(0, num_threads);
+    system_deinit();
+}
+
+fn thread_main(thread_id: usize, thread_num_threads: usize) void {
+    // Initialize thread state
+    ts = .{
+        .id = @intCast(thread_id),
+        .num_threads = @intCast(thread_num_threads),
+    };
+
+    ts.arena_frame = Arena{ .memory = page_alloc(256 * MiB) };
+    var arena_persisent_state = Arena{ .memory = page_alloc(256 * MiB) };
+    ts.arena_persistent = common.ArenaFreelist{ .arena = &arena_persisent_state };
+    var arena_log_persistent = Arena{ .memory = page_alloc(1 * KiB) };
+    var arena_res = Arena{ .memory = page_alloc(1 * GiB) };
+    const mirror_to_stdio = false;
+    ts.log_memory = common.log.LogMemory.init(&ts.arena_frame, &arena_log_persistent, null, mirror_to_stdio) catch {
+        return;
+    };
+
+    ts.profile.init();
+    defer ts.profile.deinit();
+
+    log = ts.log_memory.group_log(.general);
 
     const num_cpus = std.Thread.getCpuCount() catch 1;
+    _ = num_cpus;
+    var window: ?*c.GLFWwindow = null;
+    var pack_in_memory: ?[]u8 = null;
 
-    memory.profile.init(&memory.arena_persistent, num_cpus);
-    defer memory.profile.deinit();
+    if (ts.is_main()) {
+        memory.animation_states = common.ArrayCircular(common.AnimationState){
+            .data = ts.arena_persistent.alloc(common.AnimationState, 64),
+        };
+        memory.windows.arena = &ts.arena_frame;
 
-    net.arena_frame = &memory.arena_frame;
-    net.arena_persistent = common.ArenaIntrusiveList{
-        .arena = &memory.arena_persistent,
-    };
-    net.init(&memory.log_memory);
-    res.arena = arena_res;
+        memory.barrier.init(@intCast(num_threads));
 
-    //
-    // Load pack
-    //
+        if (build_options.options.debug) {
+            disk.arena_frame = &ts.arena_frame;
+            disk.arena_persistent = &ts.arena_persistent;
+        }
 
-    goosepack.setAllocators(memory.mem.frame, memory.mem.persistent);
+        net.arena_frame = &ts.arena_frame;
+        net.arena_persistent = &ts.arena_persistent;
+        net.init(&ts.log_memory);
+        res.arena = &arena_res;
 
-    var pack_in_memory: ?[]u8 = res.read_file_to_memory("res.gp") catch null;
-    memory.pack = goosepack.init();
-    if (pack_in_memory) |bytes| {
-        try goosepack.load(&memory.pack, bytes);
+        goosepack.arena_frame = &ts.arena_frame;
+        var arena_pack_state = Arena{ .memory = page_alloc(1 * GiB) };
+        var arena_freelist_pack_state = common.ArenaFreelist{ .arena = &arena_pack_state };
+        goosepack.arena_persistent = &arena_freelist_pack_state;
+
+        //
+        // Load pack
+        //
+
+        pack_in_memory = res.read_file_to_memory("res.gp") catch null;
+        memory.pack = goosepack.Pack{};
+        if (pack_in_memory) |bytes| {
+            goosepack.load(&memory.pack, bytes) catch {
+                log.err("Failed loading pack", .{});
+            };
+        }
+
+        //
+        // Force connect to server
+        //
+
+        cl.run("connect 127.0.0.1 9053");
+
+        //
+        // GLFW init
+        //
+        if (c.glfwInit() == 0) {
+            log.err("Failed to initialize GLFW: {s}", .{glfw_get_error()});
+            std.process.exit(1);
+        }
+
+        c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MAJOR, 3);
+        c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MINOR, 3);
+        c.glfwWindowHint(c.GLFW_OPENGL_FORWARD_COMPAT, c.GLFW_TRUE);
+        c.glfwWindowHint(c.GLFW_OPENGL_PROFILE, c.GLFW_OPENGL_CORE_PROFILE);
+
+        window = c.glfwCreateWindow(800, 600, "floating", null, null) orelse {
+            log.err("Failed to open window: {s}", .{glfw_get_error()});
+            std.process.exit(1);
+        };
+
+        c.glfwMakeContextCurrent(window);
+        c.glfwSwapInterval(0);
+        c.glfwSetInputMode(window, c.GLFW_CURSOR, c.GLFW_CURSOR_DISABLED);
+        c.glfwSetInputMode(window, c.GLFW_RAW_MOUSE_MOTION, c.GLFW_TRUE);
+        _ = c.glfwSetCharCallback(window, charCallback);
+        _ = c.glfwSetScrollCallback(window, scrollCallback);
+
+        // Update gamepad database
+        {
+            const controller_db = @embedFile("gamecontrollerdb.txt");
+            _ = c.glfwUpdateGamepadMappings(controller_db);
+        }
+
+        // initialize renderer
+        draw.init(&ts.log_memory, &memory.pack);
+
+        //
+        // Audio
+        //
+
+        sa.setup(.{
+            .logger = .{ .func = slog.func },
+            .num_channels = 2,
+        });
+
+        //
+        // Modules
+        //
+        const module_path = "/home/aj/git/pmd/zig-out/lib";
+        const module_name = "game";
+        module = Module.init(&ts.arena_persistent, module_path, module_name) catch {
+            log.err("Failed to init module: {} at {}", .{ module_name, module_path });
+            return;
+        };
+
+        module.open() catch |err| {
+            log.err("Failed to open module {}", .{err});
+            return;
+        };
+    }
+
+    defer {
+        if (ts.is_main()) {
+            module.close();
+            sa.shutdown();
+            draw.deinit();
+            c.glfwDestroyWindow(window);
+            c.glfwTerminate();
+        }
     }
 
     //
-    // Connect to server
+    // Make non-main threads wait here until all global system are initialized
     //
-    //connect("127.0.0.1", 9053);
-    cl.run("connect 127.0.0.1 9053");
+
+    if (ts.is_main()) {
+        std.log.info("main starting others", .{});
+        startup_futex.store(1, .release);
+        std.Thread.Futex.wake(&startup_futex, @intCast(num_threads - 1));
+    } else {
+        while (startup_futex.load(.acquire) == 0) {
+            std.Thread.Futex.wait(&startup_futex, 0);
+        }
+    }
+
+    if (!module.function_table.init(&ts, &memory)) {
+        log.err("Failed to initialize module: {s}", .{module.name});
+        return;
+    }
+    defer module.function_table.deinit(&ts, &memory);
 
     //
     // Simulation state
@@ -451,95 +615,10 @@ pub fn main() !void {
 
     const desired_frame_time = std.time.ns_per_s / common.target_fps;
     const dt: f32 = 1.0 / @as(f32, @floatFromInt(common.target_fps));
-
     var tick: u64 = 0;
-
-    //
-    // GLFW init
-    //
-    if (c.glfwInit() == 0) {
-        log.err("Failed to initialize GLFW: {s}", .{glfw_get_error()});
-        std.process.exit(1);
-    }
-    defer c.glfwTerminate();
-
-    c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MAJOR, 3);
-    c.glfwWindowHint(c.GLFW_CONTEXT_VERSION_MINOR, 3);
-    c.glfwWindowHint(c.GLFW_OPENGL_FORWARD_COMPAT, c.GLFW_TRUE);
-    c.glfwWindowHint(c.GLFW_OPENGL_PROFILE, c.GLFW_OPENGL_CORE_PROFILE);
-
-    const window = c.glfwCreateWindow(800, 600, "floating", null, null) orelse {
-        log.err("Failed to open window: {s}", .{glfw_get_error()});
-        std.process.exit(1);
-    };
-    defer c.glfwDestroyWindow(window);
-
-    c.glfwMakeContextCurrent(window);
-    c.glfwSwapInterval(0);
-    c.glfwSetInputMode(window, c.GLFW_CURSOR, c.GLFW_CURSOR_DISABLED);
-    c.glfwSetInputMode(window, c.GLFW_RAW_MOUSE_MOTION, c.GLFW_TRUE);
-    _ = c.glfwSetCharCallback(window, charCallback);
-    _ = c.glfwSetScrollCallback(window, scrollCallback);
-
-    // Update gamepad database
-    {
-        const controller_db = @embedFile("gamecontrollerdb.txt");
-        _ = c.glfwUpdateGamepadMappings(controller_db);
-    }
-
-    // initialize renderer
-    draw.init(&memory.log_memory, memory.mem, &memory.pack);
-    defer draw.deinit();
-
-    //
-    // Audio
-    //
-
-    sa.setup(.{
-        .logger = .{ .func = slog.func },
-        .num_channels = 2,
-    });
-    defer sa.shutdown();
 
     // Load all sounds into buffers
     var playing_sounds: BoundedArray(PlayingSound, 64) = .{};
-
-    //
-    // Modules
-    //
-    var module = try code_module.CodeModule(struct {
-        init: *fn (memory: *Memory) callconv(.c) bool,
-        deinit: *fn (memory: *Memory) callconv(.c) void,
-        update: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) callconv(.c) void,
-        authorizedPlayerUpdate: *fn (vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) callconv(.c) void,
-        authorizedUpdate: *fn (vars: *const Vars, memory: *Memory, dt: f32) callconv(.c) void,
-        client_update: *fn (vars: *const Vars, memory: *Memory, dt: f32) callconv(.c) void,
-        draw: *fn (vars: *const Vars, memory: *Memory, b: *draw_api.CommandBuffer, player_id: common.EntityId, input: *const Input) callconv(.c) void,
-    }).init(memory.mem.persistent, "zig-out/lib", "game");
-
-    try module.open(memory.mem.persistent);
-    defer module.close();
-
-    memory.testfn = testfn;
-
-    {
-        const etst = memory.mem.frame.alloc(u8, 11) catch unreachable;
-        std.log.info("{any}", .{etst});
-    }
-    {
-        const etst = memory.mem.frame.alloc(u8, 11) catch unreachable;
-        std.log.info("{any}", .{etst});
-    }
-    {
-        const etst = memory.mem.frame.alloc(u8, 11) catch unreachable;
-        std.log.info("{any}", .{etst});
-    }
-    std.log.info("vtable ptr: {*}", .{&memory.mem.persistent.ptr});
-    if (!module.function_table.init(&memory)) {
-        log.err("Failed to initialize module: {s}", .{module.name});
-        return;
-    }
-    defer module.function_table.deinit(&memory);
 
     //
     // Input state
@@ -550,12 +629,8 @@ pub fn main() !void {
     var occupied_input_devices = [_]InputDeviceState{.connected} ** (keyboard_input_device_id + 1);
     var debug_gamepad_off: usize = 0;
 
-    var command_buffer: draw_api.CommandBuffer = .{};
-
-    var local_players: BoundedArray(LocalPlayer, 16) = .{};
-
-    timer = try std.time.Timer.start();
-    key_repeat_timer = try std.time.Timer.start();
+    timer = std.time.Timer.start() catch unreachable;
+    key_repeat_timer = std.time.Timer.start() catch unreachable;
 
     var frame_start_time: u64 = 0;
     var frame_end_time: u64 = 0;
@@ -575,16 +650,25 @@ pub fn main() !void {
 
     var running = true;
     while (running) {
-        memory.profile.begin_frame();
+        memory.barrier.wait();
 
-        frame_start_time = timer.read();
+        ts.profile.begin_frame();
 
-        log.info("---- Starting tick {}", .{tick});
+        if (ts.is_main()) {
+            frame_start_time = timer.read();
+        }
 
-        memory.windows = std.ArrayList(common.WindowState){};
-        memory.map_mods = std.ArrayList(common.MapModify){};
+        log.info("---- Starting tick {} (thread {})", .{ tick, ts.id });
 
-        {
+        if (ts.is_main()) {
+            memory.windows.head = null;
+            memory.windows.tail = null;
+            memory.map_mods.used = 0;
+        }
+
+        var width: c_int = undefined;
+        var height: c_int = undefined;
+        if (ts.is_main()) {
             scroll_delta = 0.0;
             c.glfwPollEvents();
 
@@ -596,29 +680,30 @@ pub fn main() !void {
             }
 
             {
-                if (try module.reloadIfChanged(memory.mem.persistent)) {
+                const reloaded = module.reload_if_changed() catch false;
+                if (reloaded) {
                     //_ = module.function_table.fofo();
                 }
             }
 
-            var width: c_int = undefined;
-            var height: c_int = undefined;
             c.glfwGetWindowSize(window, &width, &height);
             config.vars.aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+        }
 
+        if (ts.is_main()) {
             //
             // Read network
             //
             var events: []net.Event = undefined;
             if (server_index) |si| {
-                const block_rescv = memory.profile.begin("net receive", 0);
+                const block_rescv = ts.profile.begin("net receive", 0);
                 events = net.receiveMessagesClient(&host, si);
-                memory.profile.end(block_rescv);
+                ts.profile.end(block_rescv);
 
                 //
                 // Process network data
                 //
-                const block_process = memory.profile.begin("net process", 0);
+                const block_process = ts.profile.begin("net process", 0);
                 for (events) |event| {
                     switch (event) {
                         .peer_connected => {
@@ -714,7 +799,7 @@ pub fn main() !void {
                                         var auth_memory = memory;
                                         while (offset <= 0) : (offset += 1) {
                                             const old_input = local_player.?.input_buffer.peekRelative(offset);
-                                            module.function_table.update(&config.vars, &auth_memory, &auth_player, old_input, dt);
+                                            module.function_table.update(&ts, &config.vars, &auth_memory, &auth_player, old_input, dt);
                                         }
 
                                         if (!v3.eql(auth_player.pos, player.?.pos)) {
@@ -794,7 +879,7 @@ pub fn main() !void {
                                     std.log.info("received map mods from server", .{});
                                     const message: *align(1) packet.NewMapMods = @ptrCast(e.data);
                                     for (message.mods[0..message.num_mods]) |m| {
-                                        memory.map_mods.append(memory.mem.frame, m) catch unreachable;
+                                        memory.map_mods.append(m);
                                     }
                                 },
                                 .Kill => {
@@ -820,9 +905,11 @@ pub fn main() !void {
                         },
                     }
                 }
-                memory.profile.end(block_process);
+                ts.profile.end(block_process);
             }
+        }
 
+        if (ts.is_main()) {
             //
             // Handle client input
             //
@@ -837,8 +924,8 @@ pub fn main() !void {
 
                 {
                     {
-                        const block = memory.profile.begin("new player", 0);
-                        defer memory.profile.end(block);
+                        const block = ts.profile.begin("new player", 0);
+                        defer ts.profile.end(block);
                         for (occupied_input_devices, 0..) |d, i| {
                             if (d == .connected) {
                                 // @unlikely
@@ -961,8 +1048,8 @@ pub fn main() !void {
                     }
 
                     {
-                        const block = memory.profile.begin("gather input", 0);
-                        defer memory.profile.end(block);
+                        const block = ts.profile.begin("gather input", 0);
+                        defer ts.profile.end(block);
 
                         for (local_players.slice()) |*lp| {
                             if (lp.input_device_id == null or lp.id == null) {
@@ -1129,12 +1216,12 @@ pub fn main() !void {
                             // Run predictive move
                             if (player != null) {
                                 {
-                                    const block_update = memory.profile.begin("update", 0);
-                                    defer memory.profile.end(block_update);
-                                    module.function_table.update(&config.vars, &memory, player.?, &lp.input, dt);
+                                    const block_update = ts.profile.begin("update", 0);
+                                    defer ts.profile.end(block_update);
+                                    module.function_table.update(&ts, &config.vars, &memory, player.?, &lp.input, dt);
                                 }
                                 if (!connected) {
-                                    module.function_table.authorizedPlayerUpdate(&config.vars, &memory, player.?, &lp.input, dt);
+                                    module.function_table.authorizedPlayerUpdate(&ts, &config.vars, &memory, player.?, &lp.input, dt);
                                 }
                             }
 
@@ -1224,13 +1311,15 @@ pub fn main() !void {
                     memory.new_spawns.clear();
                 }
             }
+        }
 
+        if (ts.is_main()) {
             // TODO(anjo): Move to some "lobby" related thing
             if (!connected) {
-                module.function_table.authorizedUpdate(&config.vars, &memory, dt);
+                module.function_table.authorizedUpdate(&ts, &config.vars, &memory, dt);
             }
 
-            module.function_table.client_update(&config.vars, &memory, dt);
+            module.function_table.client_update(&ts, &config.vars, &memory, dt);
 
             // Send updated entities to server
             if (connected) {
@@ -1243,45 +1332,73 @@ pub fn main() !void {
                     });
                 }
             }
+        }
 
+        if (ts.is_main()) {
             //
             // Send network data
             //
             if (server_index) |index| {
                 net.process(&host, index);
             }
+        }
 
-            //
-            // Render
-            //
+        //
+        // Render
+        //
+        //{
+
+        memory.barrier.wait();
+
+        {
             {
-                {
-                    const block = memory.profile.begin("draw collect", 0);
-                    defer memory.profile.end(block);
-                    for (local_players.slice()) |lp| {
-                        if (lp.id == null) {
-                            continue;
-                        }
-                        module.function_table.draw(&config.vars, &memory, &command_buffer, lp.id.?, &lp.input);
+                const block = ts.profile.begin("draw collect", 0);
+                defer ts.profile.end(block);
+                for (local_players.slice()) |lp| {
+                    if (lp.id == null) {
+                        continue;
                     }
+                    module.function_table.draw(&ts, &config.vars, &memory, &command_buffer, lp.id.?, &lp.input);
                 }
+            }
+        }
 
-                {
-                    const block = memory.profile.begin("draw", 0);
-                    defer memory.profile.end(block);
-                    draw.process(&command_buffer, @intCast(width), @intCast(height), @intCast(local_players.used));
-                }
+        //ii = 0;
+        //asm volatile ("mfence");
+        //memory.barrier.wait();
+        //asm volatile ("mfence");
+        //if (ts.id == 0) {ii += 5;}
+        //asm volatile ("mfence");
+        //memory.barrier.wait();
+        //asm volatile ("mfence");
+        //if (ts.id == 1) {ii += 6;}
+        //asm volatile ("mfence");
+        //memory.barrier.wait();
+        //asm volatile ("mfence");
+        //if (ts.id == 2) {ii += 7;}
+        //asm volatile ("mfence");
+        //memory.barrier.wait();
+        //std.log.info("ii({}): {}", .{ts.id, ii});
+        //std.debug.assert(ii == 18);
 
-                c.glfwSwapBuffers(window);
+        if (ts.is_main()) {
+            {
+                const block = ts.profile.begin("draw", 0);
+                defer ts.profile.end(block);
+                draw.process(&command_buffer, @intCast(width), @intCast(height), @intCast(local_players.used));
             }
 
+            c.glfwSwapBuffers(window);
+        }
+
+        if (ts.is_main()) {
             //
             // Audio
             //
             {
                 const num_needed_samples = 2 * @as(usize, @intCast(sa.expect()));
 
-                var samples = try memory.mem.frame.alloc(f32, num_needed_samples);
+                var samples = ts.arena_frame.alloc(f32, num_needed_samples);
                 @memset(samples, 0);
 
                 var num_samples: usize = 0;
@@ -1311,7 +1428,11 @@ pub fn main() !void {
                 if (num_samples > 0)
                     _ = sa.push(&samples[0], @intCast(num_samples));
             }
+        }
 
+        memory.barrier.wait();
+
+        if (ts.is_main()) {
             //
             // End of frame
             //
@@ -1319,8 +1440,8 @@ pub fn main() !void {
             // In debug mode, check for updates to the pack
             if (build_options.options.debug) {
                 if (tick % config.vars.pack_update_check_interval_ns == 0) {
-                    const block = memory.profile.begin("pack update", 0);
-                    memory.profile.end(block);
+                    const block = ts.profile.begin("pack update", 0);
+                    ts.profile.end(block);
 
                     const entries = disk.collect_and_update_entries(&memory.pack) catch unreachable;
                     for (entries) |e| {
@@ -1329,33 +1450,44 @@ pub fn main() !void {
                     if (entries.len > 0) {
 
                         // builder will be .deinit() from thread which writes to the pack file
-                        var builder = try goosepack.saveToMemory(&memory.pack);
-                        pack_in_memory = try builder.dumpToBuffer(memory.mem.persistent);
-                        memory.pack = goosepack.init();
-                        try goosepack.load(&memory.pack, pack_in_memory.?);
+                        var builder = goosepack.save_to_memory(&memory.pack);
+                        const buffer = ts.arena_frame.alloc(u8, builder.get_size());
+                        builder.dump_to_buffer(buffer);
+                        memory.pack = .{};
+                        goosepack.load(&memory.pack, buffer) catch |err| {
+                            log.err("Failed to reload pack {}", .{err});
+                        };
+                        pack_in_memory = buffer;
                         // Swawn thread which writes to disk
-                        try memory.threadpool.spawn(write_pack_to_file.run, .{ &builder, "res.gp" });
+                        // TODO(anjo): when threading
+                        //try memory.threadpool.spawn(write_pack_to_file.run, .{ &builder, "res.gp" });
 
                         // Force recompilation of shaders and etc.
                         draw.resources_update(entries);
                     }
                 }
             }
+        }
 
-            // Debug profiling data collection
-            memory.profile.end_frame();
+        // Debug profiling and data collection
+        {
+            ts.profile.end_frame();
             if (!memory.debug_data_collection_paused) {
-                const next = memory.debug_frame_data.peekRelative(1);
+                // TODO(anjo): ??
+                const next = ts.debug_frame_data.peekRelative(1);
                 if (next.used) {
-                    next.profile.free_anchors();
+                    const s: []common.Profile = @ptrCast(next.profile);
+                    ts.arena_persistent.free(s);
                 }
 
-                memory.debug_frame_data.push(.{
-                    .profile = memory.profile.duplicate() catch unreachable,
+                ts.debug_frame_data.push(.{
+                    .profile = ts.profile.duplicate(&ts.arena_persistent) catch unreachable,
                     .used = true,
                 });
             }
+        }
 
+        if (ts.is_main()) {
             tick += 1;
 
             frame_end_time = timer.read();
@@ -1373,9 +1505,10 @@ pub fn main() !void {
                 // spin for the remaining time
                 while (timer.read() - start_sleep < time_left) {}
             }
-
-            fixed_allocator.reset();
         }
+
+        // clear allocator
+        ts.arena_frame.top = 0;
     }
 
     std.posix.close(host.fd);
@@ -1400,7 +1533,7 @@ fn glfw_get_key(window: ?*c.GLFWwindow, key: res.Key) res.Action {
 const write_pack_to_file =
     if (build_options.options.debug)
         struct {
-            fn run(builder: *goosepack.StringBuilder, file: []const u8) void {
+            fn run(builder: *common.serialize.StringBuilder, file: []const u8) void {
                 builder.dumpToFile(file) catch {};
                 builder.deinit();
             }

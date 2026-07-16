@@ -16,10 +16,15 @@ pub const Profile = @import("profile.zig");
 pub const color = @import("color.zig");
 pub const serialize = @import("serialize.zig");
 pub const BoundedArray = @import("bounded_array.zig").BoundedArray;
+pub const BoundedSlice = @import("bounded_array.zig").BoundedSlice;
 pub const Arena = @import("arena.zig").Arena;
+pub const ArenaFreelist = @import("arena-freelist.zig").ArenaFreelist;
 pub const ArenaIntrusiveList = @import("arena-intrusive-list.zig").ArenaIntrusiveList;
 pub const Pool = @import("pool.zig").Pool;
 pub const IntrusiveList = @import("intrusive-list.zig").IntrusiveList;
+pub const Barrier = @import("barrier.zig");
+
+pub const ArrayCircular = @import("array-circular.zig").ArrayCircular;
 
 const v2 = math.v2;
 const v3 = math.v3;
@@ -55,6 +60,8 @@ pub const InputName = enum(u8) {
     Enter,
     Save,
     Load,
+    SunAngleUp,
+    SunAngleDown,
 
     // Mode Switching
     to_console,
@@ -409,6 +416,7 @@ pub const WindowState = struct {
     cursor_y: f32 = 0,
     color: v3 = .{ .x = 60, .y = 0.5, .z = 0.5 },
     hover: bool = false,
+    in_cols: bool = false,
 };
 
 pub const State = enum {
@@ -418,20 +426,55 @@ pub const State = enum {
     console,
 };
 
-pub const Windows = enum(u8) {
+pub const WindowType = enum(u8) {
     pause,
+    debug_fns,
 };
-const num_windows = @typeInfo(Windows).@"enum".fields.len;
+const num_windows = @typeInfo(WindowType).@"enum".fields.len;
+
+pub const ThreadState = struct {
+    id: u8,
+    num_threads: u8,
+
+    arena_frame: Arena = undefined,
+    arena_persistent: ArenaFreelist = undefined,
+    log_memory: log.LogMemory = undefined,
+
+    profile: Profile = .{},
+    debug_frame_data: bb.CircularBuffer(DebugFrameData, debug_num_frames_to_record) = .{},
+
+    pub fn is_main(ts: *ThreadState) bool {
+        return ts.id == 0;
+    }
+
+    pub fn range(ts: *ThreadState, total_len: usize) [2]usize {
+        const quot = @divTrunc(total_len, @as(usize, ts.num_threads));
+        const rem  = total_len % @as(usize, ts.num_threads);
+
+        var start = ts.id * @divTrunc(total_len, @as(usize, ts.num_threads));
+        var len = quot;
+        if (ts.id < rem) {
+            len += 1;
+            start += ts.id;
+        } else {
+            start += rem;
+        }
+
+        return .{start, start+len};
+    }
+};
 
 pub const Memory = struct {
     active_state: State = .gameplay,
 
+    barrier: Barrier = .{},
+
+    textlen: *const fn (str: []const u8) usize = undefined,
+
     // System, things not relevant to gamestate
-    arena_frame: Arena = undefined,
-    arena_persistent: Arena = undefined,
-    animation_states: Pool = undefined,         // @CLIENT-ONLY
+
+    animation_states: ArrayCircular(AnimationState) = undefined, // @CLIENT-ONLY
     pack: goosepack.Pack = undefined,
-    log_memory: log.LogMemory = undefined,
 
     // game state
 
@@ -441,7 +484,6 @@ pub const Memory = struct {
     // @CLIENT-ONLY
     windows_persistent: [num_windows]WindowPersistentState = [_]WindowPersistentState{.{}} ** num_windows,
     windows: IntrusiveList(WindowState) = .{},
-    current_window: ?*WindowState = null,
     window_moving_offset: v2 = .{},
 
     // TODO: move to frame allocator
@@ -450,7 +492,7 @@ pub const Memory = struct {
     new_nades: BoundedArray(Nade, 64) = .{},
     new_explosions: BoundedArray(Explosion, 64) = .{},
     new_damage: BoundedArray(Damage, 64) = .{},
-    map_mods: std.ArrayList(MapModify) = undefined,
+    map_mods: BoundedArray(MapModify, 16) = .{},
 
     sounds: BoundedArray(Sound, 64) = .{},
     hitscans: BoundedArray(Hitscan, 64) = .{},
@@ -461,9 +503,10 @@ pub const Memory = struct {
     target: v2 = .{ .x = 0.5, .y = 0.5 },
     zoom: f32 = 1,
 
-    // debug
-    vel_graph: Graph = undefined,
+    // Random
+    sun_angle: f32 = std.math.pi/4.0,
 
+    // UI
     cursor_pos: v2 = .{
         .x = 0.5,
         .y = 0.5,
@@ -477,10 +520,11 @@ pub const Memory = struct {
     selected_entity: ?u32 = null,
     widget: WidgetModel = .{},
 
-    profile: Profile = .{},
-    debug_frame_data: bb.CircularBuffer(DebugFrameData, debug_num_frames_to_record) = .{},
+    // Debug
+    vel_graph: Graph = undefined,
     debug_data_collection_paused: bool = false,
 
+    // game data
     ray_model: ?m4 = null,
 
     respawns: BoundedArray(RespawnEntry, 8) = .{},
@@ -550,10 +594,11 @@ pub const ChunkCoordinate = [3]i16;
 pub const VoxelCoordinate = [3]i16;
 pub const VoxelIndex = [3]u6;
 pub const ChunkIndex = i64;
-pub const ChunkMap = std.AutoHashMap(ChunkIndex, Chunk);
 
 pub const Map = struct {
-    chunks: ChunkMap,
+    used: usize = 0,
+    chunks: []Chunk,
+    indices: []ChunkIndex,
 };
 
 pub const Chunk = struct {
@@ -602,3 +647,50 @@ pub const TransformTree = struct {
         dirty: u1,
     },
 };
+
+// Strings and paths
+
+pub fn str_fmt(arena: *Arena, comptime fmt: []const u8, args: anytype) []const u8 {
+    const str = std.fmt.bufPrint(arena.memory[arena.top..], fmt, args) catch return "";
+    arena.top += str.len;
+    return str;
+}
+
+pub fn cstr_fmt(arena: *Arena, comptime fmt: []const u8, args: anytype) [:0]const u8 {
+    const str = std.fmt.bufPrintZ(arena.memory[arena.top..], fmt, args) catch return "\x00";
+    arena.top += str.len;
+    return str;
+}
+
+pub fn path_concat(arena: anytype, strs: []const []const u8) []const u8 {
+    var total_len: usize = 0;
+    for (strs) |str| {
+        total_len += str.len;
+    }
+    const path = arena.alloc(u8, total_len + strs.len-1);
+    var offset: usize = 0;
+    for (0..strs.len) |i| {
+        const str = strs[i];
+        @memcpy(path[offset..offset+str.len], str);
+        if (i < strs.len-1) {
+            path[offset+str.len] = std.fs.path.sep;
+        }
+        offset += str.len+1;
+    }
+    return path;
+}
+
+pub fn str_concat(arena: anytype, strs: []const []const u8) []const u8 {
+    var total_len: usize = 0;
+    for (strs) |str| {
+        total_len += str.len;
+    }
+    const res_str = arena.alloc(u8, total_len);
+    var offset: usize = 0;
+    for (0..strs.len) |i| {
+        const str = strs[i];
+        @memcpy(res_str[offset..offset+str.len], str);
+        offset += str.len;
+    }
+    return res_str;
+}

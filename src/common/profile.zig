@@ -1,6 +1,7 @@
 const std = @import("std");
-const common = @import("common");
-const Arena = common.Arena;
+const ArenaFreelist = @import("arena-freelist.zig").ArenaFreelist;
+const common = @import("common.zig");
+const ThreadState = common.ThreadState;
 
 const Self = @This();
 
@@ -23,7 +24,6 @@ pub const Block = struct {
     start_cachemiss_count: u64,
     parent_id: usize,
     anchor_id: usize,
-    thread_index: u8,
 };
 
 const Anchor = struct {
@@ -103,9 +103,7 @@ pub const AnchorMap = struct {
     }
 };
 
-used_thread_indices: std.atomic.Value(u8) = undefined,
-thread_indices: []usize = undefined,
-anchor_maps: []AnchorMap = undefined,
+map: AnchorMap = undefined,
 
 // Values set during init
 start_tsc: u64 = 0,
@@ -127,10 +125,8 @@ pub fn begin_frame(self: *Self) void {
         .start_pagefault_count = read_pagefault_count(),
         .start_cachemiss_count = self.read_cachemiss_count(),
     };
-    for (self.anchor_maps_slice()) |*map| {
-        for (map.anchor_values()) |*a| {
-            a.active_last_frame = false;
-        }
+    for (self.map.anchor_values()) |*a| {
+        a.active_last_frame = false;
     }
 }
 
@@ -144,9 +140,7 @@ pub fn end_frame(self: *Self) void {
 pub fn begin(self: *Self, comptime name: []const u8, bytecount: u64) Block {
     const id = @intFromPtr(name.ptr);
 
-    const thread_index = self.get_or_put_thread_index(std.Thread.getCurrentId());
-    var map = &self.anchor_maps[thread_index];
-    const anchor = map.get_anchor(id);
+    const anchor = self.map.get_anchor(id);
 
     const start_tsc = read_tsc();
 
@@ -162,12 +156,11 @@ pub fn begin(self: *Self, comptime name: []const u8, bytecount: u64) Block {
         .start_pagefault_count = read_pagefault_count(),
         .start_cachemiss_count = self.read_cachemiss_count(),
         .start_tsc = start_tsc,
-        .parent_id = map.global_parent_id,
+        .parent_id = self.map.global_parent_id,
         .anchor_id = id,
-        .thread_index = thread_index,
     };
 
-    map.global_parent_id = id;
+    self.map.global_parent_id = id;
 
     return b;
 }
@@ -177,8 +170,7 @@ pub fn end(self: *Self, b: Block) void {
     const elapsed_pagefault = read_pagefault_count() - b.start_pagefault_count;
     const elapsed_cachemiss = self.read_cachemiss_count() - b.start_cachemiss_count;
 
-    var map = &self.anchor_maps[b.thread_index];
-    const anchor = map.get_anchor(b.anchor_id);
+    const anchor = self.map.get_anchor(b.anchor_id);
 
     anchor.tsc_elapsed_exclusive += @intCast(elapsed_tsc);
     anchor.tsc_elapsed_inclusive = b.old_tsc_elapsed_inclusive + elapsed_tsc;
@@ -197,56 +189,26 @@ pub fn end(self: *Self, b: Block) void {
     anchor.parent_id = b.parent_id;
 
     if (b.parent_id > 0) {
-        const parent = map.get_anchor(b.parent_id);
+        const parent = self.map.get_anchor(b.parent_id);
         parent.tsc_elapsed_exclusive -= @intCast(elapsed_tsc);
         parent.pagefault_elapsed_exclusive -= @intCast(elapsed_pagefault);
         parent.cachemiss_elapsed_exclusive -= @intCast(elapsed_cachemiss);
     }
 
-    map.global_parent_id = b.parent_id;
+    self.map.global_parent_id = b.parent_id;
 }
 
-pub fn init(self: *Self, arena: *Arena, thread_count: usize) void {
-    self.used_thread_indices = std.atomic.Value(u8).init(0);
+pub fn init(self: *Self) void {
     self.cachemiss_fd = init_cachemiss_fd();
     self.start_tsc = read_tsc();
     self.start_cachemiss = self.read_cachemiss_count();
     self.start_pagefault = read_pagefault_count();
     self.timer_freq = estimate_cpu_timer_freq();
-
-    self.thread_indices = arena.alloc(usize, thread_count);
-    self.anchor_maps = arena.alloc(AnchorMap, thread_count);
 }
 
 pub fn deinit(self: *Self) void {
     _ = std.os.linux.ioctl(self.cachemiss_fd, std.os.linux.PERF.EVENT_IOC.RESET, 0);
     _ = std.os.linux.close(self.cachemiss_fd);
-}
-
-pub fn get_thread_index(self: *Self, _id: usize) ?u8 {
-    for (self.thread_indices[0..self.used_thread_indices.load(.monotonic)], 0..) |id, i| {
-        if (_id == id) {
-            return @intCast(i);
-        }
-    }
-    return null;
-}
-
-pub fn get_or_put_thread_index(self: *Self, id: usize) u8 {
-    return self.get_thread_index(id) orelse blk: {
-        const i = self.used_thread_indices.fetchAdd(1, .monotonic);
-        self.thread_indices[i] = id;
-        self.anchor_maps[i] = .{};
-        break :blk i;
-    };
-}
-
-pub fn get_anchor_map(self: *Self, id: usize) *AnchorMap {
-    return &self.anchor_maps[self.get_or_put_thread_index(id)];
-}
-
-pub fn anchor_maps_slice(self: *Self) []AnchorMap {
-    return self.anchor_maps[0..self.used_thread_indices.load(.monotonic)];
 }
 
 pub fn total_elapsed(self: *Self) TotalElapsed {
@@ -262,15 +224,9 @@ pub fn print(self: *Self) void {
     print_anchors(self, total.tsc_elapsed, total.pagefault_elapsed, total.cachemiss_elapsed);
 }
 
-pub fn duplicate(self: *Self, arena: *Arena) !*Self {
+pub fn duplicate(self: *Self, arena: *ArenaFreelist) !*Self {
     const dup: *Self = @ptrCast((arena.alloc(Self, 1)).ptr);
     dup.* = self.*;
-    // NOTE: We don't need to copy thread_indices, as these don't change across
-    // frames, and the array only grows monotonically :)
-    dup.anchor_maps = arena.alloc(AnchorMap, self.anchor_maps.len);
-    for (self.anchor_maps_slice(), 0..) |map, i| {
-        dup.anchor_maps[i] = map;
-    }
     return dup;
 }
 
@@ -357,7 +313,10 @@ fn init_cachemiss_fd() i32 {
             .exclude_hv = true,
         },
     };
-    const fd = std.posix.perf_event_open(&attr, 0, -1, -1, 0) catch unreachable;
+    // pid == 0, cpu == -1, measure the calling process/thread
+    const pid = 0;
+    const cpu = -1;
+    const fd = std.posix.perf_event_open(&attr, pid, cpu, -1, 0) catch unreachable;
     std.debug.assert(fd != -1);
 
     _ = std.os.linux.ioctl(fd, std.os.linux.PERF.EVENT_IOC.RESET, 0);

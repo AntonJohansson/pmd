@@ -1,7 +1,7 @@
 const std = @import("std");
-const common = @import("common");
-const Arena = common.Arena;
-const Pool = common.Pool;
+const Arena = @import("arena.zig").Arena;
+const ArrayCircular = @import("array-circular.zig").ArrayCircular;
+const ArenaIntrusiveList = @import("arena-intrusive-list.zig").ArenaIntrusiveList;
 
 const logdir = "log";
 
@@ -18,13 +18,12 @@ pub const Severity = enum(u8) {
     err,
 };
 
-pub const Message = struct {
+pub const MessageHeader = struct {
     group: Group,
     severity: Severity,
-    message: []const u8,
 };
 
-fn arena_print(arena: *Arena, fmt: []const u8, args: anytype) []u8 {
+fn arena_print(arena: *Arena, comptime fmt: []const u8, args: anytype) []u8 {
     const buf = arena.memory[arena.top..];
     const str = std.fmt.bufPrint(buf, fmt, args) catch unreachable;
     arena.top += str.len;
@@ -32,15 +31,17 @@ fn arena_print(arena: *Arena, fmt: []const u8, args: anytype) []u8 {
 }
 
 pub const LogMemory = struct {
-    messages: Pool(Message),
-    persistent: Arena,
+    message_memory: ArenaIntrusiveList,
+    persistent: *Arena,
     frame: *Arena,
     mirror_to_stdio: bool = false,
     file: ?std.fs.File = null,
 
-    pub fn init(frame: *Arena, persistent: Arena, messages: Pool, file: ?[]const u8, mirror_to_stdio: bool) !LogMemory {
+    pub fn init(frame: *Arena, persistent: *Arena, file: ?[]const u8, mirror_to_stdio: bool) !LogMemory {
         var logmem = LogMemory{
-            .messages = messages,
+            .message_memory = .{
+                .arena = persistent,
+            },
             .mirror_to_stdio = mirror_to_stdio,
             .persistent = persistent,
             .frame = frame,
@@ -60,13 +61,17 @@ pub const LogMemory = struct {
     }
 
     pub fn append(memory: *LogMemory, comptime group: Group, comptime severity: Severity, comptime fmt: []const u8, args: anytype) void {
-        const str = arena_print(&memory.persistent, fmt, args);
-        const message = memory.messages.alloc();
-        message.* = .{
+        const str = arena_print(memory.frame, fmt, args);
+        const size = str.len + @sizeOf(MessageHeader);
+        if (!memory.message_memory.has_space(size)) {
+            memory.message_memory.reset();
+        }
+        const mem = memory.message_memory.alloc(size);
+        @as(*align(1) MessageHeader, @ptrCast(mem.ptr)).* = .{
             .group = group,
             .severity = severity,
-            .message = str,
         };
+        @memcpy(mem[@sizeOf(MessageHeader)..], str);
 
         if (memory.mirror_to_stdio) {
             const head = arena_print(memory.frame, "[{s}][{s}]: ", .{ @tagName(group), @tagName(severity) });

@@ -11,6 +11,8 @@ const BoundedArray = common.BoundedArray;
 const bb = common.bb;
 const stat = common.stat;
 const ArenaIntrusiveList = common.ArenaIntrusiveList;
+const ArenaFreelist = common.ArenaFreelist;
+const StringBuilder = common.serialize.StringBuilder;
 
 var log: common.log.GroupLog(.net) = undefined;
 
@@ -43,8 +45,8 @@ const ReliableMessageInfo = struct {
     reliable: bool,
 };
 
-pub var arena_frame: *common.Arena = .{};
-pub var arena_persistent: ArenaIntrusiveList = .{};
+pub var arena_frame: *common.Arena = undefined;
+pub var arena_persistent: *ArenaFreelist = undefined;
 
 pub var input_buffer_stat: stat.StatEntry = .{};
 pub var output_buffer_stat: stat.StatEntry = .{};
@@ -122,8 +124,8 @@ pub fn pushMessage(index: PeerIndex, message: anytype) void {
 
     // Will be set to null again at the end of the frame in process
     if (peer.frame_bytes == null) {
-        peer.frame_bytes = common.serialize.StringBuilder{
-            .arena = arena_frame,
+        peer.frame_bytes = StringBuilder{
+            .segments = .{ .arena = arena_frame },
         };
     }
 
@@ -132,8 +134,8 @@ pub fn pushMessage(index: PeerIndex, message: anytype) void {
         .kind = kind,
         .id = 0,
         .reliable = false,
-    }) catch {};
-    common.serialize.memory_write_type(&peer.frame_bytes.?, message) catch {};
+    });
+    common.serialize.memory_write_type(&peer.frame_bytes.?, message);
 }
 
 pub fn pushReliableMessage(index: PeerIndex, message: anytype) void {
@@ -143,8 +145,8 @@ pub fn pushReliableMessage(index: PeerIndex, message: anytype) void {
     const message_id = peer.current_message_id;
     peer.current_message_id +%= 1;
 
-    const builder = common.serialize.StringBuilder{
-        .arena = arena_frame,
+    const builder = StringBuilder{
+        .segments = .{ .arena = arena_frame },
     };
     const kind = comptime packet_meta.mapMessageToKind(@TypeOf(message));
     common.serialize.memory_write_type(&builder, headers.Header{
@@ -155,11 +157,11 @@ pub fn pushReliableMessage(index: PeerIndex, message: anytype) void {
     common.serialize.memory_write_type(&builder, message) catch {};
 
     const buffer = arena_persistent.alloc(builder.get_size());
-    const memory = builder.dump_to_buffer(buffer);
+    builder.dump_to_buffer(buffer);
 
     peer.messages_in_flight.set(message_id, ReliableMessageInfo{
         .id = message_id,
-        .data = memory,
+        .data = buffer,
         .reliable = true,
     });
 }
@@ -226,7 +228,7 @@ const Peer = struct {
     received_messages: bb.SequenceBuffer(ReceivedMessageInfo, u16, message_receive_buffer_len) = .{},
     packets_in_flight: bb.SequenceBuffer(PacketData, u16, message_receive_buffer_len) = .{},
     messages_in_flight: bb.SequenceBuffer(ReliableMessageInfo, u16, message_receive_buffer_len) = .{},
-    frame_bytes: ?common.serialize.StringBuilder = null,
+    frame_bytes: ?StringBuilder = null,
 
     current_packet_id: u16 = 0,
     current_message_id: u16 = 0,
@@ -335,7 +337,7 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
             common.serialize.memory_read_type(arena_frame, headers.Header, data.data, &message_offset, &header);
 
             const size = packet_meta.getMessageSize(header.kind);
-            const message = packet_meta.decode_kind(arena_frame, data.data, &message_offset, header.kind) catch unreachable;
+            const message = packet_meta.decode_kind(arena_frame, data.data, &message_offset, header.kind);
 
             log.info("  Message", .{});
             log.info("    size: {}", .{size});
@@ -694,8 +696,8 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
         .id = 0,
     };
 
-    var packet_bytes = common.serialize.StringBuilder{
-        .arena = arena_frame,
+    var packet_bytes = StringBuilder{
+        .segments = .{ .arena = arena_frame },
     };
 
     var have_reliable_packets = false;
@@ -717,7 +719,7 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
                     break;
                 }
 
-                packet_bytes.write_bytes(rmi.data) catch unreachable;
+                packet_bytes.write_bytes(rmi.data);
 
                 header.num_packets += 1;
             }
@@ -725,11 +727,13 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
     }
 
     if (peer.frame_bytes) |bytes| {
-        for (bytes.segments.items) |s| {
+        var it = bytes.segments.head;
+        while (it) |item| {
+            const s = item.value;
             std.log.info("writing frame w. {}/{} bytes", .{ s.used, s.data.len });
-            packet_bytes.write_bytes(s.data[0..s.used]) catch unreachable;
-            //std.log.info("writing frame {}", .{s});
+            packet_bytes.write_bytes(s.data[0..s.used]);
             header.num_packets += s.num_writes;
+            it = item.next;
         }
         peer.frame_bytes = null;
     }
@@ -742,13 +746,12 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
     if (header.num_packets > 0) {
         const size_pre_header = packet_bytes.get_size();
 
-        {
-            packet_bytes.insert = 0;
-            common.serialize.memory_write_type(&packet_bytes, header) catch {};
-        }
+        var hb = packet_bytes.subbuilder();
+        common.serialize.memory_write_type(&hb, header);
+        hb.segments.join_right(&packet_bytes.segments);
 
-        const output_buffer = arena_frame.alloc(packet_bytes.size());
-        packet_bytes.dump_to_buffer(output_buffer);
+        const output_buffer = arena_frame.alloc(u8, hb.get_size());
+        hb.dump_to_buffer(output_buffer);
 
         header.salt = peer.salt;
         header.size = @intCast(size_pre_header);

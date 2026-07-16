@@ -40,6 +40,6 @@ void main() {
     }
 
     vec3 new_color = color_kind.rgb * (1.0 - 0.1*(1.0 - 2.0*color_rand));
-    frag_color = vec4(0,0,0,1);//vec4((ambient + diffuse + specular) * new_color.rgb * color.rgb, 1.0);
+    frag_color = vec4((ambient + diffuse + specular) * new_color.rgb * color.rgb, 1.0);
     //frag_color = vec4((ambient + diffuse + specular) * texture(tex, vtexcoord).rgb, 1.0);
 }

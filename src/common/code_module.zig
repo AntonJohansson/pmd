@@ -1,14 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-
-fn osPath(path: *[]const u8) void {
-    for (path) |*byte| {
-        switch (byte) {
-            '/', '\\' => byte.* = std.fs.path.sep,
-            else => {},
-        }
-    }
-}
+const common = @import("common.zig");
+const ArenaFreelist = @import("arena-freelist.zig").ArenaFreelist;
 
 pub fn CodeModule(comptime function_table_type: type) type {
     return struct {
@@ -19,9 +12,10 @@ pub fn CodeModule(comptime function_table_type: type) type {
         name_running: []const u8,
         function_table: function_table_type = undefined,
         last_mod_time: i128 = 0,
+        arena: *ArenaFreelist = undefined,
 
         const Self = @This();
-        pub fn init(allocator: std.mem.Allocator, dir: []const u8, name: []const u8) !Self {
+        pub fn init(arena: *ArenaFreelist, dir: []const u8, name: []const u8) !Self {
             const prefix = switch (builtin.os.tag) {
                 .linux, .freebsd, .openbsd => "lib",
                 .windows => "",
@@ -34,26 +28,27 @@ pub fn CodeModule(comptime function_table_type: type) type {
                 .macos, .tvos, .watchos, .ios => ".dylib",
                 else => return,
             };
-            const libname = try std.mem.concat(allocator, u8, &[_][]const u8{ prefix, name, ext });
-            const libname_running = try std.mem.concat(allocator, u8, &[_][]const u8{ prefix, name, ".running", ext });
+            const libname = common.str_concat(arena, &[_][]const u8{ prefix, name, ext });
+            const libname_running = common.str_concat(arena, &[_][]const u8{ prefix, name, ".running", ext });
 
-            const libpath_running = try std.fs.path.join(allocator, &[_][]const u8{ dir, libname_running });
+            const libpath_running = common.path_concat(arena, &[_][]const u8{ dir, libname_running });
             return Self{
                 .dir = dir,
                 .path_running = libpath_running,
                 .name = libname,
                 .name_running = libname_running,
                 .function_table = undefined,
+                .arena = arena,
             };
         }
 
-        fn openInDir(self: *Self, allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
+        fn open_in_dir(self: *Self, dir: std.fs.Dir) !void {
             try std.fs.Dir.copyFile(dir, self.name, dir, self.name_running, .{});
 
             self.lib = try std.DynLib.open(self.path_running);
             inline for (@typeInfo(@TypeOf(self.function_table)).@"struct".fields) |f| {
                 // Allocate space for a null-terminated string
-                var name: [:0]u8 = @ptrCast(try allocator.alloc(u8, f.name.len + 1));
+                var name: [:0]u8 = @ptrCast(self.arena.alloc(u8, f.name.len + 1));
                 @memcpy(name[0..f.name.len], f.name);
                 name[f.name.len] = 0;
 
@@ -62,25 +57,25 @@ pub fn CodeModule(comptime function_table_type: type) type {
                     return;
                 };
 
-                allocator.free(@as([]u8, @ptrCast(name)));
+                self.arena.free(@as([]u8, @ptrCast(name)));
             }
         }
 
-        pub fn open(self: *Self, allocator: std.mem.Allocator) !void {
+        pub fn open(self: *Self) !void {
             var dir = try std.fs.cwd().openDir(self.dir, .{});
             defer dir.close();
 
             const stat = try dir.statFile(self.name);
             self.last_mod_time = stat.mtime;
 
-            return try openInDir(self, allocator, dir);
+            return try open_in_dir(self, dir);
         }
 
         pub fn close(self: *Self) void {
             self.lib.close();
         }
 
-        pub fn reloadIfChanged(self: *Self, allocator: std.mem.Allocator) !bool {
+        pub fn reload_if_changed(self: *Self) !bool {
             var dir = try std.fs.cwd().openDir(self.dir, .{});
             defer dir.close();
 
@@ -89,7 +84,7 @@ pub fn CodeModule(comptime function_table_type: type) type {
             if (new_mod_time > self.last_mod_time) {
                 self.last_mod_time = new_mod_time;
                 self.close();
-                try openInDir(self, allocator, dir);
+                try open_in_dir(self, dir);
                 return true;
             }
             return false;

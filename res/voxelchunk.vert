@@ -3,7 +3,7 @@
 layout(location=0) in vec3 position;
 layout(location=1) in vec3 normal;
 //layout(location=2) in vec2 texcoord;
-layout(location=2) in vec4 instance;
+layout(location=2) in uvec4 instance;
 
 uniform mat4 vp;
 uniform mat4 rotations[6];
@@ -25,11 +25,11 @@ float rand_float(int x) {
 }
 
 void main() {
-    int i    = int(bitfieldExtract(int(instance.x), 0, 8));
-    int j    = int(bitfieldExtract(int(instance.x), 8, 8));
-    int k    = int(bitfieldExtract(int(instance.y), 0, 8));
-    int dir  = int(bitfieldExtract(int(instance.y), 8, 8));
-    int kind = int(bitfieldExtract(int(instance.z), 0, 8));
+    int i    = int(bitfieldExtract(instance.x, 0, 8));
+    int j    = int(bitfieldExtract(instance.x, 8, 8));
+    int k    = int(bitfieldExtract(instance.y, 0, 8));
+    int dir  = int(bitfieldExtract(instance.y, 8, 8));
+    int kind = int(bitfieldExtract(instance.z, 0, 8));
 
     int index = int(dir);
     mat4 model = rotations[index];

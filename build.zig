@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) !void {
     const sokol_dep = b.dependency("sokol", .{
         .target = target,
         .optimize = optimize,
-        .x11 = false,
+        .x11 = true,
         .wayland = true,
     });
 
@@ -141,30 +141,30 @@ pub fn build(b: *std.Build) !void {
     // server
     //
 
-    const server = b.addExecutable(.{
-        .name = "server",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/server/server.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-        // TODO(anjo): temp
-        .use_lld = false,
-    });
-    server.root_module.addImport("common", common);
-    server.root_module.addImport("net", net);
-    server.root_module.addImport("pack-disk", pack_disk);
-    server.root_module.addImport("build_options", build_options);
-    server.linkLibC();
-    b.installArtifact(server);
+    //const server = b.addExecutable(.{
+    //    .name = "server",
+    //    .root_module = b.createModule(.{
+    //        .root_source_file = b.path("src/server/server.zig"),
+    //        .target = target,
+    //        .optimize = optimize,
+    //    }),
+    //    // TODO(anjo): temp
+    //    .use_lld = false,
+    //});
+    //server.root_module.addImport("common", common);
+    //server.root_module.addImport("net", net);
+    //server.root_module.addImport("pack-disk", pack_disk);
+    //server.root_module.addImport("build_options", build_options);
+    //server.linkLibC();
+    //b.installArtifact(server);
 
-    const run_server_cmd = b.addRunArtifact(server);
-    run_server_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_server_cmd.addArgs(args);
-    }
-    const run_server_step = b.step("run-server", "Run the server");
-    run_server_step.dependOn(&run_server_cmd.step);
+    //const run_server_cmd = b.addRunArtifact(server);
+    //run_server_cmd.step.dependOn(b.getInstallStep());
+    //if (b.args) |args| {
+    //    run_server_cmd.addArgs(args);
+    //}
+    //const run_server_step = b.step("run-server", "Run the server");
+    //run_server_step.dependOn(&run_server_cmd.step);
 
     //
     // Run step
@@ -189,7 +189,7 @@ fn build_glfw(b: *std.Build) !void {
 
     const res_cmake = try std.process.Child.run(.{
         .allocator = b.allocator,
-        .argv = &[_][]const u8{ "cmake", "-B", "third_party/glfw/build", "-S", "third_party/glfw", "-D", "GLFW_BUILD_X11=0", "-D", "GLFW_BUILD_WAYLAND=1" },
+        .argv = &[_][]const u8{ "cmake", "-B", "third_party/glfw/build", "-S", "third_party/glfw", "-D", "GLFW_BUILD_X11=1", "-D", "GLFW_BUILD_WAYLAND=1" },
     });
     if (res_cmake.stderr.len > 0) {
         std.log.info("{s}", .{res_cmake.stderr});

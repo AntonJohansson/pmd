@@ -1,21 +1,20 @@
-const common = @import("common");
-const Arena = common.Arena;
+const Arena = @import("arena.zig").Arena;
 
 const std = @import("std");
 const assert = std.debug.assert;
 
-const ArenaIntrusiveList = struct {
+pub const ArenaIntrusiveList = struct {
     const Self = @This();
 
     const Header = struct {
-        next: ?*Header = null,
+        next: ?*align(1) Header = null,
         size: usize,
     };
 
     arena: *Arena,
     head: ?*align(1) Header = null,
     tail: ?*align(1) Header = null,
-        
+
     pub fn alloc(self: *Self, size: usize) []u8 {
         const total_size = @sizeOf(Header) + size;
 
@@ -31,7 +30,7 @@ const ArenaIntrusiveList = struct {
                 self.head = header;
                 self.tail = header;
             } else {
-                self.tail.next = header;
+                self.tail.?.next = header;
                 self.tail = header;
             }
 
@@ -42,7 +41,7 @@ const ArenaIntrusiveList = struct {
             // Drop data from head until we fit
             var maybe = self.head;
             while (maybe) |ptr| {
-                if (self.arena.memory.ptr + total_size < ptr) {
+                if (total_size < @as([*]u8, @ptrCast(ptr)) - self.arena.memory.ptr) {
                     break;
                 }
                 maybe = ptr.next;
@@ -53,11 +52,21 @@ const ArenaIntrusiveList = struct {
             header.* = .{
                 .size = size,
             };
-            self.tail.next = header;
+            self.tail.?.next = header;
             self.tail = header;
 
             return memory[@sizeOf(Header)..];
         }
+    }
+
+    pub fn has_space(self: *Self, size: usize) bool {
+        return @sizeOf(Header) + size < self.arena.memory.len - self.arena.top;
+    }
+
+    pub fn reset(self: *Self) void {
+        self.arena.top = 0;
+        self.head = null;
+        self.tail = null;
     }
 
     pub fn pop(self: *Self) []u8 {
@@ -65,6 +74,6 @@ const ArenaIntrusiveList = struct {
         const head = self.head;
         self.head = self.head.next;
         const ptr: [*]u8 = @ptrCast(self.head);
-        return ptr[@sizeOf(Header)..head.size+@sizeOf(Header)];
+        return ptr[@sizeOf(Header) .. head.size + @sizeOf(Header)];
     }
 };

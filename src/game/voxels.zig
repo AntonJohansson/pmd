@@ -2,6 +2,7 @@ const std = @import("std");
 
 const common = @import("common");
 const Memory = common.Memory;
+const ThreadState = common.ThreadState;
 const primitive = common.primitive;
 const draw_api = common.draw_api;
 const intersect = @import("intersect.zig");
@@ -27,60 +28,82 @@ const ChunkMap = common.ChunkMap;
 
 const VoxelFaceArray = MultiThreadedArray(primitive.VoxelTransform, 128);
 
-pub fn map_init(map: *Map, allocator: std.mem.Allocator) !void {
-    const tset = try allocator.alloc(u8, 10);
-    defer allocator.free(tset);
+pub fn map_init(map: *Map, arena: *common.ArenaFreelist) void {
     map.* = Map{
-        .chunks = ChunkMap.init(allocator),
+        .chunks = arena.alloc(Chunk, 16),
+        .indices = arena.alloc(ChunkIndex, 16),
     };
 }
 
-pub fn map_deinit(map: *Map) void {
-    map.chunks.deinit();
+pub fn map_deinit(map: *Map, arena: *common.ArenaFreelist) void {
+    arena.free(map.chunks);
 }
 
 fn chunk_index(c: ChunkCoordinate) ChunkIndex {
     return @as(ChunkIndex, @intCast(c[0])) + chunk_dim * @as(ChunkIndex, @intCast(c[1])) + chunk_dim * chunk_dim * @as(ChunkIndex, @intCast(c[2]));
 }
 
-pub fn add_chunk(map: *Map, c: ChunkCoordinate) !*Chunk {
-    const res = try map.chunks.getOrPut(chunk_index(c));
-    if (!res.found_existing) {
-        const chunk = res.value_ptr;
-        chunk.origin = c;
-        chunk.flags = .{};
-        const size = chunk_dim * chunk_dim * chunk_dim;
-        const slice: [*]primitive.Voxel = @ptrCast(&chunk.voxels[0][0][0]);
-        @memset(slice[0..size], .air);
+pub fn add_chunk(map: *Map, c: ChunkCoordinate) *Chunk {
+    std.debug.assert(map.used < map.chunks.len);
+    const index = chunk_index(c);
+    const res = chunk_at_index(map, index);
+    if (res) |chunk| {
+        return chunk;
     }
-    return res.value_ptr;
+
+    const chunk = &map.chunks[map.used];
+    chunk.* = .{
+        .origin = c,
+        .flags = .{},
+    };
+    map.indices[map.used] = index;
+    map.used += 1;
+
+    const size = chunk_dim * chunk_dim * chunk_dim;
+    const slice: [*]primitive.Voxel = @ptrCast(&chunk.voxels[0][0][0]);
+    @memset(slice[0..size], .air);
+
+    return chunk;
 }
 
 pub fn remove_chunk(map: *Map, c: ChunkCoordinate) void {
-    _ = map.chunks.remove(chunk_index(c));
+    const index = chunk_index(c);
+    for (map.indices[0..map.used], 0..) |ind, i| {
+        if (index == ind) {
+            map.chunks[i] = map.chunks[map.used];
+            map.indices[i] = map.indices[map.used];
+            map.used -= 1;
+            break;
+        }
+    }
+    unreachable;
 }
 
-pub fn chunk_build_faces(memory: *Memory, chunk: *Chunk) void {
-    var chunk_faces = VoxelFaceArray.init(memory.mem.frame, memory.threadpool.threads.len + 1);
-
-    var wg: std.Thread.WaitGroup = undefined;
-    wg.reset();
-
-    for (0..chunk_dim) |z| {
-        memory.threadpool.spawnWg(&wg, build_faces_piece, .{ memory, chunk, &chunk_faces, 0, chunk_dim, 0, chunk_dim, z });
+var chunk_faces: VoxelFaceArray = undefined;
+pub fn chunk_build_faces(ts: *ThreadState, memory: *Memory, chunk: *Chunk) void {
+    if (ts.is_main()) {
+        chunk_faces = VoxelFaceArray.init(&ts.arena_frame, ts.num_threads);
     }
 
-    for (0..chunk_dim) |j| {
-        memory.threadpool.spawnWg(&wg, build_chunk_edges, .{ memory, chunk, &chunk_faces, 0, chunk_dim, j });
+    memory.barrier.wait();
+
+    const r = ts.range(chunk_dim);
+    for (r[0]..r[1]) |z| {
+        build_faces_piece(ts, chunk, &chunk_faces, 0, chunk_dim, 0, chunk_dim, z);
+    }
+    for (r[0]..r[1]) |j| {
+        build_chunk_edges(ts, chunk, &chunk_faces, 0, chunk_dim, j);
     }
 
-    memory.threadpool.waitAndWork(&wg);
+    memory.barrier.wait();
 
-    if (chunk.flags.built_faces == 1) {
-        memory.mem.persistent.free(chunk.faces);
+    if (ts.is_main()) {
+        if (chunk.flags.built_faces == 1) {
+            ts.arena_persistent.free(chunk.faces);
+        }
+        chunk.faces = chunk_faces.collect(&ts.arena_persistent);
+        chunk.flags.built_faces = 1;
     }
-    chunk.faces = chunk_faces.collect(memory.mem.persistent);
-    chunk.flags.built_faces = 1;
 }
 
 const RaycastResult = struct {
@@ -141,7 +164,12 @@ pub fn chunk_at(map: *Map, v: VoxelCoordinate) ?*Chunk {
 }
 
 pub fn chunk_at_index(map: *Map, index: ChunkIndex) ?*Chunk {
-    return map.chunks.getPtr(index);
+    for (map.indices[0..map.used], 0..) |i, j| {
+        if (i == index) {
+            return &map.chunks[@intCast(j)];
+        }
+    }
+    return null;
 }
 
 fn voxel_coord_in_chunk(chunk: *Chunk, v: VoxelCoordinate) bool {
@@ -212,9 +240,7 @@ pub fn draw(memory: *Memory, cmd: *draw_api.CommandBuffer, player: *common.Playe
     _ = memory;
     // Submit all chunks for rendering
     {
-        var it = map.chunks.iterator();
-        while (it.next()) |entry| {
-            const chunk = entry.value_ptr;
+        for (map.chunks[0..map.used]) |*chunk| {
             cmd.push(primitive.VoxelChunk{
                 .origin_x = chunk.origin[0],
                 .origin_y = chunk.origin[1],
@@ -229,9 +255,7 @@ pub fn draw(memory: *Memory, cmd: *draw_api.CommandBuffer, player: *common.Playe
     if (player.in_editor) {
         // Draw chunk outlines
         {
-            var it = map.chunks.iterator();
-            while (it.next()) |entry| {
-                const chunk = entry.value_ptr;
+            for (map.chunks) |*chunk| {
                 cmd.push(primitive.CubeOutline{
                     .model = m4.modelWithRotations(
                         .{
@@ -332,9 +356,22 @@ pub fn draw(memory: *Memory, cmd: *draw_api.CommandBuffer, player: *common.Playe
     }
 }
 
-pub fn apply_modify(memory: *Memory, map: *Map, mods: []common.MapModify) []ChunkIndex {
-    var dirty_chunks: std.ArrayList(*Chunk) = .{};
-    var dirty_chunk_indices: std.ArrayList(ChunkIndex) = .{};
+pub fn apply_modify(ts: *ThreadState, map: *Map, mods: []common.MapModify) []ChunkIndex {
+    var max_chunks: usize = 0;
+    for (mods) |mod| {
+        if (mod.is_region) {
+            max_chunks += @abs(mod.to_coord[0] - mod.coord[0]) * @abs(mod.to_coord[1] - mod.coord[1]) * @abs(mod.to_coord[2] - mod.coord[2]);
+        } else {
+            max_chunks += 1;
+        }
+    }
+
+    var dirty_chunks: common.BoundedSlice(*Chunk) = .{
+        .data = ts.arena_frame.alloc(*Chunk, max_chunks),
+    };
+    var dirty_chunk_indices: common.BoundedSlice(ChunkIndex) = .{
+        .data = ts.arena_frame.alloc(ChunkIndex, max_chunks),
+    };
 
     for (mods) |mod| {
         const chunk = chunk_at(map, mod.coord) orelse continue;
@@ -343,8 +380,8 @@ pub fn apply_modify(memory: *Memory, map: *Map, mods: []common.MapModify) []Chun
             var rchunk = chunk;
             var rcoord = mod.coord;
             rchunk.flags.dirty = 1;
-            dirty_chunks.append(memory.mem.frame, rchunk) catch unreachable;
-            dirty_chunk_indices.append(memory.mem.frame, chunk_index(chunk_coord(rcoord))) catch unreachable;
+            dirty_chunks.append(rchunk);
+            dirty_chunk_indices.append(chunk_index(chunk_coord(rcoord)));
 
             var rk: i16 = mod.coord[2];
             while (rk < mod.to_coord[2]) : (rk += 1) {
@@ -359,8 +396,8 @@ pub fn apply_modify(memory: *Memory, map: *Map, mods: []common.MapModify) []Chun
                                 continue;
                             };
                             if (rchunk.flags.dirty == 0) {
-                                dirty_chunk_indices.append(memory.mem.frame, chunk_index(chunk_coord(rcoord))) catch unreachable;
-                                dirty_chunks.append(memory.mem.frame, rchunk) catch unreachable;
+                                dirty_chunk_indices.append(chunk_index(chunk_coord(rcoord)));
+                                dirty_chunks.append(rchunk);
                                 rchunk.flags.dirty = 1;
                             }
                         }
@@ -371,30 +408,30 @@ pub fn apply_modify(memory: *Memory, map: *Map, mods: []common.MapModify) []Chun
         } else {
             set_voxel_at_coord(chunk, mod.coord, mod.voxel);
             chunk.flags.dirty = 1;
-            dirty_chunk_indices.append(memory.mem.frame, chunk_index(chunk_coord(mod.coord))) catch unreachable;
-            dirty_chunks.append(memory.mem.frame, chunk) catch unreachable;
+            dirty_chunk_indices.append(chunk_index(chunk_coord(mod.coord)));
+            dirty_chunks.append(chunk);
         }
     }
 
     // Clear dirty flags
-    for (dirty_chunks.items) |chunk| {
+    for (dirty_chunks.slice()) |chunk| {
         chunk.flags.dirty = 0;
     }
 
-    return dirty_chunk_indices.items;
+    return dirty_chunk_indices.data;
 }
 
-pub fn rebuild_chunks(memory: *Memory, map: *Map, dirty: []ChunkIndex) void {
+pub fn rebuild_chunks(ts: *ThreadState, memory: *Memory, map: *Map, dirty: []ChunkIndex) void {
     for (dirty) |index| {
         const chunk = chunk_at_index(map, index) orelse {
             continue;
         };
-        chunk_build_faces(memory, chunk);
+        chunk_build_faces(ts, memory, chunk);
         chunk.flags.dirty = 1;
     }
 }
 
-pub fn edit(memory: *Memory, player: *common.Player, input: *const common.Input, map: *Map) !void {
+pub fn edit(ts: *ThreadState, memory: *Memory, player: *common.Player, input: *const common.Input, map: *Map) void {
     if (input.isset(.SelectBlock1)) {
         player.edit.selected_block = .air;
     }
@@ -415,9 +452,9 @@ pub fn edit(memory: *Memory, player: *common.Player, input: *const common.Input,
     }
     if (input.isset(.add_chunk)) {
         const coord = chunk_coord(voxel_coord(player.camera.pos));
-        const chunk = add_chunk(map, coord) catch return;
-        chunk_build_terrain(memory, chunk);
-        chunk_build_faces(memory, chunk);
+        const chunk = add_chunk(map, coord);
+        chunk_build_terrain(ts, chunk);
+        chunk_build_faces(ts, memory, chunk);
     }
     if (input.isset(.remove_chunk)) {
         const coord = chunk_coord(voxel_coord(player.camera.pos));
@@ -452,7 +489,7 @@ pub fn edit(memory: *Memory, player: *common.Player, input: *const common.Input,
             const bound_j1 = @max(player.edit.region_j0, player.edit.region_j1) + 1;
             const bound_k1 = @max(player.edit.region_k0, player.edit.region_k1) + 1;
 
-            try memory.map_mods.append(memory.mem.frame, .{
+            memory.map_mods.append(.{
                 .coord = .{ bound_i0, bound_j0, bound_k0 },
                 .voxel = player.edit.selected_block,
                 .is_region = true,
@@ -462,20 +499,18 @@ pub fn edit(memory: *Memory, player: *common.Player, input: *const common.Input,
             player.edit.selected_0 = false;
         }
     } else if (input.isset(.PlaceBlock)) {
-        try memory.map_mods.append(memory.mem.frame, .{
+        memory.map_mods.append(.{
             .coord = player.edit.coord,
             .voxel = player.edit.selected_block,
         });
     }
 }
 
-pub fn chunk_build_terrain(memory: *Memory, chunk: *Chunk) void {
-    var wg: std.Thread.WaitGroup = undefined;
-    wg.reset();
-    for (0..chunk_dim) |z| {
-        memory.threadpool.spawnWg(&wg, build_terrain_piece, .{ memory, chunk, 0, chunk_dim, 0, chunk_dim, z });
+pub fn chunk_build_terrain(ts: *ThreadState, chunk: *Chunk) void {
+    const r = ts.range(chunk_dim);
+    for (r[0]..r[1]) |z| {
+        build_terrain_piece(ts, chunk, 0, chunk_dim, 0, chunk_dim, z);
     }
-    memory.threadpool.waitAndWork(&wg);
 }
 
 fn addVoxelFaceIfSet(chunk: *Chunk, faces: []primitive.VoxelTransform, len: *usize, x: usize, y: usize, z: usize, face: primitive.VoxelTransform.FaceDir) void {
@@ -494,9 +529,9 @@ fn occupied(voxel: primitive.Voxel) bool {
     return voxel != .air;
 }
 
-fn build_faces_piece(memory: *Memory, chunk: *const Chunk, faces: *VoxelFaceArray, x0: usize, x1: usize, y0: usize, y1: usize, z: usize) void {
-    const profile_block = memory.profile.begin(@src().fn_name, 6 * (x1 - x0) * (y1 - y0) / 8);
-    defer memory.profile.end(profile_block);
+fn build_faces_piece(ts: *ThreadState, chunk: *const Chunk, faces: *VoxelFaceArray, x0: usize, x1: usize, y0: usize, y1: usize, z: usize) void {
+    const profile_block = ts.profile.begin(@src().fn_name, 6 * (x1 - x0) * (y1 - y0) / 8);
+    defer ts.profile.end(profile_block);
 
     var block = faces.head();
 
@@ -516,66 +551,54 @@ fn build_faces_piece(memory: *Memory, chunk: *const Chunk, faces: *VoxelFaceArra
 
             if (occupied(f)) {
                 VoxelFaceArray.push(&block, .{
-                    .pos = .{
-                        @intCast(x + 1),
-                        @intCast(y),
-                        @intCast(z),
-                    },
+                    .i = @intCast(x + 1),
+                    .j = @intCast(y),
+                    .k = @intCast(z),
                     .face = .back,
                     .kind = f,
                 });
             }
             if (occupied(b)) {
                 VoxelFaceArray.push(&block, .{
-                    .pos = .{
-                        @intCast(x - 1),
-                        @intCast(y),
-                        @intCast(z),
-                    },
+                    .i = @intCast(x - 1),
+                    .j = @intCast(y),
+                    .k = @intCast(z),
                     .face = .front,
                     .kind = b,
                 });
             }
             if (occupied(r)) {
                 VoxelFaceArray.push(&block, .{
-                    .pos = .{
-                        @intCast(x),
-                        @intCast(y + 1),
-                        @intCast(z),
-                    },
+                    .i = @intCast(x),
+                    .j = @intCast(y + 1),
+                    .k = @intCast(z),
                     .face = .left,
                     .kind = r,
                 });
             }
             if (occupied(l)) {
                 VoxelFaceArray.push(&block, .{
-                    .pos = .{
-                        @intCast(x),
-                        @intCast(y - 1),
-                        @intCast(z),
-                    },
+                    .i = @intCast(x),
+                    .j = @intCast(y - 1),
+                    .k = @intCast(z),
                     .face = .right,
                     .kind = l,
                 });
             }
             if (occupied(u)) {
                 VoxelFaceArray.push(&block, .{
-                    .pos = .{
-                        @intCast(x),
-                        @intCast(y),
-                        @intCast(z + 1),
-                    },
+                    .i = @intCast(x),
+                    .j = @intCast(y),
+                    .k = @intCast(z + 1),
                     .face = .down,
                     .kind = u,
                 });
             }
             if (occupied(d)) {
                 VoxelFaceArray.push(&block, .{
-                    .pos = .{
-                        @intCast(x),
-                        @intCast(y),
-                        @intCast(z - 1),
-                    },
+                    .i = @intCast(x),
+                    .j = @intCast(y),
+                    .k = @intCast(z - 1),
                     .face = .up,
                     .kind = d,
                 });
@@ -584,9 +607,9 @@ fn build_faces_piece(memory: *Memory, chunk: *const Chunk, faces: *VoxelFaceArra
     }
 }
 
-fn build_chunk_edges(memory: *Memory, chunk: *const Chunk, faces: *VoxelFaceArray, _i0: usize, _i1: usize, j: usize) void {
-    const profile_block = memory.profile.begin(@src().fn_name, (_i1 - _i0) / 8);
-    defer memory.profile.end(profile_block);
+fn build_chunk_edges(ts: *ThreadState, chunk: *const Chunk, faces: *VoxelFaceArray, _i0: usize, _i1: usize, j: usize) void {
+    const profile_block = ts.profile.begin(@src().fn_name, (_i1 - _i0) / 8);
+    defer ts.profile.end(profile_block);
 
     var block = faces.head();
 
@@ -594,66 +617,54 @@ fn build_chunk_edges(memory: *Memory, chunk: *const Chunk, faces: *VoxelFaceArra
         const n = chunk_dim - 1;
         if (occupied(chunk.voxels[0][j][i])) {
             VoxelFaceArray.push(&block, .{
-                .pos = .{
-                    @intCast(i),
-                    @intCast(j),
-                    @intCast(0),
-                },
+                .i = @intCast(i),
+                .j = @intCast(j),
+                .k = @intCast(0),
                 .face = .down,
                 .kind = chunk.voxels[0][j][i],
             });
         }
         if (occupied(chunk.voxels[n][j][i])) {
             VoxelFaceArray.push(&block, .{
-                .pos = .{
-                    @intCast(i),
-                    @intCast(j),
-                    @intCast(n),
-                },
+                .i = @intCast(i),
+                .j = @intCast(j),
+                .k = @intCast(n),
                 .face = .up,
                 .kind = chunk.voxels[n][j][i],
             });
         }
         if (occupied(chunk.voxels[j][0][i])) {
             VoxelFaceArray.push(&block, .{
-                .pos = .{
-                    @intCast(i),
-                    @intCast(0),
-                    @intCast(j),
-                },
+                .i = @intCast(i),
+                .j = @intCast(0),
+                .k = @intCast(j),
                 .face = .left,
                 .kind = chunk.voxels[j][0][i],
             });
         }
         if (occupied(chunk.voxels[j][n][i])) {
             VoxelFaceArray.push(&block, .{
-                .pos = .{
-                    @intCast(i),
-                    @intCast(n),
-                    @intCast(j),
-                },
+                .i = @intCast(i),
+                .j = @intCast(n),
+                .k = @intCast(j),
                 .face = .right,
                 .kind = chunk.voxels[j][n][i],
             });
         }
         if (occupied(chunk.voxels[j][i][0])) {
             VoxelFaceArray.push(&block, .{
-                .pos = .{
-                    @intCast(0),
-                    @intCast(i),
-                    @intCast(j),
-                },
+                .i = @intCast(0),
+                .j = @intCast(i),
+                .k = @intCast(j),
                 .face = .back,
                 .kind = chunk.voxels[j][i][0],
             });
         }
         if (occupied(chunk.voxels[j][i][n])) {
             VoxelFaceArray.push(&block, .{
-                .pos = .{
-                    @intCast(n),
-                    @intCast(i),
-                    @intCast(j),
-                },
+                .i = @intCast(n),
+                .j = @intCast(i),
+                .k = @intCast(j),
                 .face = .front,
                 .kind = chunk.voxels[j][i][n],
             });
@@ -661,9 +672,9 @@ fn build_chunk_edges(memory: *Memory, chunk: *const Chunk, faces: *VoxelFaceArra
     }
 }
 
-fn build_terrain_piece(memory: *Memory, chunk: *Chunk, x0: usize, x1: usize, y0: usize, y1: usize, z: usize) void {
-    const block = memory.profile.begin(@src().fn_name, (x1 - x0) * (y1 - y0) / 8);
-    defer memory.profile.end(block);
+fn build_terrain_piece(ts: *ThreadState, chunk: *Chunk, x0: usize, x1: usize, y0: usize, y1: usize, z: usize) void {
+    const block = ts.profile.begin(@src().fn_name, (x1 - x0) * (y1 - y0) / 8);
+    defer ts.profile.end(block);
 
     for (y0..y1) |y| {
         for (x0..x1) |x| {
@@ -673,9 +684,7 @@ fn build_terrain_piece(memory: *Memory, chunk: *Chunk, x0: usize, x1: usize, y0:
                 .y = @as(f32, @floatFromInt(y)) + 0.5 - halfdim,
                 .z = @as(f32, @floatFromInt(z)) + 0.5 - halfdim,
             };
-            if (v3.len(d) <= halfdim) {
-                chunk.voxels[z][y][x] = .grass;
-            }
+            chunk.voxels[z][y][x] = if (v3.len(d) <= halfdim) .grass else .air;
         }
     }
 }
@@ -684,7 +693,7 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
     return struct {
         const Self = @This();
         const Block = struct {
-            allocator: std.mem.Allocator = undefined,
+            arena: *common.Arena,
             next: ?*Block = null,
             head: **Block = undefined,
             used: usize = 0,
@@ -696,16 +705,16 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
         thread_indices: []usize = undefined,
         num_cpus: usize = 0,
         used_thread_indices: std.atomic.Value(u8) = undefined,
-        allocator: std.mem.Allocator = undefined,
+        arena: *common.Arena = undefined,
 
         fn push(self: **Block, t: T) void {
             if (self.*.used == self.*.memory.len) {
                 std.debug.assert(self.*.next == null);
-                const block = self.*.allocator.alloc(Block, 1) catch unreachable;
+                const block = self.*.arena.alloc(Block, 1);
                 self.*.next = @ptrCast(block.ptr);
                 self.*.head.* = self.*.next.?;
                 self.*.next.?.* = Block{
-                    .allocator = self.*.allocator,
+                    .arena = self.*.arena,
                     .head = self.*.head,
                 };
                 self.* = self.*.next.?;
@@ -715,10 +724,10 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
             self.*.used += 1;
         }
 
-        fn init(allocator: std.mem.Allocator, num_cpus: usize) Self {
+        fn init(arena: *common.Arena, num_cpus: usize) Self {
             var self = Self{
                 .num_cpus = num_cpus,
-                .allocator = allocator,
+                .arena = arena,
             };
 
             self.reset();
@@ -733,15 +742,15 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
         fn reset(self: *Self) void {
             self.used_thread_indices = std.atomic.Value(u8).init(0);
 
-            self.roots = self.allocator.alloc(*Block, self.num_cpus) catch unreachable;
-            self.heads = self.allocator.alloc(*Block, self.num_cpus) catch unreachable;
-            self.thread_indices = self.allocator.alloc(usize, self.num_cpus) catch unreachable;
+            self.roots = self.arena.alloc(*Block, self.num_cpus);
+            self.heads = self.arena.alloc(*Block, self.num_cpus);
+            self.thread_indices = self.arena.alloc(usize, self.num_cpus);
 
             for (0..self.num_cpus) |i| {
-                const block = self.allocator.alloc(Block, 1) catch unreachable;
+                const block = self.arena.alloc(Block, 1);
                 self.roots[i] = @ptrCast(block.ptr);
                 self.roots[i].* = Block{
-                    .allocator = self.allocator,
+                    .arena = self.arena,
                     .head = &self.heads[i],
                 };
                 self.heads[i] = self.roots[i];
@@ -766,7 +775,7 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
             return self.heads[index];
         }
 
-        fn collect(self: *Self, allocator: std.mem.Allocator) []T {
+        fn collect(self: *Self, arena: *common.ArenaFreelist) []T {
             var len: usize = 0;
             for (self.roots) |r| {
                 var b: ?*Block = r;
@@ -779,7 +788,7 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
                 }
             }
 
-            const memory = allocator.alloc(T, len) catch unreachable;
+            const memory = arena.alloc(T, len);
             var index: usize = 0;
             for (self.roots) |r| {
                 var b: ?*Block = r;

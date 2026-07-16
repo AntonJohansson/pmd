@@ -2,7 +2,8 @@ const std = @import("std");
 const res = @import("res.zig");
 const build_options = @import("build_options");
 const disk = if (build_options.options.debug) @import("pack-disk") else struct {};
-const common = @import("common");
+const common = @import("common.zig");
+const StringBuilder = common.serialize.StringBuilder;
 
 const format_version = 1;
 const magic: u32 = 'g' | ('o' << 8) | ('s' << 16) | ('e' << 24);
@@ -70,14 +71,14 @@ const DiskError = error{
 
 pub const Pack = struct {
     header: Header = .{},
-    resources: []Resource,
-    resource_dirty: []bool,
-    entries: []Entry,
-    bytes: []u8,
+    resources: []Resource = &.{},
+    resource_dirty: []bool = &.{},
+    entries: []Entry = &.{},
+    bytes: []u8 = &.{},
 };
 
-pub var arena_frame: *common.Arena = .{};
-pub var arena_persistent: *common.Arena = .{};
+pub var arena_frame: *common.Arena = undefined;
+pub var arena_persistent: *common.ArenaFreelist = undefined;
 
 pub fn load(pack: *Pack, bytes: []u8) !void {
     var offset: usize = 0;
@@ -102,101 +103,98 @@ pub fn load(pack: *Pack, bytes: []u8) !void {
     pack.bytes = bytes;
 }
 
-pub fn saveToMemory(pack: *Pack) !StringBuilder {
+pub fn save_to_memory(pack: *Pack) StringBuilder {
     var builder = StringBuilder{
-        .arena = &arena_persistent,
+        .segments = .{ .arena = arena_frame },
+        .base_offset = memorySizeOfType(pack.header),
     };
 
-    const header_size = memorySizeOfType(pack.header);
-    builder.base_offset = header_size;
-    if (pack.entries != null) {
-        for (pack.entries.?.items, 0..) |*e, i| {
-            if (pack.resource_dirty.?.items[i]) {
-                const resource = pack.resources.?.items[e.offset];
-                e.offset = @intCast(builder.getOffset());
+    if (pack.entries.len > 0) {
+        for (pack.entries, 0..) |*e, i| {
+            if (pack.resource_dirty[i]) {
+                const resource = pack.resources[e.offset];
+                e.offset = @intCast(builder.get_offset());
                 switch (e.type) {
-                    .text => try memoryWriteType(&builder, resource.text),
-                    .shader => try memoryWriteType(&builder, resource.shader),
-                    .texture => try memoryWriteType(&builder, resource.image),
-                    .cubemap => try memoryWriteType(&builder, resource.cubemap),
-                    .audio => try memoryWriteType(&builder, resource.audio),
-                    .font => try memoryWriteType(&builder, resource.font),
-                    .model => try memoryWriteType(&builder, resource.model),
-                    .model_node => try memoryWriteType(&builder, resource.model_node),
-                    .animation => try memoryWriteType(&builder, resource.animation),
+                    .text => memoryWriteType(&builder, resource.text),
+                    .shader => memoryWriteType(&builder, resource.shader),
+                    .texture => memoryWriteType(&builder, resource.image),
+                    .cubemap => memoryWriteType(&builder, resource.cubemap),
+                    .audio => memoryWriteType(&builder, resource.audio),
+                    .font => memoryWriteType(&builder, resource.font),
+                    .model => memoryWriteType(&builder, resource.model),
+                    .model_node => memoryWriteType(&builder, resource.model_node),
+                    .animation => memoryWriteType(&builder, resource.animation),
                     else => unreachable,
                 }
-                e.size = @as(u32, @intCast(builder.getOffset())) - e.offset;
-            } else if (pack.bytes) |bytes| {
-                const offset: u32 = @intCast(builder.getOffset());
-                try builder.writeBytes(bytes[e.offset..(e.offset + e.size)]);
+                e.size = @as(u32, @intCast(builder.get_offset())) - e.offset;
+            } else if (pack.bytes.len > 0) {
+                const offset: u32 = @intCast(builder.get_offset());
+                builder.write_bytes(pack.bytes[e.offset..(e.offset + e.size)]);
                 e.offset = offset;
             } else {
                 unreachable;
             }
         }
 
-        pack.header.entry_table_count = @intCast(pack.entries.?.items.len);
-        pack.header.entry_table_offset = @intCast(builder.getOffset());
-        for (pack.entries.?.items) |e| {
-            try memoryWriteType(&builder, e);
+        pack.header.entry_table_count = @intCast(pack.entries.len);
+        pack.header.entry_table_offset = @intCast(builder.get_offset());
+        for (pack.entries) |e| {
+            memoryWriteType(&builder, e);
         }
     }
 
-    builder.insert = 0;
-    builder.append = false;
-    builder.base_offset = 0;
-    try memoryWriteType(&builder, pack.header);
+    var header_builder = builder.subbuilder();
+    memoryWriteType(&header_builder, pack.header);
+    header_builder.segments.join_right(&builder.segments);
 
-    return builder;
+    return header_builder;
 }
 
-pub fn saveToFile(pack: *Pack, path: []const u8) !void {
-    var builder = try saveToMemory(pack);
-    defer builder.deinit();
-    try builder.dumpToFile(path);
+pub fn save_to_file(pack: *Pack, path: []const u8) !void {
+    var builder = save_to_memory(pack);
+    try builder.dump_to_file(path);
 }
 
 pub fn getResource(pack: *Pack, id: usize) Resource {
-    const entry = pack.entries.?.items[id];
+    const entry = pack.entries[id];
     var offset: usize = @intCast(entry.offset);
     var resource: Resource = undefined;
     switch (entry.type) {
         .text => {
             resource = Resource{ .text = .{} };
-            memoryReadType(res.Text, pack.bytes.?, &offset, &resource.text);
+            memoryReadType(res.Text, pack.bytes, &offset, &resource.text);
         },
         .shader => {
             resource = Resource{ .shader = .{} };
-            memoryReadType(res.Shader, pack.bytes.?, &offset, &resource.shader);
+            memoryReadType(res.Shader, pack.bytes, &offset, &resource.shader);
         },
         .texture => {
             resource = Resource{ .image = .{} };
-            memoryReadType(res.Image, pack.bytes.?, &offset, &resource.image);
+            memoryReadType(res.Image, pack.bytes, &offset, &resource.image);
         },
         .cubemap => {
             resource = Resource{ .cubemap = .{} };
-            memoryReadType(res.Cubemap, pack.bytes.?, &offset, &resource.cubemap);
+            memoryReadType(res.Cubemap, pack.bytes, &offset, &resource.cubemap);
         },
         .audio => {
             resource = Resource{ .audio = .{} };
-            memoryReadType(res.Audio, pack.bytes.?, &offset, &resource.audio);
+            memoryReadType(res.Audio, pack.bytes, &offset, &resource.audio);
         },
         .font => {
             resource = Resource{ .font = .{} };
-            memoryReadType(res.Font, pack.bytes.?, &offset, &resource.font);
+            memoryReadType(res.Font, pack.bytes, &offset, &resource.font);
         },
         .model_node => {
             resource = Resource{ .model_node = .{} };
-            memoryReadType(res.ModelNode, pack.bytes.?, &offset, &resource.model_node);
+            memoryReadType(res.ModelNode, pack.bytes, &offset, &resource.model_node);
         },
         .model => {
             resource = Resource{ .model = .{} };
-            memoryReadType(res.Model, pack.bytes.?, &offset, &resource.model);
+            memoryReadType(res.Model, pack.bytes, &offset, &resource.model);
         },
         .animation => {
             resource = Resource{ .animation = .{} };
-            memoryReadType(res.Animation, pack.bytes.?, &offset, &resource.animation);
+            memoryReadType(res.Animation, pack.bytes, &offset, &resource.animation);
         },
         else => unreachable,
     }
@@ -209,7 +207,7 @@ pub const EntryInfo = struct {
 };
 
 pub fn entry_lookup_id(pack: *Pack, id: res.Id) ?EntryInfo {
-    for (pack.entries.?.items, 0..) |e, i| {
+    for (pack.entries, 0..) |e, i| {
         if (e.id == id) {
             return .{ .index = i, .entry = e };
         }
@@ -219,7 +217,7 @@ pub fn entry_lookup_id(pack: *Pack, id: res.Id) ?EntryInfo {
 
 pub fn entry_lookup(pack: *Pack, name: []const u8) ?EntryInfo {
     // TODO: Use stringmap lookup
-    for (pack.entries.?.items, 0..) |e, i| {
+    for (pack.entries, 0..) |e, i| {
         if (std.mem.eql(u8, e.name, name)) {
             return .{ .index = i, .entry = e };
         }
@@ -233,18 +231,18 @@ pub fn resource_lookup(pack: *Pack, name: []const u8) ?Resource {
 }
 
 pub fn resource_append(pack: *Pack, srcs: []EntrySrc, name: []const u8, res_type: ResourceType, resource: Resource, parent: ?i32, children: ?[]i32) !Entry {
-    const index = pack.entries.?.items.len;
-    const entry = try pack.entries.?.addOne(persistent);
-    entry.offset = @intCast(pack.resources.?.items.len);
+    const index = pack.entries.len;
+    pack.entries = arena_persistent.realloc(pack.entries, index + 1);
+    const entry = &pack.entries[index];
+    entry.offset = @intCast(pack.resources.len);
 
     // TODO: nasty
-    try pack.resource_dirty.?.ensureTotalCapacity(persistent, index + 1);
-    const start = pack.resource_dirty.?.items.len;
-    pack.resource_dirty.?.expandToCapacity();
-    for (start..pack.resource_dirty.?.capacity) |i| {
-        pack.resource_dirty.?.items[i] = false;
+    const start = pack.resource_dirty.len;
+    pack.resource_dirty = arena_persistent.realloc(pack.resource_dirty, index + 1);
+    for (start..pack.resource_dirty.len) |i| {
+        pack.resource_dirty[i] = false;
     }
-    pack.resource_dirty.?.items[index] = true;
+    pack.resource_dirty[index] = true;
 
     entry.type = res_type;
     entry.name = name;
@@ -257,17 +255,21 @@ pub fn resource_append(pack: *Pack, srcs: []EntrySrc, name: []const u8, res_type
         s.mtime = try getFileMTime(s.path);
     }
 
-    try pack.resources.?.append(persistent, resource);
+    const res_index = pack.resources.len;
+    pack.resources = arena_persistent.realloc(pack.resources, pack.resources.len + 1);
+    pack.resources[res_index] = resource;
 
     return entry.*;
 }
 
 pub fn entry_delete(pack: *Pack, entry: Entry) void {
     var i: usize = 0;
-    while (i < pack.entries.?.items.len) {
-        const e = pack.entries.?.items[i];
+    while (i < pack.entries.len) {
+        const e = pack.entries[i];
         if (std.mem.eql(u8, e.name, entry.name)) {
-            _ = pack.entries.?.orderedRemove(i);
+            // ordered remove
+            @memmove(pack.entries[i .. pack.entries.len - 1], pack.entries[i + 1 ..]);
+            pack.entries.len -= 1;
             return;
         } else {
             i += 1;
@@ -275,8 +277,8 @@ pub fn entry_delete(pack: *Pack, entry: Entry) void {
     }
 }
 
-pub fn entry_delete_child_tree(p: *Pack, start_id: usize) !void {
-    var entry = p.entries.?.items[start_id];
+pub fn entry_delete_child_tree(pack: *Pack, start_id: usize) !void {
+    var entry = pack.entries[start_id];
 
     // If the selected node has a parent, find the parent so we can
     // properly delete the entire tree of nodes. Child offsets of
@@ -288,11 +290,11 @@ pub fn entry_delete_child_tree(p: *Pack, start_id: usize) !void {
         var parent: ?i32 = entry.parent;
         while (parent != null) {
             root_id = root_id + parent.?;
-            const parent_entry = p.entries.?.items[@intCast(root_id)];
+            const parent_entry = pack.entries[@intCast(root_id)];
             parent = parent_entry.parent;
         }
 
-        entry = p.entries.?.items[@intCast(root_id)];
+        entry = pack.entries[@intCast(root_id)];
     } else {
         // If we don't have a parent, go ahead and delete the current entry,
         // if we had a parent and updated the root entry the selected entry
@@ -305,29 +307,28 @@ pub fn entry_delete_child_tree(p: *Pack, start_id: usize) !void {
     // originated from the same file.
     if (entry.children) |root_children| {
         var child_queue = common.IntrusiveList(i32){
-            .arena = &arena_frame,
+            .arena = arena_frame,
         };
 
         for (root_children) |rc| {
             child_queue.append(@intCast(root_id + @as(i64, @intCast(rc))));
         }
 
-        while (child_queue.items.len > 0) {
-            const child_id = child_queue.pop();
-            const child_entry = p.entries.?.items[@intCast(child_id.?)];
+        while (child_queue.pop()) |child_id| {
+            const child_entry = pack.entries[@intCast(child_id)];
 
             if (child_entry.children) |entry_children| {
                 for (entry_children) |ec| {
-                    child_queue.append(@intCast(child_id.? + @as(i64, @intCast(ec))));
+                    child_queue.append(@intCast(child_id + @as(i64, @intCast(ec))));
                 }
             }
 
-            entry_delete(p, child_entry);
+            entry_delete(pack, child_entry);
         }
     }
 
     if (delete_original_entry) {
-        entry_delete(p, entry);
+        entry_delete(pack, entry);
     }
 }
 
@@ -347,176 +348,6 @@ pub fn has_entry_been_modified(entry: Entry) bool {
     }
     return false;
 }
-
-//
-// StringBuilder
-//
-
-const Segment = struct {
-    used: usize = undefined,
-    data: []u8 = undefined,
-};
-
-pub const StringBuilder = struct {
-    segments: std.ArrayList(Segment),
-    allocator: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator,
-    insert: usize = 0,
-    last_segment: ?Segment = null,
-    append: bool = true,
-    base_offset: usize = 0,
-
-    fn init(allocator: std.mem.Allocator) StringBuilder {
-        return StringBuilder{
-            .segments = std.ArrayList(Segment){},
-            .allocator = allocator,
-            .arena = std.heap.ArenaAllocator.init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *StringBuilder) void {
-        self.segments.deinit(self.allocator);
-        self.arena.deinit();
-    }
-
-    fn addSegmentBySlice(self: *StringBuilder, bytes: []u8) !void {
-        try self.segments.insert(self.allocator, self.insert, Segment{
-            .data = bytes,
-            .used = bytes.len,
-        });
-        if (self.segments.items.len > 0) {
-            self.insert += 1;
-        }
-        self.append = true;
-    }
-
-    fn addSegmentBySize(self: *StringBuilder, size: usize) !void {
-        //const rounded_size = 8*@divFloor(size + 8 - 1, 8);
-        const slice = try self.arena.allocator().alloc(u8, size);
-        try self.segments.insert(self.allocator, self.insert, Segment{
-            .data = slice,
-            .used = 0,
-        });
-        if (self.segments.items.len > 0) {
-            self.insert += 1;
-        }
-        self.append = true;
-    }
-
-    fn getLastSegment(self: *StringBuilder) ?*Segment {
-        const len = self.segments.items.len;
-        if (len == 0 or self.insert > len or self.insert == 0 or !self.append and self.segments.items[self.insert - 1].used > 0) {
-            return null;
-        }
-        std.debug.assert(self.insert > 0);
-        return &self.segments.items[self.insert - 1];
-    }
-
-    fn getOffset(self: *StringBuilder) usize {
-        var offset: usize = self.base_offset;
-        for (self.segments.items[0..self.insert]) |s| {
-            offset += s.used;
-        }
-        return offset;
-    }
-
-    fn getMemory(self: *StringBuilder, size: usize) ![]u8 {
-        if (self.getLastSegment()) |last| {
-            const free = last.data.len - last.used;
-            if (free >= size) {
-                const bytes = last.data[last.used..(last.used + size)];
-                last.used += size;
-                return bytes;
-            }
-        }
-
-        // If we get to here, we need to allocate another segment
-        const segment_size = 4096;
-        std.debug.assert(size <= segment_size);
-        try self.addSegmentBySize(segment_size);
-        const last = self.getLastSegment() orelse unreachable;
-        last.used += size;
-        return last.data[0..size];
-    }
-
-    fn alignTo(self: *StringBuilder, alignment: u8) !void {
-        if (self.getLastSegment()) |last| {
-            const offset = self.getOffset();
-            const start = offset - last.used;
-            if (offset % alignment != 0) {
-                const next = alignIntTo(offset, alignment);
-                const next_offset = next - start;
-                if (next_offset < last.data.len) {
-                    last.used = next_offset;
-                } else {
-                    unreachable;
-                }
-            }
-        }
-    }
-
-    fn writeBytes(self: *StringBuilder, bytes: []const u8) !void {
-        // If the last segment has space, fill it as much as possible
-        var start_offset: usize = 0;
-        if (self.getLastSegment()) |last| {
-            const free = @min(last.data.len - last.used, bytes.len);
-            @memcpy(last.data[last.used..(last.used + free)], bytes[0..free]);
-            last.used += free;
-            start_offset += free;
-        }
-
-        if (start_offset < bytes.len) {
-            // Write remaining bytes to new segment
-            const remaining = bytes.len - start_offset;
-            try self.addSegmentBySize(remaining);
-            const last = self.getLastSegment() orelse unreachable;
-            @memcpy(last.data[0..remaining], bytes[start_offset..]);
-            last.used = remaining;
-        }
-    }
-
-    fn writeInt(self: *StringBuilder, comptime T: type, value: T) !void {
-        const size = comptime memorySizeOfIntType(T);
-        const bytes = try self.getMemory(size);
-        var buf: [size]u8 = undefined;
-        std.mem.writeInt(std.meta.Int(@typeInfo(T).int.signedness, 8 * size), &buf, value, .little);
-        @memcpy(bytes, &buf);
-    }
-
-    fn writeFloat(self: *StringBuilder, comptime T: type, value: T) !void {
-        const IntT = std.meta.Int(.unsigned, @typeInfo(T).float.bits);
-        try self.writeInt(IntT, @bitCast(value));
-    }
-
-    fn writePointer(self: *StringBuilder) void {
-        _ = self;
-    }
-
-    pub fn dumpToBuffer(self: *StringBuilder, allocator: std.mem.Allocator) ![]u8 {
-        var size: usize = 0;
-        for (self.segments.items) |s| {
-            size += s.used;
-        }
-        const slice = try allocator.alloc(u8, size);
-        var i: usize = 0;
-        for (self.segments.items) |s| {
-            @memcpy(slice[i..(s.used + i)], s.data[0..s.used]);
-            i += s.used;
-        }
-        return slice;
-    }
-
-    pub fn dumpToFile(self: *StringBuilder, path: []const u8) !void {
-        const file = try std.fs.cwd().createFile(path, .{});
-        var buffer: [1024]u8 = undefined;
-        var file_writer = file.writer(&buffer);
-        const writer = &file_writer.interface;
-        defer file.close();
-        for (self.segments.items) |s| {
-            try writer.writeAll(s.data[0..s.used]);
-        }
-    }
-};
 
 //
 // Helpers for reading/writing types to memory
@@ -628,54 +459,54 @@ fn memoryReadType(comptime T: type, bytes: []u8, offset: *usize, value: anytype)
     }
 }
 
-fn memoryWriteType(builder: *StringBuilder, value: anytype) !void {
+fn memoryWriteType(builder: *StringBuilder, value: anytype) void {
     const base_type = @TypeOf(value);
     const ti = @typeInfo(base_type);
 
     switch (ti) {
         .bool => {
-            try builder.writeInt(u8, @intFromBool(value));
+            builder.write_int(u8, @intFromBool(value));
         },
         .int => {
-            try builder.writeInt(base_type, value);
+            builder.write_int(base_type, value);
         },
         .float => {
-            try builder.writeFloat(base_type, value);
+            builder.write_float(base_type, value);
         },
         .@"enum" => |e| {
-            try builder.writeInt(e.tag_type, @intFromEnum(value));
+            builder.write_int(e.tag_type, @intFromEnum(value));
         },
         .pointer => |ptr| {
             std.debug.assert(ptr.size == .slice);
-            try builder.writeInt(u64, @as(u64, @intCast(value.len)));
+            builder.write_int(u64, @as(u64, @intCast(value.len)));
 
             if (@typeInfo(ptr.child) == .int or @typeInfo(ptr.child) == .float) {
                 const num_bytes = @sizeOf(ptr.child) * value.len;
                 const byte_slice: [*]const u8 = @ptrCast(value.ptr);
-                try builder.alignTo(@alignOf(ptr.child));
-                try builder.writeBytes(byte_slice[0..num_bytes]);
+                builder.align_to(@alignOf(ptr.child));
+                builder.write_bytes(byte_slice[0..num_bytes]);
             } else {
                 for (value) |v| {
-                    try memoryWriteType(builder, v);
+                    memoryWriteType(builder, v);
                 }
             }
         },
         .array => {
             for (value) |v| {
-                try memoryWriteType(builder, v);
+                memoryWriteType(builder, v);
             }
         },
         .@"struct" => |s| {
             inline for (s.fields) |field| {
-                try memoryWriteType(builder, @field(value, field.name));
+                memoryWriteType(builder, @field(value, field.name));
             }
         },
         .optional => {
             if (value != null) {
-                try builder.writeInt(u8, 1);
-                try memoryWriteType(builder, value.?);
+                builder.write_int(u8, 1);
+                memoryWriteType(builder, value.?);
             } else {
-                try builder.writeInt(u8, 0);
+                builder.write_int(u8, 0);
             }
         },
         else => @compileError("Unhandled type in writing data " ++ @typeName(base_type)),

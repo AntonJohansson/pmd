@@ -7,6 +7,7 @@ const Color = primitive.Color;
 
 pub const CommandBuffer = struct {
     bytes: bb.ByteBuffer(128 * 8192) = .{},
+    mutex: std.Thread.Mutex = .{},
 
     pub fn init(allocator: std.mem.Allocator) CommandBuffer {
         return .{
@@ -15,6 +16,9 @@ pub const CommandBuffer = struct {
     }
 
     pub fn push(b: *CommandBuffer, p: anytype, color: Color) void {
+        b.mutex.lock();
+        defer b.mutex.unlock();
+
         b.bytes.push(Header{
             .kind = meta.mapPrimitiveToKind(@TypeOf(p)),
             .color = color,
@@ -23,6 +27,9 @@ pub const CommandBuffer = struct {
     }
 
     pub fn pop(b: *CommandBuffer, comptime T: type) T {
+        b.mutex.lock();
+        defer b.mutex.unlock();
+
         return b.bytes.pop(T);
     }
 };
@@ -31,4 +38,3 @@ pub const Header = struct {
     kind: meta.PrimitiveKind,
     color: Color,
 };
-

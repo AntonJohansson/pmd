@@ -14,14 +14,13 @@ pub const Voxel = enum(u8) {
     wood,
 };
 
-pub const VoxelTransform = struct {
+pub const VoxelTransform = packed struct {
     pub const FaceDir = enum(u8) { up, down, back, front, left, right };
-
-    pos: [3]u8,
+    i: u8,
+    j: u8,
+    k: u8,
     face: FaceDir,
-
     kind: Voxel,
-    dummy: [3]u8 = .{ 0, 0, 0 },
 };
 
 pub const VoxelChunk = struct {
@@ -41,8 +40,7 @@ pub const Color = struct {
 
 pub const Text = struct {
     pos: v2,
-    str: [128:0]u8,
-    len: usize,
+    str: [:0]const u8,
     size: f32,
     cursor_index: ?usize = null,
     bg: math.v4,
