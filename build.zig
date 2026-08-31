@@ -73,7 +73,10 @@ pub fn build(b: *std.Build) !void {
     });
     pack.root_module.addImport("common", common);
     pack.root_module.addImport("pack-disk", pack_disk);
-    b.installArtifact(pack);
+    const pack_install = b.addInstallArtifact(pack, .{
+        .dest_dir = .{ .override = .{ .custom = "tools" } },
+    });
+    b.getInstallStep().dependOn(&pack_install.step);
 
     //
     // net
@@ -101,7 +104,24 @@ pub fn build(b: *std.Build) !void {
     libgame.root_module.addImport("common", common);
     libgame.root_module.addImport("net", net);
     libgame.root_module.addImport("build_options", build_options);
-    _ = b.installArtifact(libgame);
+    const libgame_install = b.addInstallArtifact(libgame, .{
+        .dest_dir = .{ .override = .{ .custom = "modules" } },
+    });
+    b.getInstallStep().dependOn(&libgame_install.step);
+
+    //
+    // res.gp
+    //
+
+    const data_path = try std.Io.Dir.path.join(b.allocator, &[_][]const u8{ b.install_prefix, "data" });
+    const res_path = try std.Io.Dir.path.join(b.allocator, &[_][]const u8{ data_path, "res.gp" });
+    _ = try std.Io.Dir.cwd().createDirPath(b.graph.io, data_path);
+    if (!exists(b.graph.io, res_path)) {
+        const run_res = b.addRunArtifact(pack);
+        run_res.step.dependOn(&pack_install.step);
+        run_res.addArgs(&[_][]const u8{ res_path, "add", "directory", "res" });
+        b.getInstallStep().dependOn(&run_res.step);
+    }
 
     //
     // client
@@ -109,10 +129,38 @@ pub fn build(b: *std.Build) !void {
     //const client_dir = try std.fs.cwd().openDir("src/client", .{});
     //try std.fs.cwd().copyFile("third_party/SDL_GameControllerDB/gamecontrollerdb.txt", client_dir, "gamecontrollerdb.txt", .{});
 
+    //const client = b.addExecutable(.{
+    //    .name = "client",
+    //    .root_module = b.createModule(.{
+    //        .root_source_file = b.path("src/client/client.zig"),
+    //        .target = target,
+    //        .optimize = optimize,
+    //    }),
+    //    // TODO(anjo): temp
+    //    .use_lld = false,
+    //    .use_llvm = true,
+    //});
+    //client.root_module.addObjectFile(b.path("third_party/glfw/build/src/libglfw3.a"));
+    //client.root_module.addIncludePath(b.path("third_party/glfw/include/GLFW"));
+    //client.root_module.addImport("sokol", sokol_dep.module("sokol"));
+    //client.root_module.addImport("common", common);
+    //client.root_module.addImport("net", net);
+    //client.root_module.addImport("pack-disk", pack_disk);
+    //client.root_module.addImport("build_options", build_options);
+    //b.installArtifact(client);
+
+    //const run_client_cmd = b.addRunArtifact(client);
+    //run_client_cmd.step.dependOn(b.getInstallStep());
+    //if (b.args) |args| {
+    //    run_client_cmd.addArgs(args);
+    //}
+    //const run_client_step = b.step("run-client", "Run the client");
+    //run_client_step.dependOn(&run_client_cmd.step);
+
     const client = b.addExecutable(.{
         .name = "client",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/client/client.zig"),
+            .root_source_file = b.path("src/client-main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -127,7 +175,10 @@ pub fn build(b: *std.Build) !void {
     client.root_module.addImport("net", net);
     client.root_module.addImport("pack-disk", pack_disk);
     client.root_module.addImport("build_options", build_options);
-    b.installArtifact(client);
+    const client_install = b.addInstallArtifact(client, .{
+        .dest_dir = .{ .override = .{ .custom = "." } },
+    });
+    b.getInstallStep().dependOn(&client_install.step);
 
     const run_client_cmd = b.addRunArtifact(client);
     run_client_cmd.step.dependOn(b.getInstallStep());
@@ -182,24 +233,30 @@ pub fn build(b: *std.Build) !void {
 fn build_glfw(b: *std.Build) !void {
     std.log.info("Building GLFW", .{});
 
-    _ = try std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &[_][]const u8{ "mkdir", "-p", "third_party/glfw/build" },
-    });
+    const build_path = "third_party/glfw/build";
 
-    const res_cmake = try std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &[_][]const u8{ "cmake", "-B", "third_party/glfw/build", "-S", "third_party/glfw", "-D", "GLFW_BUILD_X11=1", "-D", "GLFW_BUILD_WAYLAND=1" },
-    });
+    _ = try std.Io.Dir.cwd().createDirPath(b.graph.io, build_path);
+
+    const res_cmake = try std.process.run(
+        b.allocator,
+        b.graph.io,
+        .{ .argv = &[_][]const u8{ "cmake", "-B", build_path, "-S", "third_party/glfw", "-D", "GLFW_BUILD_X11=1", "-D", "GLFW_BUILD_WAYLAND=1" } },
+    );
     if (res_cmake.stderr.len > 0) {
         std.log.info("{s}", .{res_cmake.stderr});
         return error.BuildFailed;
     }
     std.log.info("{s}", .{res_cmake.stdout});
 
-    const res_make = try std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &[_][]const u8{ "make", "-C", "third_party/glfw/build" },
-    });
+    const res_make = try std.process.run(
+        b.allocator,
+        b.graph.io,
+        .{ .argv = &[_][]const u8{ "make", "-C", build_path } },
+    );
     std.log.info("{s}", .{res_make.stdout});
+}
+
+fn exists(io: std.Io, path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return true;
 }

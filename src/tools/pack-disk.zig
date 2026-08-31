@@ -18,53 +18,53 @@ const native_endian = std.builtin.target.cpu.arch.endian();
 pub var arena_frame: *common.Arena = undefined;
 pub var arena_persistent: *common.ArenaFreelist = undefined;
 
-pub fn load_resource(pack: *goosepack.Pack, srcs: []goosepack.EntrySrc, name: []const u8, res_type: goosepack.ResourceType) !goosepack.Entry {
+pub fn load_resource(io: std.Io, pack: *goosepack.Pack, srcs: []goosepack.EntrySrc, name: []const u8, res_type: goosepack.ResourceType) !goosepack.Entry {
     switch (res_type) {
         .text => {
             var text = res.Text{};
-            try load_text(&text, srcs);
-            return try goosepack.resource_append(pack, srcs, name, res_type, goosepack.Resource{
+            try load_text(io, &text, srcs);
+            return try goosepack.resource_append(io, pack, srcs, name, res_type, goosepack.Resource{
                 .text = text,
             }, null, null);
         },
         .shader => {
             var shader = res.Shader{};
-            try load_shader(&shader, srcs);
-            return try goosepack.resource_append(pack, srcs, name, res_type, goosepack.Resource{
+            try load_shader(io, &shader, srcs);
+            return try goosepack.resource_append(io, pack, srcs, name, res_type, goosepack.Resource{
                 .shader = shader,
             }, null, null);
         },
         .texture => {
             var image = res.Image{};
-            try load_texture(&image, srcs);
-            return try goosepack.resource_append(pack, srcs, name, res_type, goosepack.Resource{
+            try load_texture(io, &image, srcs);
+            return try goosepack.resource_append(io, pack, srcs, name, res_type, goosepack.Resource{
                 .image = image,
             }, null, null);
         },
         .cubemap => {
             var cubemap = res.Cubemap{};
-            try load_cubemap(&cubemap, srcs);
-            return try goosepack.resource_append(pack, srcs, name, res_type, goosepack.Resource{
+            try load_cubemap(io, &cubemap, srcs);
+            return try goosepack.resource_append(io, pack, srcs, name, res_type, goosepack.Resource{
                 .cubemap = cubemap,
             }, null, null);
         },
         .audio => {
             var audio = res.Audio{};
-            try load_audio(&audio, srcs);
-            return try goosepack.resource_append(pack, srcs, name, res_type, goosepack.Resource{
+            try load_audio(io, &audio, srcs);
+            return try goosepack.resource_append(io, pack, srcs, name, res_type, goosepack.Resource{
                 .audio = audio,
             }, null, null);
         },
         .model => {
             // TODO: breaks pattern:( maybe more simplification is possible
             var model = res.Model{};
-            return try load_model(pack, &model, srcs, name);
+            return try load_model(io, pack, &model, srcs, name);
         },
         .font => {
             var font = res.Font{};
 
-            try load_font(&font, srcs);
-            return try goosepack.resource_append(pack, srcs, name, res_type, goosepack.Resource{
+            try load_font(io, &font, srcs);
+            return try goosepack.resource_append(io, pack, srcs, name, res_type, goosepack.Resource{
                 .font = font,
             }, null, null);
         },
@@ -72,15 +72,15 @@ pub fn load_resource(pack: *goosepack.Pack, srcs: []goosepack.EntrySrc, name: []
     }
 }
 
-pub fn collect_and_update_entries(pack: *goosepack.Pack) ![]goosepack.Entry {
+pub fn collect_and_update_entries(io: std.Io, pack: *goosepack.Pack, arena: *common.Arena) ![]goosepack.Entry {
     var used: usize = 0;
-    var entries = arena_frame.alloc(goosepack.Entry, pack.entries.len);
+    var entries = arena.alloc(goosepack.Entry, pack.entries.len);
 
     var i: usize = 0;
     while (i < pack.entries.len) {
         const e = pack.entries[i];
-        if (e.parent == null and goosepack.has_entry_been_modified(e)) {
-            try goosepack.entry_delete_child_tree(pack, i);
+        if (e.parent == null and goosepack.has_entry_been_modified(io, e)) {
+            try goosepack.entry_delete_child_tree(pack, arena, i);
             entries[used] = e;
             used += 1;
         } else {
@@ -89,20 +89,20 @@ pub fn collect_and_update_entries(pack: *goosepack.Pack) ![]goosepack.Entry {
     }
 
     for (entries[0..used]) |*e| {
-        e.* = try load_resource(pack, e.srcs, e.name, e.type);
+        e.* = try load_resource(io, pack, e.srcs, e.name, e.type);
     }
 
-    try generate_pack_ids(pack);
+    try generate_pack_ids(io, pack);
 
     return entries[0..used];
 }
 
 // @TODO(anjo): Move to save?
-pub fn generate_pack_ids(pack: *goosepack.Pack) !void {
-    const fd = try std.fs.cwd().createFile("src/common/generated/res-ids.zig", .{});
-    defer fd.close();
+pub fn generate_pack_ids(io: std.Io, pack: *goosepack.Pack) !void {
+    const fd = try std.Io.Dir.cwd().createFile(io, "src/common/generated/res-ids.zig", .{});
+    defer fd.close(io);
     var buffer: [1024]u8 = undefined;
-    var w = fd.writer(&buffer);
+    var w = fd.writer(io, &buffer);
     const wi = &w.interface;
     for (pack.entries, 0..) |e,j| {
         try wi.print("const {s} = {};\n", .{e.name, j});
@@ -113,58 +113,58 @@ pub fn generate_pack_ids(pack: *goosepack.Pack) !void {
     }
 }
 
-fn read_file_with_size(file: std.fs.File, buf: []u8) void {
+fn read_file_with_size(io: std.Io, file: std.Io.File, buf: []u8) void {
     var read_buffer: [1024]u8 = undefined;
-    var file_reader = file.reader(&read_buffer);
+    var file_reader = file.reader(io, &read_buffer);
     const reader = &file_reader.interface;
     reader.readSliceAll(buf) catch unreachable;
 }
 
-pub fn read_file_to_persistent_memory(path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    const size = (try file.stat()).size;
+pub fn read_file_to_persistent_memory(io: std.Io, path: []const u8) ![]u8 {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    const size = (try file.stat(io)).size;
 
     const buf = arena_persistent.alloc(u8, size);
-    read_file_with_size(file, buf);
+    read_file_with_size(io, file, buf);
     return buf;
 }
 
-pub fn read_file_to_persistent_memory_zero_terminate(path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    const size = (try file.stat()).size + 1;
+pub fn read_file_to_persistent_memory_zero_terminate(io: std.Io, path: []const u8) ![]u8 {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    const size = (try file.stat(io)).size + 1;
 
     const buf = arena_persistent.alloc(u8, size);
     buf[size - 1] = 0;
-    read_file_with_size(file, buf[0 .. size - 1]);
+    read_file_with_size(io, file, buf[0 .. size - 1]);
     return buf;
 }
 
-pub fn read_file_to_frame_memory(path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    const size = (try file.stat()).size;
+pub fn read_file_to_frame_memory(io: std.Io, path: []const u8) ![]u8 {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    const size = (try file.stat(io)).size;
 
     const buf = arena_frame.alloc(u8, size);
-    read_file_with_size(file, buf);
+    read_file_with_size(io, file, buf);
     return buf;
 }
 
-pub fn read_file_to_frame_memory_zero_terminate(path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    const size = (try file.stat()).size + 1;
+pub fn read_file_to_frame_memory_zero_terminate(io: std.Io, path: []const u8) ![]u8 {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    const size = (try file.stat(io)).size + 1;
 
     const buf = arena_frame.alloc(u8, size);
     buf[size - 1] = 0;
-    read_file_with_size(file, buf[0 .. size - 1]);
+    read_file_with_size(io, file, buf[0 .. size - 1]);
     return buf;
 }
 
-fn load_text(text: *res.Text, srcs: []goosepack.EntrySrc) !void {
-    text.bytes = try read_file_to_persistent_memory(srcs[0].path);
+fn load_text(io: std.Io, text: *res.Text, srcs: []goosepack.EntrySrc) !void {
+    text.bytes = try read_file_to_persistent_memory(io, srcs[0].path);
 }
 
-fn load_shader(shader: *res.Shader, srcs: []goosepack.EntrySrc) !void {
-    shader.vs_bytes = try read_file_to_persistent_memory_zero_terminate(srcs[0].path);
-    shader.fs_bytes = try read_file_to_persistent_memory_zero_terminate(srcs[1].path);
+fn load_shader(io: std.Io, shader: *res.Shader, srcs: []goosepack.EntrySrc) !void {
+    shader.vs_bytes = try read_file_to_persistent_memory_zero_terminate(io, srcs[0].path);
+    shader.fs_bytes = try read_file_to_persistent_memory_zero_terminate(io, srcs[1].path);
 }
 
 fn load_png_from_memory(buf: []const u8) ?res.Image {
@@ -189,19 +189,19 @@ fn load_png_from_memory(buf: []const u8) ?res.Image {
     return image;
 }
 
-fn load_texture(image: *res.Image, srcs: []goosepack.EntrySrc) !void {
-    const buf = try read_file_to_frame_memory(srcs[0].path);
+fn load_texture(io: std.Io, image: *res.Image, srcs: []goosepack.EntrySrc) !void {
+    const buf = try read_file_to_frame_memory(io, srcs[0].path);
     image.* = load_png_from_memory(buf) orelse {
         std.log.err("Failed to decode image {s}", .{srcs[0].path});
         return;
     };
 }
 
-fn load_cubemap(cm: *res.Cubemap, srcs: []goosepack.EntrySrc) !void {
+fn load_cubemap(io: std.Io, cm: *res.Cubemap, srcs: []goosepack.EntrySrc) !void {
     // Load first face and set cubemap format
     {
         const path = srcs[0].path;
-        const buf = try read_file_to_frame_memory(path);
+        const buf = try read_file_to_frame_memory(io, path);
 
         var width: c_int = undefined;
         var height: c_int = undefined;
@@ -225,7 +225,7 @@ fn load_cubemap(cm: *res.Cubemap, srcs: []goosepack.EntrySrc) !void {
     for (1..6) |i| {
         {
             const path = srcs[i].path;
-            const buf = try read_file_to_frame_memory(path);
+            const buf = try read_file_to_frame_memory(io, path);
 
             var width: c_int = undefined;
             var height: c_int = undefined;
@@ -245,8 +245,8 @@ fn load_cubemap(cm: *res.Cubemap, srcs: []goosepack.EntrySrc) !void {
     }
 }
 
-fn load_audio(audio: *res.Audio, srcs: []goosepack.EntrySrc) !void {
-    const buf = try read_file_to_frame_memory(srcs[0].path);
+fn load_audio(io: std.Io, audio: *res.Audio, srcs: []goosepack.EntrySrc) !void {
+    const buf = try read_file_to_frame_memory(io, srcs[0].path);
 
     var err: c_int = undefined;
     const vorbis = c.stb_vorbis_open_memory(buf.ptr, @intCast(buf.len), &err, null) orelse {
@@ -262,8 +262,8 @@ fn load_audio(audio: *res.Audio, srcs: []goosepack.EntrySrc) !void {
     std.debug.assert(samples_per_channel * 2 == num_samples);
 }
 
-fn load_font(font: *res.Font, srcs: []goosepack.EntrySrc) !void {
-    const buf = try read_file_to_frame_memory(srcs[0].path);
+fn load_font(io: std.Io, font: *res.Font, srcs: []goosepack.EntrySrc) !void {
+    const buf = try read_file_to_frame_memory(io, srcs[0].path);
 
     const num_chars = 96;
     font.size = 30;
@@ -316,8 +316,8 @@ fn path_persistent_join_3(l: []const u8, m: []const u8, r: []const u8) []u8 {
     return buf;
 }
 
-fn load_model(pack: *goosepack.Pack, model: *res.Model, srcs: []goosepack.EntrySrc, name: []const u8) anyerror!error{ InvalidGLTF, TextureDecodeFailure }!goosepack.Entry {
-    const buf = try read_file_to_frame_memory(srcs[0].path);
+fn load_model(io: std.Io, pack: *goosepack.Pack, model: *res.Model, srcs: []goosepack.EntrySrc, name: []const u8) anyerror!error{ InvalidGLTF, TextureDecodeFailure }!goosepack.Entry {
+    const buf = try read_file_to_frame_memory(io, srcs[0].path);
 
     var options: c.cgltf_options = .{};
     var maybe_data: ?*c.cgltf_data = null;
@@ -431,7 +431,7 @@ fn load_model(pack: *goosepack.Pack, model: *res.Model, srcs: []goosepack.EntryS
     //var num_root_children: usize = 0;
     //var root_children: []i32 = try persistent.alloc(i32, data.nodes_count);
 
-    const root_entry = try goosepack.resource_append(pack, srcs, name, .model, goosepack.Resource{
+    const root_entry = try goosepack.resource_append(io, pack, srcs, name, .model, goosepack.Resource{
         .model = model.*,
     }, null, null);
 
@@ -568,7 +568,7 @@ fn load_model(pack: *goosepack.Pack, model: *res.Model, srcs: []goosepack.EntryS
                 .root_entry_relative_index = @as(i32, @intCast(root_entry_index)) - node_index,
                 .tree = tree,
             };
-            _ = try goosepack.resource_append(pack, srcs, new_name, .model_node, .{
+            _ = try goosepack.resource_append(io, pack, srcs, new_name, .model_node, .{
                 .model_node = model_node,
             }, null, null);
         }
@@ -737,7 +737,7 @@ fn load_model(pack: *goosepack.Pack, model: *res.Model, srcs: []goosepack.EntryS
             animation.target = path_persistent_join(name, std.mem.span(common_name.?));
             const animation_name = path_persistent_join_3(name, "animation", std.mem.span(a.name));
 
-            _ = try goosepack.resource_append(pack, srcs, animation_name, .animation, .{
+            _ = try goosepack.resource_append(io, pack, srcs, animation_name, .animation, .{
                 .animation = animation,
             }, null, null);
         }

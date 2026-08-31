@@ -10,21 +10,16 @@ pub const MessageKind = blk: {
     const num_decls = ti.@"struct".decls.len;
 
     var enum_count = 0;
-    var enum_fields: [num_decls]std.builtin.Type.EnumField = undefined;
+    var field_names: [num_decls][]const u8 = undefined;
+    var field_values: [num_decls]u8 = undefined;
 
     for (ti.@"struct".decls) |d| {
-        enum_fields[enum_count] = .{ .name = d.name, .value = enum_count };
+        field_names[enum_count] = d.name;
+        field_values[enum_count] = enum_count;
         enum_count += 1;
     }
 
-    break :blk @Type(std.builtin.Type{
-        .@"enum" = std.builtin.Type.Enum{
-            .tag_type = u8,
-            .fields = &enum_fields,
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_exhaustive = true,
-        },
-    });
+    break :blk @Enum(u8, .exhaustive, &field_names, &field_values);
 };
 
 pub fn mapMessageToKind(comptime T: type) MessageKind {

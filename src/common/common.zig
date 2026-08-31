@@ -11,6 +11,7 @@ pub const command = @import("command.zig");
 pub const draw_meta = @import("draw_meta.zig");
 pub const draw_api = @import("draw_api.zig");
 pub const goosepack = @import("pack.zig");
+pub const cache = @import("resource-cache.zig");
 pub const res = @import("res.zig");
 pub const Profile = @import("profile.zig");
 pub const color = @import("color.zig");
@@ -22,9 +23,12 @@ pub const ArenaFreelist = @import("arena-freelist.zig").ArenaFreelist;
 pub const ArenaIntrusiveList = @import("arena-intrusive-list.zig").ArenaIntrusiveList;
 pub const Pool = @import("pool.zig").Pool;
 pub const IntrusiveList = @import("intrusive-list.zig").IntrusiveList;
-pub const Barrier = @import("barrier.zig");
+pub const barrier = @import("barrier.zig");
+pub const Futex = @import("futex.zig");
+pub const Mutex = @import("mutex.zig");
 
 pub const ArrayCircular = @import("array-circular.zig").ArrayCircular;
+pub const ArrayRealloc = @import("array-realloc.zig").ArrayRealloc;
 
 const v2 = math.v2;
 const v3 = math.v3;
@@ -36,6 +40,7 @@ pub const connect_packet_repeat_count = 10;
 pub const target_fps = 165;
 pub const target_tickrate = 165;
 pub const scale = 1;
+pub var tt: usize = 0;
 
 const debug_num_frames_to_record = 64;
 
@@ -432,9 +437,84 @@ pub const WindowType = enum(u8) {
 };
 const num_windows = @typeInfo(WindowType).@"enum".fields.len;
 
+//
+// Core system setup
+//
+
+const KiB = 1024;
+const MiB = 1024 * KiB;
+const GiB = 1024 * MiB;
+
+pub const ConfigSystem = struct {
+    num_threads: u8,
+    target_tickrate: u16 = 165,
+    target_framerate: u16 = 165,
+    memory: struct {
+        asset_pack_bytes: usize = 1*GiB,
+        thread_temporary_bytes: usize = 256*MiB,
+        thread_persistent_bytes: usize = 256*MiB,
+        thread_log_bytes: usize = 1*KiB,
+    } = .{},
+};
+
+pub const ConfigGame = struct {
+};
+
+pub const ConfigClient = struct {
+    graphics: struct {
+    },
+    input: struct {
+    },
+};
+
+pub const max_num_threads = 16;
+
+pub const SystemState = struct {
+    num_threads: u8 = 8,
+    thread_states: [max_num_threads]ThreadState = undefined,
+    threads: [max_num_threads - 1]std.Thread = undefined,
+    stopped_threads: u8 = 0,
+    target_fps: u64 = 128,
+    desired_frame_time: u64 = undefined,
+    dt: f32 = undefined,
+    frame_start_time: std.Io.Timestamp = undefined,
+    dirs: Dirs = undefined,
+};
+
+pub const Dirs = struct {
+    run: []const u8,
+    log: []const u8,
+    data: []const u8,
+    modules: []const u8,
+    config: []const u8,
+};
+
+pub var mutex_system: Mutex = .{};
+pub var system_set = false;
+pub var shared_data: [8]u8 = undefined;
+pub threadlocal var system: *const SystemState = undefined;
+pub threadlocal var memory: *Memory = undefined;
+pub threadlocal var thread: *ThreadState = undefined;
+var startup_futex = std.atomic.Value(u32).init(0);
+
+pub fn thread_init_globals(s: *const SystemState, t: *ThreadState, m: *Memory) void {
+    mutex_system.lock();
+    defer mutex_system.unlock();
+
+    system = s;
+    memory = m;
+    thread = t;
+
+    if (!system_set) {
+        barrier.init(system.num_threads);
+        system_set = true;
+    }
+}
+
 pub const ThreadState = struct {
     id: u8,
     num_threads: u8,
+    should_run: std.atomic.Value(bool) = .init(true),
 
     arena_frame: Arena = undefined,
     arena_persistent: ArenaFreelist = undefined,
@@ -443,38 +523,64 @@ pub const ThreadState = struct {
     profile: Profile = .{},
     debug_frame_data: bb.CircularBuffer(DebugFrameData, debug_num_frames_to_record) = .{},
 
-    pub fn is_main(ts: *ThreadState) bool {
-        return ts.id == 0;
+    pub fn is_main(t: *ThreadState) bool {
+        return t.id == 0;
     }
 
-    pub fn range(ts: *ThreadState, total_len: usize) [2]usize {
-        const quot = @divTrunc(total_len, @as(usize, ts.num_threads));
-        const rem  = total_len % @as(usize, ts.num_threads);
+    pub fn range(t: *ThreadState, total_len: usize) [2]usize {
+        const quot = @divTrunc(total_len, @as(usize, t.num_threads));
+        const rem = total_len % @as(usize, t.num_threads);
 
-        var start = ts.id * @divTrunc(total_len, @as(usize, ts.num_threads));
+        var start = t.id * @divTrunc(total_len, @as(usize, t.num_threads));
         var len = quot;
-        if (ts.id < rem) {
+        if (t.id < rem) {
             len += 1;
-            start += ts.id;
+            start += t.id;
         } else {
             start += rem;
         }
 
-        return .{start, start+len};
+        return .{ start, start + len };
+    }
+
+    pub fn share(t: *ThreadState, ptr: anytype, src_id: u8) void {
+        const ti = @typeInfo(@TypeOf(ptr));
+        std.debug.assert(ti == .pointer and ti.pointer.size == .one);
+
+        const byte_ptr: [*]u8 = @ptrCast(ptr);
+
+        if (t.id == src_id) {
+            @memcpy(shared_data[0..@sizeOf(ti.pointer.child)], byte_ptr);
+        }
+
+        barrier.wait();
+
+        if (t.id != src_id) {
+            @memcpy(byte_ptr, shared_data[0..@sizeOf(ti.pointer.child)]);
+        }
+
+        // Make sure shared_data is not overwritten during copy
+        barrier.wait();
     }
 };
 
 pub const Memory = struct {
-    active_state: State = .gameplay,
+    tick: u64 = 0,
 
-    barrier: Barrier = .{},
+    active_state: State = .gameplay,
 
     textlen: *const fn (str: []const u8) usize = undefined,
 
     // System, things not relevant to gamestate
 
-    animation_states: ArrayCircular(AnimationState) = undefined, // @CLIENT-ONLY
+    // @CLIENT-ONLY
+    animation_states: ArrayCircular(AnimationState) = undefined,
+
+    // TODO(anjo): Move?
     pack: goosepack.Pack = undefined,
+    cache: cache.ResourceCache = .{},
+
+    font: res.Font = undefined,
 
     // game state
 
@@ -504,7 +610,7 @@ pub const Memory = struct {
     zoom: f32 = 1,
 
     // Random
-    sun_angle: f32 = std.math.pi/4.0,
+    sun_angle: f32 = std.math.pi / 4.0,
 
     // UI
     cursor_pos: v2 = .{
@@ -667,15 +773,15 @@ pub fn path_concat(arena: anytype, strs: []const []const u8) []const u8 {
     for (strs) |str| {
         total_len += str.len;
     }
-    const path = arena.alloc(u8, total_len + strs.len-1);
+    const path = arena.alloc(u8, total_len + strs.len - 1);
     var offset: usize = 0;
     for (0..strs.len) |i| {
         const str = strs[i];
-        @memcpy(path[offset..offset+str.len], str);
-        if (i < strs.len-1) {
-            path[offset+str.len] = std.fs.path.sep;
+        @memcpy(path[offset .. offset + str.len], str);
+        if (i < strs.len - 1) {
+            path[offset + str.len] = std.fs.path.sep;
         }
-        offset += str.len+1;
+        offset += str.len + 1;
     }
     return path;
 }
@@ -689,8 +795,13 @@ pub fn str_concat(arena: anytype, strs: []const []const u8) []const u8 {
     var offset: usize = 0;
     for (0..strs.len) |i| {
         const str = strs[i];
-        @memcpy(res_str[offset..offset+str.len], str);
+        @memcpy(res_str[offset .. offset + str.len], str);
         offset += str.len;
     }
     return res_str;
 }
+
+//
+// Functions to simplify common operations
+//
+

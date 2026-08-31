@@ -53,8 +53,8 @@ pub fn begin_window(ts: *ThreadState, memory: *Memory, window_type: common.Windo
         @branchHint(.unlikely);
         persistent.x = x;
         persistent.y = y;
-        persistent.w = 0.1;
-        persistent.h = 0.1;
+        persistent.w = 0.5;
+        persistent.h = 0.5;
         persistent.initialized = true;
     }
 
@@ -365,17 +365,12 @@ pub fn window_mouse_collision(memory: *Memory, input: *const common.Input) void 
     }
 }
 
-var font: ?common.res.Font = null;
 fn textwidth(memory: *Memory, size: f32, str: [:0]const u8) f32 {
-    if (font == null) {
-        @branchHint(.cold);
-        font = common.goosepack.resource_lookup(&memory.pack, "res/fonts/MononokiNerdFontMono-Regular").?.font;
-    }
-    const scale = size / (@as(f32, @floatFromInt(font.?.size)));
+    const scale = size / (@as(f32, @floatFromInt(memory.font.size)));
     var w: f32 = 0;
     for (str[0..str.len]) |c| {
         const off = c - 32;
-        w += scale * font.?.chars[off].xadvance;
+        w += scale * memory.font.chars[off].xadvance;
     }
     return w;
 }

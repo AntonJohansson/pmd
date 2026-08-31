@@ -1,15 +1,16 @@
 const std = @import("std");
+const Arena = @import("arena.zig").Arena;
 
 pub const ByteBufferSlice = struct {
     data: []u8 = undefined,
-    top: u32 = 0,
-    bottom: u32 = 0,
+    top: usize = 0,
+    bottom: usize = 0,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, comptime N: u32) Self {
+    pub fn init(arena: *Arena, comptime N: u32) Self {
         return Self {
-            .data = allocator.alloc(u8, N) catch unreachable,
+            .data = arena.alloc(u8, N),
         };
     }
 
@@ -52,8 +53,8 @@ pub const ByteBufferSlice = struct {
 pub fn ByteBuffer(comptime N: u32) type {
     return struct {
         data: [N]u8 = undefined,
-        top: u32 = 0,
-        bottom: u32 = 0,
+        top: usize = 0,
+        bottom: usize = 0,
 
         const Self = @This();
 

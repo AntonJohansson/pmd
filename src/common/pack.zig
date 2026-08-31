@@ -77,7 +77,6 @@ pub const Pack = struct {
     bytes: []u8 = &.{},
 };
 
-pub var arena_frame: *common.Arena = undefined;
 pub var arena_persistent: *common.ArenaFreelist = undefined;
 
 pub fn load(pack: *Pack, bytes: []u8) !void {
@@ -103,9 +102,9 @@ pub fn load(pack: *Pack, bytes: []u8) !void {
     pack.bytes = bytes;
 }
 
-pub fn save_to_memory(pack: *Pack) StringBuilder {
+pub fn save_to_memory(pack: *Pack, arena: *common.Arena) StringBuilder {
     var builder = StringBuilder{
-        .segments = .{ .arena = arena_frame },
+        .segments = .{ .arena = arena },
         .base_offset = memorySizeOfType(pack.header),
     };
 
@@ -150,9 +149,9 @@ pub fn save_to_memory(pack: *Pack) StringBuilder {
     return header_builder;
 }
 
-pub fn save_to_file(pack: *Pack, path: []const u8) !void {
-    var builder = save_to_memory(pack);
-    try builder.dump_to_file(path);
+pub fn save_to_file(io: std.Io, pack: *Pack, arena: *common.Arena, path: []const u8) !void {
+    var builder = save_to_memory(pack, arena);
+    try builder.dump_to_file(io, path);
 }
 
 pub fn getResource(pack: *Pack, id: usize) Resource {
@@ -201,6 +200,40 @@ pub fn getResource(pack: *Pack, id: usize) Resource {
     return resource;
 }
 
+pub fn freeResource(pack: *Pack, r: *const Resource, id: usize) void {
+    const entry = pack.entries[id];
+    switch (entry.type) {
+        .text => {
+            memoryFreeType(r.text);
+        },
+        .shader => {
+            memoryFreeType(r.shader);
+        },
+        .texture => {
+            memoryFreeType(r.image);
+        },
+        .cubemap => {
+            memoryFreeType(r.cubemap);
+        },
+        .audio => {
+            memoryFreeType(r.audio);
+        },
+        .font => {
+            memoryFreeType(r.font);
+        },
+        .model_node => {
+            memoryFreeType(r.model_node);
+        },
+        .model => {
+            memoryFreeType(r.model);
+        },
+        .animation => {
+            memoryFreeType(r.animation);
+        },
+        else => unreachable,
+    }
+}
+
 pub const EntryInfo = struct {
     index: usize,
     entry: Entry,
@@ -230,7 +263,7 @@ pub fn resource_lookup(pack: *Pack, name: []const u8) ?Resource {
     return getResource(pack, ei.index);
 }
 
-pub fn resource_append(pack: *Pack, srcs: []EntrySrc, name: []const u8, res_type: ResourceType, resource: Resource, parent: ?i32, children: ?[]i32) !Entry {
+pub fn resource_append(io: std.Io, pack: *Pack, srcs: []EntrySrc, name: []const u8, res_type: ResourceType, resource: Resource, parent: ?i32, children: ?[]i32) !Entry {
     const index = pack.entries.len;
     pack.entries = arena_persistent.realloc(pack.entries, index + 1);
     const entry = &pack.entries[index];
@@ -252,7 +285,7 @@ pub fn resource_append(pack: *Pack, srcs: []EntrySrc, name: []const u8, res_type
 
     entry.srcs = srcs;
     for (entry.srcs) |*s| {
-        s.mtime = try getFileMTime(s.path);
+        s.mtime = try getFileMTime(io, s.path);
     }
 
     const res_index = pack.resources.len;
@@ -277,7 +310,7 @@ pub fn entry_delete(pack: *Pack, entry: Entry) void {
     }
 }
 
-pub fn entry_delete_child_tree(pack: *Pack, start_id: usize) !void {
+pub fn entry_delete_child_tree(pack: *Pack, arena: *common.Arena, start_id: usize) !void {
     var entry = pack.entries[start_id];
 
     // If the selected node has a parent, find the parent so we can
@@ -307,7 +340,7 @@ pub fn entry_delete_child_tree(pack: *Pack, start_id: usize) !void {
     // originated from the same file.
     if (entry.children) |root_children| {
         var child_queue = common.IntrusiveList(i32){
-            .arena = arena_frame,
+            .arena = arena,
         };
 
         for (root_children) |rc| {
@@ -332,16 +365,16 @@ pub fn entry_delete_child_tree(pack: *Pack, start_id: usize) !void {
     }
 }
 
-pub fn getFileMTime(path: []const u8) !u64 {
-    const f = try std.fs.cwd().openFile(path, .{});
-    defer f.close();
-    const stat = try f.stat();
-    return @intCast(@divTrunc(stat.mtime, 1000000));
+pub fn getFileMTime(io: std.Io, path: []const u8) !u64 {
+    const f = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer f.close(io);
+    const stat = try f.stat(io);
+    return @intCast(@divTrunc(stat.mtime.nanoseconds, 1000000));
 }
 
-pub fn has_entry_been_modified(entry: Entry) bool {
+pub fn has_entry_been_modified(io: std.Io, entry: Entry) bool {
     for (entry.srcs) |s| {
-        const new_mtime = getFileMTime(s.path) catch return false;
+        const new_mtime = getFileMTime(io, s.path) catch return false;
         if (new_mtime != s.mtime) {
             return true;
         }
@@ -456,6 +489,37 @@ fn memoryReadType(comptime T: type, bytes: []u8, offset: *usize, value: anytype)
             }
         },
         else => @compileError("Unhandled type in reading data " ++ @typeName(T)),
+    }
+}
+
+fn memoryFreeType(value: anytype) void {
+    const ti = @typeInfo(@TypeOf(value));
+    switch (ti) {
+        .pointer => |ptr| {
+            std.debug.assert(ptr.size == .slice);
+            if (!(@typeInfo(ptr.child) == .int or @typeInfo(ptr.child) == .float)) {
+                for (0..value.len) |i| {
+                    memoryFreeType(value[i]);
+                }
+                arena_persistent.free(value);
+            }
+        },
+        .array => {
+            for (value) |*v| {
+                memoryFreeType(v.*);
+            }
+        },
+        .@"struct" => |s| {
+            inline for (s.fields) |field| {
+                memoryFreeType(@field(value, field.name));
+            }
+        },
+        .optional => {
+            if (value != null) {
+                memoryFreeType(value.?);
+            }
+        },
+        else => return,
     }
 }
 

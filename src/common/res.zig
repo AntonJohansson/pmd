@@ -38,11 +38,11 @@ pub fn runtime_pack_id(path: []const u8) Id {
     return std.hash.Murmur3_32.hash(path);
 }
 
-pub fn read_file_to_memory(path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    const size = (try file.stat()).size;
+pub fn read_file_to_memory(io: std.Io, path: []const u8) ![]u8 {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    const size = (try file.stat(io)).size;
     const buffer = arena.alloc(u8, size);
-    const bytes_read = try file.read(buffer);
+    const bytes_read = try file.readPositionalAll(io, buffer, 0);
     assert(bytes_read == size);
     return buffer;
 }

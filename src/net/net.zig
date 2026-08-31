@@ -1,6 +1,7 @@
 const std = @import("std");
 const os = std.os;
 const posix = std.posix;
+const linux = std.os.linux;
 
 pub const headers = @import("headers.zig");
 pub const packet = @import("packet.zig");
@@ -14,7 +15,22 @@ const ArenaIntrusiveList = common.ArenaIntrusiveList;
 const ArenaFreelist = common.ArenaFreelist;
 const StringBuilder = common.serialize.StringBuilder;
 
-var log: common.log.GroupLog(.net) = undefined;
+pub var arena_frame: *common.Arena = undefined;
+pub var arena_persistent: *ArenaFreelist = undefined;
+pub var io: std.Io = undefined;
+
+pub var input_buffer_stat: stat.StatEntry = .{};
+pub var output_buffer_stat: stat.StatEntry = .{};
+
+const peer_timeout = 5 * std.time.ns_per_s;
+
+const message_receive_buffer_len = 255;
+
+pub const max_peer_count = 64;
+
+pub const PeerIndex = u8;
+pub var peers_used: usize = 0;
+pub var peers = [_]Peer{.{}}**max_peer_count;
 
 const ClientHost = struct {
     fd: std.posix.socket_t,
@@ -33,7 +49,7 @@ const PacketData = struct {
 
 pub const LogEntry = struct {
     data: []const u8,
-    address: ?std.net.Address = null,
+    address: ?std.Io.net.IpAddress = null,
     repeat: u8 = 1,
     push_time: u64 = 0,
 };
@@ -45,65 +61,45 @@ const ReliableMessageInfo = struct {
     reliable: bool,
 };
 
-pub var arena_frame: *common.Arena = undefined;
-pub var arena_persistent: *ArenaFreelist = undefined;
-
-pub var input_buffer_stat: stat.StatEntry = .{};
-pub var output_buffer_stat: stat.StatEntry = .{};
-
 pub const Host = struct {
     state: PeerState = .Disconnected,
     fd: std.posix.socket_t = undefined,
 };
 
-pub fn init(log_memory: *common.log.LogMemory) void {
-    log = log_memory.group_log(.net);
+pub fn bind(port: u16) !Host {
+    const addr = try std.Io.net.IpAddress.parse("0.0.0.0", port);
+    const stream = try addr.connect(io, .{
+        .mode = .dgram,
+        .protocol = .udp,
+    });
+
+    const fd = stream.socket.handle;
+    std.debug.assert(linux.fcntl(fd, linux.F.SETFL, linux.SOCK.NONBLOCK) >= 0);
+
+    return Host{
+        .fd = fd,
+    };
 }
 
-pub fn bind(port: u16) ?Host {
-    var fba = std.heap.FixedBufferAllocator.init(arena_frame.alloc(u8, 1024));
-    const addr_list = std.net.getAddressList(fba.allocator(), "0.0.0.0", port) catch return null;
-    defer addr_list.deinit();
+pub fn connect(host: *Host, ip: []const u8, port: u16) !?PeerIndex {
+    const addr = try std.Io.net.IpAddress.parse(ip, port);
+    const stream = try addr.connect(io, .{
+        .mode = .dgram,
+        .protocol = .udp,
+    });
 
-    const flags = posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK;
-    for (addr_list.addrs) |a| {
-        const fd = posix.socket(a.any.family, flags, 0) catch continue;
-        posix.bind(fd, &a.any, a.getOsSockLen()) catch {
-            posix.close(fd);
-            continue;
-        };
-        return Host{
-            .fd = fd,
-        };
-    }
+    const fd = stream.socket.handle;
+    const flag: u32 = @bitCast(linux.O{.NONBLOCK = true});
+    std.debug.assert(linux.fcntl(fd, linux.F.SETFL, flag) >= 0);
 
-    return null;
-}
-
-pub fn connect(host: *Host, ip: []const u8, port: u16) ?PeerIndex {
-    var fba = std.heap.FixedBufferAllocator.init(arena_frame.alloc(u8, 1024));
-    const addr_list = std.net.getAddressList(fba.allocator(), ip, port) catch return null;
-    defer addr_list.deinit();
-
-    const flags = posix.SOCK.DGRAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK;
-    for (addr_list.addrs) |a| {
-        const fd = posix.socket(a.any.family, flags, 0) catch |err| {
-            log.info("Failed to create socket with flags {} ({})", .{ flags, err });
-            continue;
-        };
-        posix.connect(fd, &a.any, a.getOsSockLen()) catch |err| {
-            log.info("Failed to connect ({})", .{err});
-            posix.close(fd);
-            continue;
-        };
-        host.fd = fd;
-        const peer_index = findAvailablePeerIndex();
-        var peer = &peers[peer_index];
+    host.fd = fd;
+    const peer_index = findAvailablePeerIndex();
+    if (peer_index) |i| {
+        var peer = &peers[i];
         peer.state = .Connecting;
-        return peer_index;
     }
 
-    return null;
+    return peer_index;
 }
 
 pub fn disconnect(index: PeerIndex) void {
@@ -216,13 +212,9 @@ const PeerState = enum(u8) {
     Connecting,
 };
 
-const peer_timeout = 5 * std.time.ns_per_s;
-
-const message_receive_buffer_len = 255;
-
 const Peer = struct {
     state: PeerState = .Disconnected,
-    address: ?std.net.Address = null,
+    address: ?std.Io.net.IpAddress = null,
     timeout: u64 = 0,
     salt: u64 = 0,
     received_messages: bb.SequenceBuffer(ReceivedMessageInfo, u16, message_receive_buffer_len) = .{},
@@ -240,12 +232,6 @@ const Peer = struct {
     ack_bits: u32 = 0,
 };
 
-pub const max_peer_count = 255;
-
-pub const PeerIndex = u8;
-pub var peers_used: usize = 0;
-pub var peers = [_]Peer{.{}}**max_peer_count;
-
 fn findPeerIndex(address: std.net.Address) ?PeerIndex {
     for (peers, 0..) |entry, i| {
         if (entry.state != .Disconnected and entry.address != null and entry.address.?.eql(address)) {
@@ -255,29 +241,28 @@ fn findPeerIndex(address: std.net.Address) ?PeerIndex {
     return null;
 }
 
-fn findAvailablePeerIndex() PeerIndex {
+fn findAvailablePeerIndex() ?PeerIndex {
     std.debug.assert(peers_used < peers.len);
     for (peers, 0..) |entry, i| {
         if (entry.state == .Disconnected) {
             return @intCast(i);
         }
     }
-    unreachable;
+    return null;
 }
 
-// TODO(anjo): We can make a better assumption as to the
-// size of this buffer from connected_peers*sizeof(expected_traffic)*safety_factor.
-// and push it via the temporary_allocator
-var input_buffer: bb.ByteBuffer(8192) = .{};
-
 pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
-    input_buffer.clear();
+    var log = common.thread.log_memory.group_log(.net);
+    var input_buffer = bb.ByteBufferSlice.init(arena_frame, 8192);
+
     while (true) {
-        const nbytes = posix.recvfrom(host.fd, input_buffer.remainingData(), 0, null, null) catch 0;
-        if (nbytes == 0) {
+        const buf = input_buffer.remainingData();
+        const nbytes = linux.recvfrom(host.fd, buf.ptr, buf.len, 0, null, null);
+        if (nbytes == 0 or nbytes > buf.len) {
             break;
         }
-        input_buffer.top += @intCast(nbytes);
+        std.debug.assert(input_buffer.top + nbytes <= input_buffer.data.len);
+        input_buffer.top += nbytes;
     }
 
     log.info("Received {} bytes", .{input_buffer.top});
@@ -286,7 +271,7 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
     var offset: usize = 0;
     while (input_buffer.hasData()) {
         var packet_header: headers.BatchHeader = undefined;
-        common.serialize.memory_read_type(arena_frame, headers.BatchHeader, &input_buffer.data, &offset, &packet_header);
+        common.serialize.memory_read_type(arena_frame, headers.BatchHeader, input_buffer.data, &offset, &packet_header);
 
         if (input_buffer.size() < packet_header.size) {
             log.info("Received partial packet {}/{} bytes", .{ input_buffer.size(), packet_header.size });
@@ -449,11 +434,13 @@ pub const Event = union(enum) {
 };
 
 pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
+    var log = common.thread.log_memory.group_log(.net);
     var their_sa: posix.sockaddr.storage = undefined;
     var sl: u32 = @sizeOf(posix.sockaddr.storage);
     var received_data: BoundedArray(ReceivedData, 128) = .{};
     var num_events: usize = 0;
     var events = arena_frame.alloc(Event, 128);
+    var input_buffer = bb.ByteBufferSlice.init(arena_frame, 8192);
 
     // Timeout disconnected peers
     for (&peers, 0..) |*peer, i| {
@@ -476,8 +463,9 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
     while (true) {
         input_buffer.clear();
 
-        const nbytes = posix.recvfrom(fd, input_buffer.remainingData(), 0, @ptrCast(&their_sa), &sl) catch 0;
-        if (nbytes == 0) {
+        const buf = input_buffer.remainingData();
+        const nbytes = linux.recvfrom(fd, buf.ptr, buf.len, 0, @ptrCast(&their_sa), &sl);
+        if (nbytes <= 0) {
             break;
         }
         if (nbytes < @sizeOf(headers.BatchHeader)) {
@@ -498,7 +486,10 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
 
             log.info("No entry found for {f}, adding..", .{address});
             const index = findAvailablePeerIndex();
-            log.info("  .. new index {}", .{index});
+            log.info("  .. new index {}", .{index}) orelse {
+                log.err("  .. out of peer indices, skipping", .{});
+                continue;
+            };
             peers_used += 1;
             var peer = &peers[index];
             std.debug.assert(peer.state == .Disconnected);
@@ -517,7 +508,7 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
         var offset: usize = 0;
         while (input_buffer.hasData()) {
             var packet_header: headers.BatchHeader = undefined;
-            common.serialize.memory_read_type(arena_frame, headers.BatchHeader, &input_buffer.data, &offset, &packet_header);
+            common.serialize.memory_read_type(arena_frame, headers.BatchHeader, input_buffer.data, &offset, &packet_header);
 
             if (input_buffer.size() < packet_header.size) {
                 log.info("Received partial packet {}/{} bytes", .{ input_buffer.size(), packet_header.size });
@@ -667,17 +658,14 @@ pub fn processServer(host: *const Host) void {
     }
 }
 
-var timer: ?std.time.Timer = null;
 var entries: bb.CircularArray(LogEntry, 256) = .{};
 var debug: ?DebugState = null;
 
-pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
-    if (timer == null) {
-        timer = std.time.Timer.start() catch unreachable;
-    }
+pub fn process(host: *const Host, peer_index: ?PeerIndex, time: u64) void {
+    var log = common.thread.log_memory.group_log(.net);
     if (debug == null) {
-        const crand = std.crypto.random;
-        var prng = std.Random.DefaultPrng.init(crand.int(u64));
+        // TODO(anjo):
+        var prng = std.Random.DefaultPrng.init(0);
 
         debug = DebugState{
             .rand = prng.random(),
@@ -769,21 +757,26 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex) void {
 
         var entry = entries.push();
         entry.data = output_buffer;
-        entry.push_time = timer.?.read();
+        entry.push_time = time;
         entry.address = peer.address;
     } else {
         log.info("  No packets in header", .{});
     }
 
     if (entries.size > 0) {
-        var entry = entries.peek();
-        if (timer.?.read() - entry.push_time >= debug.?.delay) {
+        const entry = entries.peek();
+        if (time - entry.push_time >= debug.?.delay) {
             _ = entries.pop();
-            const addr = if (entry.address != null) &entry.address.?.any else null;
-            const len = if (entry.address != null) entry.address.?.getOsSockLen() else 0;
 
+            var bytes_sent: usize = undefined;
             const data = entry.data;
-            const bytes_sent = std.posix.sendto(host.fd, data, 0, addr, len) catch 0;
+            if (entry.address != null) {
+                var pa: std.Io.Threaded.PosixAddress = undefined;
+                const len = std.Io.Threaded.addressToPosix(&entry.address.?, &pa);
+                bytes_sent = linux.sendto(host.fd, data.ptr, data.len, 0, &pa.any, len);
+            } else {
+                bytes_sent = linux.sendto(host.fd, data.ptr, data.len, 0, null, 0);
+            }
             if (bytes_sent != data.len) {
                 log.info("Tried to send {}, actually sent {}", .{ data.len, bytes_sent });
             } else {

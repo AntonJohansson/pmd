@@ -249,12 +249,12 @@ pub const StringBuilder = struct {
         }
     }
 
-    pub fn dump_to_file(self: *StringBuilder, path: []const u8) !void {
+    pub fn dump_to_file(self: *StringBuilder, io: std.Io, path: []const u8) !void {
         var buffer: [1024]u8 = undefined;
-        const file = try std.fs.cwd().createFile(path, .{});
-        var writer = file.writer(&buffer);
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        var writer = file.writer(io, &buffer);
         const wi = &writer.interface;
-        defer file.close();
+        defer file.close(io);
         var maybe = self.segments.head;
         while (maybe) |ptr| {
             try wi.writeAll(ptr.value.data[0..ptr.value.used]);

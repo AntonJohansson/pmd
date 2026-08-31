@@ -42,8 +42,8 @@ pub fn CodeModule(comptime function_table_type: type) type {
             };
         }
 
-        fn open_in_dir(self: *Self, dir: std.fs.Dir) !void {
-            try std.fs.Dir.copyFile(dir, self.name, dir, self.name_running, .{});
+        fn open_in_dir(self: *Self, io: std.Io, dir: std.Io.Dir) !void {
+            try std.Io.Dir.copyFile(dir, self.name, dir, self.name_running, io, .{});
 
             self.lib = try std.DynLib.open(self.path_running);
             inline for (@typeInfo(@TypeOf(self.function_table)).@"struct".fields) |f| {
@@ -61,30 +61,30 @@ pub fn CodeModule(comptime function_table_type: type) type {
             }
         }
 
-        pub fn open(self: *Self) !void {
-            var dir = try std.fs.cwd().openDir(self.dir, .{});
-            defer dir.close();
+        pub fn open(self: *Self, io: std.Io) !void {
+            var dir = try std.Io.Dir.cwd().openDir(io, self.dir, .{});
+            defer dir.close(io);
 
-            const stat = try dir.statFile(self.name);
-            self.last_mod_time = stat.mtime;
+            const stat = try dir.statFile(io, self.name, .{});
+            self.last_mod_time = stat.mtime.nanoseconds;
 
-            return try open_in_dir(self, dir);
+            return try open_in_dir(self, io, dir);
         }
 
         pub fn close(self: *Self) void {
             self.lib.close();
         }
 
-        pub fn reload_if_changed(self: *Self) !bool {
-            var dir = try std.fs.cwd().openDir(self.dir, .{});
-            defer dir.close();
+        pub fn reload_if_changed(self: *Self, io: std.Io) !bool {
+            var dir = try std.Io.Dir.cwd().openDir(io, self.dir, .{});
+            defer dir.close(io);
 
-            const stat = try dir.statFile(self.name);
-            const new_mod_time = stat.mtime;
+            const stat = try dir.statFile(io, self.name, .{});
+            const new_mod_time = stat.mtime.nanoseconds;
             if (new_mod_time > self.last_mod_time) {
                 self.last_mod_time = new_mod_time;
                 self.close();
-                try open_in_dir(self, dir);
+                try open_in_dir(self, io, dir);
                 return true;
             }
             return false;

@@ -7,6 +7,7 @@ const primitive = common.primitive;
 const draw_api = common.draw_api;
 const intersect = @import("intersect.zig");
 const hsv_to_rgb = common.color.hsv_to_rgb;
+const barrier = common.barrier;
 
 const math = common.math;
 const v2 = math.v2;
@@ -26,7 +27,7 @@ const VoxelIndex = common.VoxelIndex;
 const ChunkIndex = common.ChunkIndex;
 const ChunkMap = common.ChunkMap;
 
-const VoxelFaceArray = MultiThreadedArray(primitive.VoxelTransform, 128);
+const VoxelFaceArray = MultiThreadedArray(primitive.VoxelTransform, 256);
 
 pub fn map_init(map: *Map, arena: *common.ArenaFreelist) void {
     map.* = Map{
@@ -79,29 +80,29 @@ pub fn remove_chunk(map: *Map, c: ChunkCoordinate) void {
     unreachable;
 }
 
-var chunk_faces: VoxelFaceArray = undefined;
-pub fn chunk_build_faces(ts: *ThreadState, memory: *Memory, chunk: *Chunk) void {
-    if (ts.is_main()) {
-        chunk_faces = VoxelFaceArray.init(&ts.arena_frame, ts.num_threads);
+pub fn chunk_build_faces(ts: *ThreadState, chunk: *Chunk) void {
+    var chunk_faces: *VoxelFaceArray = undefined;
+    if (ts.id == 0) {
+        chunk_faces = &ts.arena_frame.alloc(VoxelFaceArray, 1)[0];
+        chunk_faces.* = VoxelFaceArray.init(&ts.arena_frame, ts.num_threads);
     }
-
-    memory.barrier.wait();
+    ts.share(&chunk_faces, 0);
 
     const r = ts.range(chunk_dim);
     for (r[0]..r[1]) |z| {
-        build_faces_piece(ts, chunk, &chunk_faces, 0, chunk_dim, 0, chunk_dim, z);
+        build_faces_piece(ts, chunk, chunk_faces, 0, chunk_dim, 0, chunk_dim, z);
     }
     for (r[0]..r[1]) |j| {
-        build_chunk_edges(ts, chunk, &chunk_faces, 0, chunk_dim, j);
+        build_chunk_edges(ts, chunk, chunk_faces, 0, chunk_dim, j);
     }
 
-    memory.barrier.wait();
+    barrier.wait();
 
     if (ts.is_main()) {
         if (chunk.flags.built_faces == 1) {
             ts.arena_persistent.free(chunk.faces);
         }
-        chunk.faces = chunk_faces.collect(&ts.arena_persistent);
+        chunk.faces = chunk_faces.collect(&ts.arena_persistent, ts);
         chunk.flags.built_faces = 1;
     }
 }
@@ -421,12 +422,12 @@ pub fn apply_modify(ts: *ThreadState, map: *Map, mods: []common.MapModify) []Chu
     return dirty_chunk_indices.data;
 }
 
-pub fn rebuild_chunks(ts: *ThreadState, memory: *Memory, map: *Map, dirty: []ChunkIndex) void {
+pub fn rebuild_chunks(ts: *ThreadState, map: *Map, dirty: []ChunkIndex) void {
     for (dirty) |index| {
         const chunk = chunk_at_index(map, index) orelse {
             continue;
         };
-        chunk_build_faces(ts, memory, chunk);
+        chunk_build_faces(ts, chunk);
         chunk.flags.dirty = 1;
     }
 }
@@ -454,7 +455,7 @@ pub fn edit(ts: *ThreadState, memory: *Memory, player: *common.Player, input: *c
         const coord = chunk_coord(voxel_coord(player.camera.pos));
         const chunk = add_chunk(map, coord);
         chunk_build_terrain(ts, chunk);
-        chunk_build_faces(ts, memory, chunk);
+        chunk_build_faces(ts, chunk);
     }
     if (input.isset(.remove_chunk)) {
         const coord = chunk_coord(voxel_coord(player.camera.pos));
@@ -533,7 +534,7 @@ fn build_faces_piece(ts: *ThreadState, chunk: *const Chunk, faces: *VoxelFaceArr
     const profile_block = ts.profile.begin(@src().fn_name, 6 * (x1 - x0) * (y1 - y0) / 8);
     defer ts.profile.end(profile_block);
 
-    var block = faces.head();
+    var block = faces.head(ts);
 
     for (y0..y1) |y| {
         for (x0..x1) |x| {
@@ -611,7 +612,7 @@ fn build_chunk_edges(ts: *ThreadState, chunk: *const Chunk, faces: *VoxelFaceArr
     const profile_block = ts.profile.begin(@src().fn_name, (_i1 - _i0) / 8);
     defer ts.profile.end(profile_block);
 
-    var block = faces.head();
+    var block = faces.head(ts);
 
     for (_i0.._i1) |i| {
         const n = chunk_dim - 1;
@@ -702,9 +703,7 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
 
         roots: []*Block = undefined,
         heads: []*Block = undefined,
-        thread_indices: []usize = undefined,
         num_cpus: usize = 0,
-        used_thread_indices: std.atomic.Value(u8) = undefined,
         arena: *common.Arena = undefined,
 
         fn push(self: **Block, t: T) void {
@@ -740,11 +739,9 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
         }
 
         fn reset(self: *Self) void {
-            self.used_thread_indices = std.atomic.Value(u8).init(0);
 
             self.roots = self.arena.alloc(*Block, self.num_cpus);
             self.heads = self.arena.alloc(*Block, self.num_cpus);
-            self.thread_indices = self.arena.alloc(usize, self.num_cpus);
 
             for (0..self.num_cpus) |i| {
                 const block = self.arena.alloc(Block, 1);
@@ -757,25 +754,14 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
             }
         }
 
-        fn get_thread_index(self: *Self) usize {
-            const id = std.Thread.getCurrentId();
-            for (self.thread_indices[0..self.used_thread_indices.load(.monotonic)], 0..) |_id, i| {
-                if (id == _id) {
-                    return i;
-                }
-            }
-
-            const i = self.used_thread_indices.fetchAdd(1, .monotonic);
-            self.thread_indices[i] = id;
-            return i;
+        fn head(self: *Self, ts: *ThreadState) *Block {
+            return self.heads[ts.id];
         }
 
-        fn head(self: *Self) *Block {
-            const index = self.get_thread_index();
-            return self.heads[index];
-        }
+        fn collect(self: *Self, arena: *common.ArenaFreelist, ts: *ThreadState) []T {
+            var log = ts.log_memory.group_log(.game);
+            log.info("AAAAAAAA", .{});
 
-        fn collect(self: *Self, arena: *common.ArenaFreelist) []T {
             var len: usize = 0;
             for (self.roots) |r| {
                 var b: ?*Block = r;
@@ -787,6 +773,8 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
                     }
                 }
             }
+
+            log.info("BBBBBBBB", .{});
 
             const memory = arena.alloc(T, len);
             var index: usize = 0;

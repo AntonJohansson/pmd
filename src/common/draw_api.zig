@@ -1,4 +1,5 @@
 const std = @import("std");
+const Mutex = @import("mutex.zig");
 
 const bb = @import("bytebuffer.zig");
 const meta = @import("draw_meta.zig");
@@ -7,7 +8,7 @@ const Color = primitive.Color;
 
 pub const CommandBuffer = struct {
     bytes: bb.ByteBuffer(128 * 8192) = .{},
-    mutex: std.Thread.Mutex = .{},
+    mutex: Mutex = .{},
 
     pub fn init(allocator: std.mem.Allocator) CommandBuffer {
         return .{

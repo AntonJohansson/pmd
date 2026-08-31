@@ -198,12 +198,12 @@ pub fn end(self: *Self, b: Block) void {
     self.map.global_parent_id = b.parent_id;
 }
 
-pub fn init(self: *Self) void {
+pub fn init(self: *Self, io: std.Io) void {
     self.cachemiss_fd = init_cachemiss_fd();
     self.start_tsc = read_tsc();
     self.start_cachemiss = self.read_cachemiss_count();
     self.start_pagefault = read_pagefault_count();
-    self.timer_freq = estimate_cpu_timer_freq();
+    self.timer_freq = estimate_cpu_timer_freq(io);
 }
 
 pub fn deinit(self: *Self) void {
@@ -328,17 +328,19 @@ fn init_cachemiss_fd() i32 {
 fn read_tsc() u64 {
     var tsc_lo: u32 = 0;
     var tsc_hi: u32 = 0;
+    var aux: u32 = 0;
     asm ("rdtscp"
         : [tsc_lo] "={eax}" (tsc_lo),
           [tsc_hi] "={edx}" (tsc_hi),
+          [aux]    "={ecx}" (aux),
     );
     const tsc_wide_lo: u64 = @intCast(tsc_lo);
     const tsc_wide_hi: u64 = @intCast(tsc_hi);
     return (tsc_wide_hi << 32) | tsc_wide_lo;
 }
 
-fn read_os_timer_ns() std.time.Instant {
-    return std.time.Instant.now() catch unreachable;
+fn read_os_timer_ns(io: std.Io) std.Io.Timestamp {
+    return std.Io.Timestamp.now(io, .real);
 }
 
 fn read_cachemiss_count(self: *Self) u64 {
@@ -347,26 +349,28 @@ fn read_cachemiss_count(self: *Self) u64 {
     return count;
 }
 
-fn estimate_cpu_timer_freq() u64 {
+fn estimate_cpu_timer_freq(io: std.Io) u64 {
     const ms_to_wait = 100;
     const os_freq = 1000000000;
 
     const cpu_start = read_tsc();
-    const os_start = read_os_timer_ns();
+    const os_start = read_os_timer_ns(io);
     const os_wait_time = os_freq * ms_to_wait / 1000;
-    var os_end: std.time.Instant = undefined;
+    var os_end: std.Io.Timestamp = undefined;
     var os_elapsed: u64 = 0;
     while (os_elapsed < os_wait_time) {
-        os_end = read_os_timer_ns();
-        os_elapsed = os_end.since(os_start);
+        os_end = read_os_timer_ns(io);
+        os_elapsed = @intCast(os_start.durationTo(os_end).nanoseconds);
     }
 
     const cpu_end = read_tsc();
     const cpu_elapsed = cpu_end - cpu_start;
 
+    //std.log.info("ELAPSED: {}", .{os_elapsed});
+
     var cpu_freq: u64 = 0;
     if (os_elapsed > 0) {
-        cpu_freq = os_freq * cpu_elapsed / os_elapsed;
+        cpu_freq = (os_freq * cpu_elapsed) / os_elapsed;
     }
 
     return cpu_freq;

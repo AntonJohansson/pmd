@@ -2,8 +2,11 @@ const std = @import("std");
 const Arena = @import("arena.zig").Arena;
 const ArrayCircular = @import("array-circular.zig").ArrayCircular;
 const ArenaIntrusiveList = @import("arena-intrusive-list.zig").ArenaIntrusiveList;
+const Mutex = @import("mutex.zig");
 
 const logdir = "log";
+
+var mutex_stdout = Mutex{};
 
 pub const Group = enum(u8) {
     general,
@@ -23,90 +26,68 @@ pub const MessageHeader = struct {
     severity: Severity,
 };
 
-fn arena_print(arena: *Arena, comptime fmt: []const u8, args: anytype) []u8 {
-    const buf = arena.memory[arena.top..];
-    const str = std.fmt.bufPrint(buf, fmt, args) catch unreachable;
-    arena.top += str.len;
-    return str;
-}
+const LogFn = fn ([*]const u8, usize) callconv(.c) void;
 
 pub const LogMemory = struct {
     message_memory: ArenaIntrusiveList,
     persistent: *Arena,
     frame: *Arena,
     mirror_to_stdio: bool = false,
-    file: ?std.fs.File = null,
+    stdout: *const LogFn,
 
-    pub fn init(frame: *Arena, persistent: *Arena, file: ?[]const u8, mirror_to_stdio: bool) !LogMemory {
-        var logmem = LogMemory{
+    pub fn init(stdout: *const LogFn, frame: *Arena, persistent: *Arena, mirror_to_stdio: bool) !LogMemory {
+        const log_memory = LogMemory{
             .message_memory = .{
                 .arena = persistent,
             },
             .mirror_to_stdio = mirror_to_stdio,
             .persistent = persistent,
             .frame = frame,
+            .stdout = stdout,
         };
-
-        if (file != null) {
-            std.fs.cwd().makeDir(logdir) catch |dir_err| switch (dir_err) {
-                error.PathAlreadyExists => {},
-                else => unreachable,
-            };
-
-            const dir = try std.fs.cwd().openDir(logdir, .{});
-            logmem.file = try dir.createFile(file.?, .{});
-        }
-
-        return logmem;
+        return log_memory;
     }
 
-    pub fn append(memory: *LogMemory, comptime group: Group, comptime severity: Severity, comptime fmt: []const u8, args: anytype) void {
-        const str = arena_print(memory.frame, fmt, args);
+    pub fn append(log_memory: *LogMemory, comptime group: Group, comptime severity: Severity, comptime fmt: []const u8, args: anytype) void {
+        const str = log_memory.frame.print(fmt, args);
         const size = str.len + @sizeOf(MessageHeader);
-        if (!memory.message_memory.has_space(size)) {
-            memory.message_memory.reset();
+        if (!log_memory.message_memory.has_space(size)) {
+            log_memory.message_memory.reset();
         }
-        const mem = memory.message_memory.alloc(size);
+        const mem = log_memory.message_memory.alloc(size);
         @as(*align(1) MessageHeader, @ptrCast(mem.ptr)).* = .{
             .group = group,
             .severity = severity,
         };
         @memcpy(mem[@sizeOf(MessageHeader)..], str);
 
-        if (memory.mirror_to_stdio) {
-            const head = arena_print(memory.frame, "[{s}][{s}]: ", .{ @tagName(group), @tagName(severity) });
-            var stdout = std.fs.File.stdout();
-            var buffer: [1024]u8 = undefined; // TODO(anjo): move somewhere
-            var stdout_writer = stdout.writer(&buffer);
-            const writer = &stdout_writer.interface;
-            _ = writer.writeAll(head) catch return;
-            _ = writer.writeAll(str) catch return;
-            _ = writer.writeAll("\n") catch return;
-            writer.flush() catch return;
+        if (log_memory.mirror_to_stdio) {
+            const msg = log_memory.frame.print("[{s}][{s}]: {s}\n", .{ @tagName(group), @tagName(severity), str});
+            log_memory.stdout(msg.ptr, msg.len);
         }
     }
 
-    pub fn group_log(memory: *LogMemory, comptime group: Group) GroupLog(group) {
+    pub fn group_log(log_memory: *LogMemory, comptime group: Group) GroupLog(group) {
         return .{
-            .memory = memory,
+            .log_memory = log_memory,
         };
     }
 };
 
 pub fn GroupLog(comptime group: Group) type {
     return struct {
-        memory: *LogMemory = undefined,
+        log_memory: *LogMemory = undefined,
 
-        pub fn info(log: *@This(), comptime fmt: []const u8, args: anytype) void {
-            log.memory.append(group, .info, fmt, args);
+        pub fn info(self: *@This(), comptime fmt: []const u8, args: anytype) void {
+            self.log_memory.append(group, .info, fmt, args);
         }
 
-        pub fn warn(log: *@This(), comptime fmt: []const u8, args: anytype) void {
-            log.memory.append(group, .warn, fmt, args);
+        pub fn warn(self: *@This(), comptime fmt: []const u8, args: anytype) void {
+            self.log_memory.append(group, .warn, fmt, args);
         }
 
-        pub fn err(log: *@This(), comptime fmt: []const u8, args: anytype) void {
-            log.memory.append(group, .err, fmt, args);
+        pub fn err(self: *@This(), comptime fmt: []const u8, args: anytype) void {
+            self.log_memory.append(group, .err, fmt, args);
         }
     };
 }

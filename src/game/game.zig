@@ -11,12 +11,14 @@ const BoundedArray = common.BoundedArray;
 const BoundedSlice = common.BoundedSlice;
 const Memory = common.Memory;
 const ThreadState = common.ThreadState;
+const SystemState = common.SystemState;
 const Player = common.Player;
 const Input = common.Input;
 const hsv_to_rgb = common.color.hsv_to_rgb;
 const TransformTree = common.TransformTree;
 const TransformTreeNode = common.TransformTreeNode;
 const TransformTreeSaveNode = common.TransformTreeSaveNode;
+const barrier = common.barrier;
 
 const intersect = @import("intersect.zig");
 const ui_profile = @import("debug/ui_profile.zig");
@@ -66,6 +68,7 @@ const tile_base_height = 2.0;
 var map: common.Map = undefined;
 
 const goosepack = common.goosepack;
+const cache = common.cache;
 
 var sniper_bolt_back_animation: common.res.Animation = undefined;
 var sniper_bolt_forward_animation: common.res.Animation = undefined;
@@ -74,69 +77,94 @@ var sniper_trigger_animation: common.res.Animation = undefined;
 var weapon_model: m4 = undefined;
 
 var chunk: *common.Chunk = undefined;
-export fn init(ts: *ThreadState, memory: *Memory) bool {
-    if (ts.is_main()) {
-        voxels.map_init(&map, &ts.arena_persistent);
-        chunk = voxels.add_chunk(&map, .{ 1, 0, 0 });
+
+threadlocal var log: common.log.GroupLog(.game) = undefined;
+
+var inited = std.atomic.Value(bool).init(false);
+
+export fn init(ss: *const SystemState, ts: *ThreadState, memory: *Memory) bool {
+    log = ts.log_memory.group_log(.game);
+    log.info("start map init {} {} {} {*} {}", .{ts.id, ss.target_fps, ss.stopped_threads, ss, @offsetOf(@TypeOf(ss.*), "num_threads")});
+
+    common.thread_init_globals(ss, ts, memory);
+
+    if (!inited.load(.acquire)) {
+        if (ts.is_main()) {
+            voxels.map_init(&map, &ts.arena_persistent);
+            chunk = voxels.add_chunk(&map, .{ 1, 0, 0 });
+        }
+
+        barrier.wait();
+
+        log.info("init chunkbuild {}", .{ts.id});
+
+        const block = ts.profile.begin("init chunkbuild", 0);
+        log.info("build terrain {}", .{ts.id});
+        voxels.chunk_build_terrain(ts, chunk);
+        log.info("build faces {}", .{ts.id});
+        voxels.chunk_build_faces(ts, chunk);
+        log.info("profile end {}", .{ts.id});
+        ts.profile.end(block);
+
+        barrier.wait();
+
+        log.info("loading models {}", .{ts.id});
+        if (ts.is_main()) {
+            goosepack.arena_persistent = &ts.arena_persistent;
+
+            common.sniper.tree = from_model(memory, "res/models/weapons/sniper v2", &.{
+                .{ .id = common.res.id("res/models/weapons/sniper bolt"), .index = &common.sniper.id_bolt },
+                .{ .id = common.res.id("res/models/weapons/sniper bullet exit"), .index = &common.sniper.id_barrel },
+                .{ .id = common.res.id("res/models/weapons/sniper iron sight aim"), .index = &common.sniper.id_aim },
+            }) orelse {
+                return false;
+            };
+
+            common.pistol.tree = from_model(memory, "res/models/weapons/pittol", &.{
+                .{ .id = common.res.id("res/models/weapons/pittol bullet exit"), .index = &common.pistol.id_barrel },
+                .{ .id = common.res.id("res/models/weapons/pittol iron sight"), .index = &common.pistol.id_aim },
+            }) orelse {
+                return false;
+            };
+
+            {
+                const anim_name = "res/models/weapons/animation/bolt back";
+                const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
+                    log.info("unable to find animation {s}", .{anim_name});
+                    return false;
+                };
+                sniper_bolt_back_animation = cache.load(&common.memory.cache, anim_node_entry_info.index).animation;
+            }
+
+            {
+                const anim_name = "res/models/weapons/animation/bolt forward";
+                const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
+                    log.info("unable to find animation {s}", .{anim_name});
+                    return false;
+                };
+                sniper_bolt_forward_animation = cache.load(&common.memory.cache, anim_node_entry_info.index).animation;
+            }
+
+            {
+                const anim_name = "res/models/weapons/animation/fire";
+                const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
+                    log.info("unable to find animation {s}", .{anim_name});
+                    return false;
+                };
+                sniper_trigger_animation = cache.load(&common.memory.cache, anim_node_entry_info.index).animation;
+            }
+        }
     }
 
-    memory.barrier.wait();
-
-    const block = ts.profile.begin("init chunkbuild", 0);
-    voxels.chunk_build_terrain(ts, chunk);
-    voxels.chunk_build_faces(ts, memory, chunk);
-    ts.profile.end(block);
-
-    memory.barrier.wait();
-
-    if (ts.is_main()) {
-        goosepack.arena_persistent = &ts.arena_persistent;
-        goosepack.arena_frame = &ts.arena_frame;
-
-        common.sniper.tree = from_model(memory, "res/models/weapons/sniper v2", &.{
-            .{ .id = common.res.id("res/models/weapons/sniper bolt"), .index = &common.sniper.id_bolt },
-            .{ .id = common.res.id("res/models/weapons/sniper bullet exit"), .index = &common.sniper.id_barrel },
-            .{ .id = common.res.id("res/models/weapons/sniper iron sight aim"), .index = &common.sniper.id_aim },
-        }) orelse {
-            return false;
-        };
-
-        common.pistol.tree = from_model(memory, "res/models/weapons/pittol", &.{
-            .{ .id = common.res.id("res/models/weapons/pittol bullet exit"), .index = &common.pistol.id_barrel },
-            .{ .id = common.res.id("res/models/weapons/pittol iron sight"), .index = &common.pistol.id_aim },
-        }) orelse {
-            return false;
-        };
-
-        {
-            const anim_name = "res/models/weapons/animation/bolt back";
-            const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
-                std.log.info("unable to find animation {s}", .{anim_name});
-                return false;
-            };
-            sniper_bolt_back_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
-        }
-
-        {
-            const anim_name = "res/models/weapons/animation/bolt forward";
-            const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
-                std.log.info("unable to find animation {s}", .{anim_name});
-                return false;
-            };
-            sniper_bolt_forward_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
-        }
-
-        {
-            const anim_name = "res/models/weapons/animation/fire";
-            const anim_node_entry_info = goosepack.entry_lookup(&memory.pack, anim_name) orelse {
-                std.log.info("unable to find animation {s}", .{anim_name});
-                return false;
-            };
-            sniper_trigger_animation = goosepack.getResource(&memory.pack, anim_node_entry_info.index).animation;
-        }
+    if (common.thread.is_main()) {
+        inited.store(true, .release);
     }
 
     return true;
+}
+
+export fn thread_rescale_main() void {
+    barrier.init(common.system.num_threads);
 }
 
 export fn deinit(ts: *ThreadState, memory: *Memory) void {
@@ -491,66 +519,8 @@ fn dumpTypeToDisk(writer: *std.Io.Writer, value: anytype) !void {
     }
 }
 
-fn dumpEntitiesToDisk(entities: []common.Entity) !void {
-    const filename = "entities.data";
-    const file = std.fs.cwd().createFile(filename, .{}) catch |err| {
-        std.log.err("Failed to open file: {s} ({})", .{ filename, err });
-        return;
-    };
-    defer file.close();
-    var buffer: [1024]u8 = undefined;
-    var writer = file.writer(&buffer);
-
-    for (entities) |e| {
-        try dumpTypeToDisk(&writer.interface, e);
-    }
-}
-
-fn readTypeFromDisk(it: *std.mem.TokenIterator(u8, .any), value: anytype) !void {
-    const base_type = @typeInfo(@TypeOf(value)).pointer.child;
-    const ti = @typeInfo(base_type);
-    switch (ti) {
-        .int => {
-            value.* = std.fmt.parseInt(base_type, it.next().?, 0) catch return;
-        },
-        .float => {
-            value.* = std.fmt.parseFloat(base_type, it.next().?) catch return;
-        },
-        .@"struct" => |s| {
-            _ = it.next(); // consume "struct:"
-            inline for (s.fields) |field| {
-                _ = it.next(); // consume "field.name:"
-                try readTypeFromDisk(it, &@field(value, field.name));
-            }
-        },
-        else => std.log.err("Unhandled type in writing entities: {}", .{ti}),
-    }
-}
-
-fn readEntitiesFromDisk(memory: *common.Memory) !void {
-    const filename = "entities.data";
-    const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
-        std.log.err("Failed to open file: {s} ({})", .{ filename, err });
-        return;
-    };
-    defer file.close();
-
-    var buffer: BoundedArray(u8, 4096) = .{};
-    const bytes = try file.readAll(&buffer.data);
-    buffer.used = @intCast(bytes);
-
-    var it = std.mem.tokenizeAny(u8, buffer.slice(), " \n");
-
-    while (it.peek() != null) {
-        var entity: common.Entity = undefined;
-        try readTypeFromDisk(&it, &entity);
-        memory.entities.append(entity);
-    }
-}
-
 export fn update(ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
     goosepack.arena_persistent = &ts.arena_persistent;
-    goosepack.arena_frame = &ts.arena_frame;
 
     if (player.in_editor) {
         voxels.edit(ts, memory, player, input, &map);
@@ -770,12 +740,8 @@ export fn update(ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *
     //    }
     //}
 
-    if (input.isset(.Save)) {
-        dumpEntitiesToDisk(memory.entities.slice()) catch {};
-    }
-    if (input.isset(.Load)) {
-        readEntitiesFromDisk(memory) catch {};
-    }
+    if (input.isset(.Save)) {}
+    if (input.isset(.Load)) {}
 }
 
 export fn authorizedPlayerUpdate(ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
@@ -871,7 +837,7 @@ export fn client_update(ts: *ThreadState, vars: *const Vars, memory: *Memory, dt
     _ = vars;
     if (memory.map_mods.used > 0) {
         const dirty_chunks = voxels.apply_modify(ts, &map, memory.map_mods.slice());
-        voxels.rebuild_chunks(ts, memory, &map, dirty_chunks);
+        voxels.rebuild_chunks(ts, &map, dirty_chunks);
     }
 }
 
@@ -1528,7 +1494,7 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
         //    }
 
         if (memory.active_state == .pause) {
-            if (ui.begin_window(ts, memory, .pause, "wow", 0.5, 0.5)) {
+            if (ui.begin_window(ts, memory, .pause, "wow", 0.25, 0.25)) {
                 ui.push_text(ts, "haha");
                 ui.push_text(ts, "abcarstratrastarst");
                 ui.push_text(ts, "haha");
@@ -1832,13 +1798,13 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
         }
     }
 
-    memory.barrier.wait();
+    barrier.wait();
 
     if (input.isset(.DebugShowData)) {
         ui_profile.draw(ts, memory, cmd, input);
     }
 
-    memory.barrier.wait();
+    barrier.wait();
 
     if (ts.is_main()) {
         cmd.push(primitive.End2d{}, .{});
@@ -1932,7 +1898,7 @@ fn from_model(memory: *Memory, name: []const u8, save_nodes: ?[]const TransformT
         std.log.info("unable to find pack entry {s}", .{name});
         return null;
     };
-    const node = goosepack.getResource(&memory.pack, node_entry_info.index).model_node;
+    const node = cache.load(&common.memory.cache, node_entry_info.index).model_node;
 
     if (save_nodes != null) {
         for (node.tree.node_ids, 0..) |id, i| {

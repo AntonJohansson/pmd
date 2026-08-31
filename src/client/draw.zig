@@ -21,6 +21,7 @@ const slog = sokol.log;
 
 const res = common.res;
 const goosepack = common.goosepack;
+const cache = common.cache;
 
 var log: common.log.GroupLog(.draw) = undefined;
 
@@ -1091,8 +1092,8 @@ const ChunkRenderInfo = struct {
 
 var voxel_chunks = BoundedArray(ChunkRenderInfo, 64){};
 
-pub fn init(log_memory: *common.log.LogMemory, _pack: *goosepack.Pack) void {
-    log = log_memory.group_log(.draw);
+pub fn init(_pack: *goosepack.Pack) void {
+    log = common.thread.log_memory.group_log(.draw);
 
     uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.up)] = math.m4_identity;
     uniforms_voxel.rotations[@intFromEnum(primitive.VoxelTransform.FaceDir.down)] = m4.transpose(m4.modelRotX(std.math.pi));
@@ -1165,6 +1166,8 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
     var vp: m4 = .{};
 
     defer b.bytes.clear();
+
+    const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
 
     if (num_views == 0) {
         return;
@@ -1294,8 +1297,8 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     const scale: f32 = 2.0 * text.size / (@as(f32, @floatFromInt(font.size)) / atlas_h);
 
                     sg.applyUniforms(0, sg.asRange(&UniformsVertexAtlas{
-                        .vs_off = .{ .x = x + xoff + scale * char.xoff / atlas_w, .y = y - scale * char.yoff / atlas_h - scale * vsy },
-                        .vs_scale = .{ .x = scale * vsx, .y = scale * vsy },
+                        .vs_off = .{ .x = x + xoff + scale * char.xoff / (atlas_w*aspect), .y = y - scale * char.yoff / atlas_h - scale * vsy },
+                        .vs_scale = .{ .x = scale * vsx / aspect, .y = scale * vsy },
                     }));
                     sg.applyUniforms(1, sg.asRange(&UniformsFragmentAtlas{
                         .off = .{ .x = @as(f32, @floatFromInt(char.x0)) / atlas_w, .y = @as(f32, @floatFromInt(char.y0)) / atlas_h },
@@ -1305,11 +1308,12 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     }));
 
                     sg.draw(0, textured_rectangle_indices.len, 1);
-                    xoff += scale * char.xadvance / atlas_w;
+                    xoff += scale * char.xadvance / (atlas_w*aspect);
                 }
             },
             .Rectangle => {
-                const r = b.pop(primitive.Rectangle);
+                var r = b.pop(primitive.Rectangle);
+                r.size.x /= aspect;
                 const offset = v2{ .x = r.size.x / 2, .y = r.size.y / 2 };
                 const model = m4.model2d(v2.add(r.pos, offset), r.size);
 
@@ -1334,7 +1338,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 const model_entry_info = goosepack.entry_lookup_id(pack, cmd.model_id) orelse {
                     continue;
                 };
-                const model = goosepack.getResource(pack, model_entry_info.index).model;
+                const model = cache.load(&common.memory.cache, model_entry_info.index).model;
                 const mesh = model.meshes[cmd.mesh_index];
 
                 for (mesh.primitives, 0..) |p, prim_index| {

@@ -19,4 +19,11 @@ pub const Arena = struct {
     pub fn alloc(self: *Self, comptime T: type, len: usize) []T {
         return self.alloc_aligned(T, len, @alignOf(T));
     }
+
+    pub fn print(self: *Self, comptime fmt: []const u8, args: anytype) []u8 {
+        const buf = self.memory[self.top..];
+        const str = std.fmt.bufPrint(buf, fmt, args) catch unreachable;
+        self.top += str.len;
+        return str;
+    }
 };

@@ -7,8 +7,8 @@ const commands = @import("command_client.zig");
 fn check_args(comptime func_name: []const u8, comptime func: anytype, it: *std.mem.TokenIterator(u8, .scalar)) ?std.meta.ArgsTuple(@TypeOf(func)) {
     var tuple: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
     const args = @typeInfo(@TypeOf(func)).@"fn".params;
+    comptime var buf: [128]u8 = undefined;
     inline for (args, 0..) |arg, i| {
-        comptime var buf: [128]u8 = undefined;
         const name = comptime std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
         if (it.next()) |str| {
             switch (arg.type.?) {

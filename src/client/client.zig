@@ -12,6 +12,7 @@ const config = common.config;
 const Vars = config.Vars;
 const Memory = common.Memory;
 const ThreadState = common.ThreadState;
+const SystemState = common.SystemState;
 const Player = common.Player;
 const EntityId = common.EntityId;
 const Input = common.Input;
@@ -21,6 +22,8 @@ const goosepack = common.goosepack;
 const draw_api = common.draw_api;
 const draw = @import("draw.zig");
 const disk = if (build_options.options.debug) @import("pack-disk") else struct {};
+const Mutex = common.Mutex;
+const barrier = common.barrier;
 
 const Arena = common.Arena;
 const Pool = common.Pool;
@@ -49,8 +52,6 @@ const c = @cImport({
 });
 
 threadlocal var log: common.log.GroupLog(.general) = undefined;
-
-var ii: usize = 0;
 
 //
 // State
@@ -294,8 +295,12 @@ fn findLocalPlayerById(lp: []LocalPlayer, id: EntityId) ?*LocalPlayer {
 }
 
 var memory: Memory = .{};
+var system: SystemState = .{
+    .num_threads = 1,
+};
+
 const Module = code_module.CodeModule(struct {
-    init: *fn (ts: *ThreadState, memory: *Memory) callconv(.c) bool,
+    init: *fn (ss: *SystemState, ts: *ThreadState, memory: *Memory) callconv(.c) bool,
     deinit: *fn (ts: *ThreadState, memory: *Memory) callconv(.c) void,
     update: *fn (ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) callconv(.c) void,
     authorizedPlayerUpdate: *fn (ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) callconv(.c) void,
@@ -309,8 +314,7 @@ var module: Module = undefined;
 // glfw globals and callbacks for collecting inputs
 //
 
-var timer: std.time.Timer = undefined;
-var key_repeat_timer: std.time.Timer = undefined;
+var key_repeat_timer: u64 = 0;
 var last_key: res.Key = undefined;
 var last_char: u8 = 0;
 var repeat = false;
@@ -319,9 +323,9 @@ var last_key_down = false;
 var capture_text = false;
 var wait_for_first_key_input = true;
 fn charCallback(window: ?*c.GLFWwindow, codepoint: c_uint) callconv(.c) void {
-    _ = window;
-    if (!capture_text and !wait_for_first_key_input)
+    if (!capture_text and !wait_for_first_key_input) {
         return;
+    }
 
     // codepoint -> utf8 string
     //size_t count = 0;
@@ -348,12 +352,14 @@ fn charCallback(window: ?*c.GLFWwindow, codepoint: c_uint) callconv(.c) void {
 
     // We don't care about multibyte codepoints, our font rendering
     // doesn't support it atm, so...
-    if (codepoint >= 0x80)
+    if (codepoint >= 0x80) {
         return;
+    }
 
     last_char = @truncate(codepoint);
     repeat = false;
-    key_repeat_timer.reset();
+    const time: *align(1) u64 = @ptrCast(c.glfwGetWindowUserPointer(window));
+    key_repeat_timer = time.*;
     if (!(last_char >= 32 and last_char <= 126) or last_char == '`')
         return;
 
@@ -385,19 +391,25 @@ const PlayingSound = struct {
 var host: net.Host = .{};
 var server_index: ?net.PeerIndex = null;
 pub fn connect(ip: []const u8, port: u16) void {
-    const crand = std.crypto.random;
-    server_index = net.connect(&host, ip, port) orelse blk: {
-        log.err("Failed to connect to server {s}:{}", .{ ip, port });
+    // TODO(anjo):
+    var prng = std.Random.DefaultPrng.init(0);
+    const rand = prng.random();
+    server_index = net.connect(&host, ip, port) catch |err| blk: {
+        log.err("Failed to connect to server {s}:{} {}", .{ ip, port, err });
         break :blk null;
     };
-    net.pushMessage(server_index.?, packet.ConnectionRequest{ .client_salt = crand.int(u64) });
+    if (server_index) |server| {
+        _ = server;
+        _ = rand;
+        //net.pushMessage(server, packet.ConnectionRequest{ .client_salt = rand.int(u64) });
+    }
 }
 
 // C calling convention necessary since this function might
 // be called across a library boundary.
 const page_size = std.heap.page_size_min;
 fn page_alloc(size: usize) []u8 {
-    const aligned_size = page_size * @divTrunc(size+page_size, page_size);
+    const aligned_size = page_size * @divTrunc(size + page_size, page_size);
     return std.heap.page_allocator.alignedAlloc(u8, null, aligned_size) catch unreachable;
 }
 
@@ -405,54 +417,42 @@ const KiB = 1024;
 const MiB = 1024 * KiB;
 const GiB = 1024 * MiB;
 
-//
-// START SYSTEM INIT
-//
-
-const max_num_threads = 16;
-var num_threads: usize = 0;
-var threads: [max_num_threads - 1]std.Thread = undefined;
-var main_thread_id: std.Thread.Id = undefined;
-
-threadlocal var ts: common.ThreadState = undefined;
-
-var startup_futex = std.atomic.Value(u32).init(0);
-
-fn system_init() void {
-    num_threads = 8;
-    main_thread_id = std.Thread.getCurrentId();
-    for (threads[0..(num_threads - 1)], 0..) |*t, i| {
-        t.* = std.Thread.spawn(.{}, thread_main, .{ i + 1, num_threads }) catch {
-            std.log.err("Failed spawning thread {}", .{i});
-            std.process.exit(1);
-        };
-    }
-}
-
-fn system_deinit() void {
-    for (threads[0..(num_threads - 1)]) |*t| {
-        t.join();
-    }
-}
-
-//
-// END SYSTEM INIT
-//
-
-
 // Draw state
 var command_buffer: draw_api.CommandBuffer = .{};
 
 // Player state
 var local_players: BoundedArray(LocalPlayer, 16) = .{};
 
-pub fn main() void {
-    system_init();
-    thread_main(0, num_threads);
+//
+// Interface exposed to modules
+//
+
+var stdout_buffer: [1024]u8 = undefined;
+var stdout_writer: std.Io.File.Writer = undefined;
+var stdout_mutex = Mutex{};
+
+fn stdout_log(str: [*]const u8, len: usize) callconv(.c) void {
+    stdout_mutex.lock();
+    defer stdout_mutex.unlock();
+
+    const writer = &stdout_writer.interface;
+    _ = writer.writeAll(str[0..len]) catch return;
+    // TODO(anjo):
+    writer.flush() catch return;
+}
+
+pub fn main(init: std.process.Init) !void {
+    const args = init.minimal.args.vector;
+    const dir = std.fs.path.dirname(std.mem.span(args[0])) orelse return;
+
+    stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+
+    system_init(init.io, dir);
+    thread_main(init.io, dir, 0, num_threads);
     system_deinit();
 }
 
-fn thread_main(thread_id: usize, thread_num_threads: usize) void {
+fn thread_main(io: std.Io, dir: []const u8, thread_id: usize, thread_num_threads: usize) void {
     // Initialize thread state
     ts = .{
         .id = @intCast(thread_id),
@@ -464,20 +464,39 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
     ts.arena_persistent = common.ArenaFreelist{ .arena = &arena_persisent_state };
     var arena_log_persistent = Arena{ .memory = page_alloc(1 * KiB) };
     var arena_res = Arena{ .memory = page_alloc(1 * GiB) };
-    const mirror_to_stdio = false;
-    ts.log_memory = common.log.LogMemory.init(&ts.arena_frame, &arena_log_persistent, null, mirror_to_stdio) catch {
+    const mirror_to_stdio = true;
+    ts.log_memory = common.log.LogMemory.init(stdout_log, &ts.arena_frame, &arena_log_persistent, mirror_to_stdio) catch {
         return;
     };
 
-    ts.profile.init();
+    ts.profile.init(io);
     defer ts.profile.deinit();
 
+    //std.Io.Dir.cwd().createDir(io, logdir, .default_dir) catch |dir_err| switch (dir_err) {
+    //    error.PathAlreadyExists => {},
+    //    else => unreachable,
+    //};
+    //const dir = try std.Io.Dir.cwd().openDir(io, logdir, .{});
+    //logmem.file = try dir.createFile(io, file.?, .{});
+
     log = ts.log_memory.group_log(.general);
+
+    log.info("Started thread {}", .{ts.id});
+
+    common.thread_init_globals(&system, &ts, &memory);
 
     const num_cpus = std.Thread.getCpuCount() catch 1;
     _ = num_cpus;
     var window: ?*c.GLFWwindow = null;
     var pack_in_memory: ?[]u8 = null;
+
+    //
+    // Simulation state
+    //
+
+    const desired_frame_time = std.time.ns_per_s / common.target_fps;
+    const dt: f32 = 1.0 / @as(f32, @floatFromInt(common.target_fps));
+    var tick: u64 = 0;
 
     if (ts.is_main()) {
         memory.animation_states = common.ArrayCircular(common.AnimationState){
@@ -485,19 +504,19 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
         };
         memory.windows.arena = &ts.arena_frame;
 
-        memory.barrier.init(@intCast(num_threads));
-
         if (build_options.options.debug) {
             disk.arena_frame = &ts.arena_frame;
             disk.arena_persistent = &ts.arena_persistent;
         }
 
+        log.info("  initializing network subsystem", .{});
         net.arena_frame = &ts.arena_frame;
         net.arena_persistent = &ts.arena_persistent;
+        net.io = io;
         net.init(&ts.log_memory);
+
         res.arena = &arena_res;
 
-        goosepack.arena_frame = &ts.arena_frame;
         var arena_pack_state = Arena{ .memory = page_alloc(1 * GiB) };
         var arena_freelist_pack_state = common.ArenaFreelist{ .arena = &arena_pack_state };
         goosepack.arena_persistent = &arena_freelist_pack_state;
@@ -506,11 +525,13 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
         // Load pack
         //
 
-        pack_in_memory = res.read_file_to_memory("res.gp") catch null;
+        log.info("  loading packet assets", .{});
+        pack_in_memory = res.read_file_to_memory(io, "res.gp") catch null;
         memory.pack = goosepack.Pack{};
         if (pack_in_memory) |bytes| {
             goosepack.load(&memory.pack, bytes) catch {
                 log.err("Failed loading pack", .{});
+                std.process.exit(1);
             };
         }
 
@@ -518,11 +539,14 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
         // Force connect to server
         //
 
+        log.info("  running connect command", .{});
         cl.run("connect 127.0.0.1 9053");
 
         //
         // GLFW init
         //
+        log.info("  opening window", .{});
+
         if (c.glfwInit() == 0) {
             log.err("Failed to initialize GLFW: {s}", .{glfw_get_error()});
             std.process.exit(1);
@@ -542,6 +566,7 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
         c.glfwSwapInterval(0);
         c.glfwSetInputMode(window, c.GLFW_CURSOR, c.GLFW_CURSOR_DISABLED);
         c.glfwSetInputMode(window, c.GLFW_RAW_MOUSE_MOTION, c.GLFW_TRUE);
+        c.glfwSetWindowUserPointer(window, &memory.time);
         _ = c.glfwSetCharCallback(window, charCallback);
         _ = c.glfwSetScrollCallback(window, scrollCallback);
 
@@ -552,6 +577,7 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
         }
 
         // initialize renderer
+        log.info("  initializing rendering subsystem", .{});
         draw.init(&ts.log_memory, &memory.pack);
 
         //
@@ -566,14 +592,13 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
         //
         // Modules
         //
-        const module_path = "/home/aj/git/pmd/zig-out/lib";
+        const module_path = common.path_concat(&ts.arena_persistent, &[_][]const u8{ dir, "..", "lib" });
         const module_name = "game";
         module = Module.init(&ts.arena_persistent, module_path, module_name) catch {
             log.err("Failed to init module: {} at {}", .{ module_name, module_path });
             return;
         };
-
-        module.open() catch |err| {
+        module.open(io) catch |err| {
             log.err("Failed to open module {}", .{err});
             return;
         };
@@ -596,26 +621,18 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
     if (ts.is_main()) {
         std.log.info("main starting others", .{});
         startup_futex.store(1, .release);
-        std.Thread.Futex.wake(&startup_futex, @intCast(num_threads - 1));
+        common.Futex.wake(&startup_futex, @intCast(num_threads - 1));
     } else {
         while (startup_futex.load(.acquire) == 0) {
-            std.Thread.Futex.wait(&startup_futex, 0);
+            common.Futex.wait(&startup_futex, 0);
         }
     }
 
-    if (!module.function_table.init(&ts, &memory)) {
+    if (!module.function_table.init(&system, &ts, &memory)) {
         log.err("Failed to initialize module: {s}", .{module.name});
         return;
     }
     defer module.function_table.deinit(&ts, &memory);
-
-    //
-    // Simulation state
-    //
-
-    const desired_frame_time = std.time.ns_per_s / common.target_fps;
-    const dt: f32 = 1.0 / @as(f32, @floatFromInt(common.target_fps));
-    var tick: u64 = 0;
 
     // Load all sounds into buffers
     var playing_sounds: BoundedArray(PlayingSound, 64) = .{};
@@ -629,11 +646,8 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
     var occupied_input_devices = [_]InputDeviceState{.connected} ** (keyboard_input_device_id + 1);
     var debug_gamepad_off: usize = 0;
 
-    timer = std.time.Timer.start() catch unreachable;
-    key_repeat_timer = std.time.Timer.start() catch unreachable;
-
-    var frame_start_time: u64 = 0;
-    var frame_end_time: u64 = 0;
+    var frame_start_time: std.Io.Timestamp = undefined;
+    var frame_end_time: std.Io.Timestamp = undefined;
 
     // Scan for connected joysticks
     {
@@ -648,14 +662,13 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
 
     var old_mouse_pos: v2 = .{ .x = 0.0, .y = 0.0 };
 
-    var running = true;
-    while (running) {
-        memory.barrier.wait();
+    while (memory.running.load(.acquire)) {
+        barrier.wait();
 
         ts.profile.begin_frame();
 
         if (ts.is_main()) {
-            frame_start_time = timer.read();
+            frame_start_time = std.Io.Timestamp.now(io, .real);
         }
 
         log.info("---- Starting tick {} (thread {})", .{ tick, ts.id });
@@ -676,11 +689,11 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
             memory.time += desired_frame_time;
 
             if (c.glfwWindowShouldClose(window) == 1) {
-                running = false;
+                memory.running.store(false, .release);
             }
 
             {
-                const reloaded = module.reload_if_changed() catch false;
+                const reloaded = module.reload_if_changed(io) catch false;
                 if (reloaded) {
                     //_ = module.function_table.fofo();
                 }
@@ -741,7 +754,6 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
                                     _ = message;
                                     if (connected) {
                                         connected = false;
-                                        running = false;
                                         log.info("connection timeout", .{});
                                     }
                                 },
@@ -1234,10 +1246,9 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
                                 } else if (glfw_get_key(window, last_key) == .release) {
                                     last_key_down = false;
                                 }
-                                if (last_key_down and (!repeat and key_repeat_timer.read() >= 500 * std.time.us_per_s or
-                                    repeat and key_repeat_timer.read() >= 50 * std.time.us_per_s))
-                                {
-                                    key_repeat_timer.reset();
+                                const diff = memory.time - key_repeat_timer;
+                                if (last_key_down and (!repeat and diff >= 500 * std.time.ns_per_s or repeat and diff >= 50 * std.time.ns_per_s)) {
+                                    key_repeat_timer = memory.time;
                                     repeat = true;
                                 }
 
@@ -1339,7 +1350,7 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
             // Send network data
             //
             if (server_index) |index| {
-                net.process(&host, index);
+                net.process(&host, index, memory.time);
             }
         }
 
@@ -1348,7 +1359,7 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
         //
         //{
 
-        memory.barrier.wait();
+        barrier.wait();
 
         {
             {
@@ -1362,24 +1373,6 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
                 }
             }
         }
-
-        //ii = 0;
-        //asm volatile ("mfence");
-        //memory.barrier.wait();
-        //asm volatile ("mfence");
-        //if (ts.id == 0) {ii += 5;}
-        //asm volatile ("mfence");
-        //memory.barrier.wait();
-        //asm volatile ("mfence");
-        //if (ts.id == 1) {ii += 6;}
-        //asm volatile ("mfence");
-        //memory.barrier.wait();
-        //asm volatile ("mfence");
-        //if (ts.id == 2) {ii += 7;}
-        //asm volatile ("mfence");
-        //memory.barrier.wait();
-        //std.log.info("ii({}): {}", .{ts.id, ii});
-        //std.debug.assert(ii == 18);
 
         if (ts.is_main()) {
             {
@@ -1430,7 +1423,7 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
             }
         }
 
-        memory.barrier.wait();
+        barrier.wait();
 
         if (ts.is_main()) {
             //
@@ -1443,14 +1436,14 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
                     const block = ts.profile.begin("pack update", 0);
                     ts.profile.end(block);
 
-                    const entries = disk.collect_and_update_entries(&memory.pack) catch unreachable;
+                    const entries = disk.collect_and_update_entries(io, &memory.pack, &ts.arena_frame) catch unreachable;
                     for (entries) |e| {
                         std.log.info("- {s}", .{e.name});
                     }
                     if (entries.len > 0) {
 
                         // builder will be .deinit() from thread which writes to the pack file
-                        var builder = goosepack.save_to_memory(&memory.pack);
+                        var builder = goosepack.save_to_memory(&memory.pack, &ts.arena_frame);
                         const buffer = ts.arena_frame.alloc(u8, builder.get_size());
                         builder.dump_to_buffer(buffer);
                         memory.pack = .{};
@@ -1490,20 +1483,20 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
         if (ts.is_main()) {
             tick += 1;
 
-            frame_end_time = timer.read();
-            const frame_time = frame_end_time - frame_start_time;
+            frame_end_time = std.Io.Timestamp.now(io, .real);
+            const frame_time = frame_start_time.durationTo(frame_end_time).nanoseconds;
 
             // Here we shoehorn in some sleeping to not consume all the cpu resources
             {
-                const start_sleep = timer.read();
+                const start_sleep = std.Io.Timestamp.now(io, .real);
                 const time_left = @as(i64, @intCast(desired_frame_time)) - @as(i64, @intCast(frame_time));
                 if (time_left > std.time.us_per_s) {
                     // if we have at least 1us left, sleep
-                    std.Thread.sleep(@intCast(time_left));
+                    std.Io.sleep(io, std.Io.Duration{ .nanoseconds = time_left }, .real) catch {};
                 }
 
                 // spin for the remaining time
-                while (timer.read() - start_sleep < time_left) {}
+                while (start_sleep.durationTo(std.Io.Timestamp.now(io, .real)).nanoseconds < time_left) {}
             }
         }
 
@@ -1511,7 +1504,9 @@ fn thread_main(thread_id: usize, thread_num_threads: usize) void {
         ts.arena_frame.top = 0;
     }
 
-    std.posix.close(host.fd);
+    if (ts.is_main()) {
+        _ = std.os.linux.close(host.fd);
+    }
 }
 
 fn appendSliceAssumeForceDstAlignment(comptime alignment: usize, comptime T: type, bounded_array: anytype, src: []align(alignment) const T) void {

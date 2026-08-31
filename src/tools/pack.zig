@@ -3,35 +3,37 @@ const disk = @import("pack-disk");
 const common = @import("common");
 const goosepack = common.goosepack;
 
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = gpa_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const args = init.minimal.args.vector;
+    const io = init.io;
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     var arena_frame = common.Arena{ .memory = try std.heap.page_allocator.alloc(u8, 1024 * 1024 * 1024) };
-    var arena_persisent_state = common.Arena{ .memory = try std.heap.page_allocator.alloc(u8, 1024 * 1024 * 1024)};
+    var arena_persisent_state = common.Arena{ .memory = try std.heap.page_allocator.alloc(u8, 1024 * 1024 * 1024) };
     var arena_persistent = common.ArenaFreelist{ .arena = &arena_persisent_state };
 
     var buffer: [1024]u8 = undefined;
-    var stdout_file = std.fs.File.stdout();
-    var stdout_writer = stdout_file.writer(&buffer);
+    var stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &buffer);
     const stdout = &stdout_writer.interface;
-
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
 
     if (args.len < 3) {
         printUsage();
         return;
     }
 
-    const gp_str = args[1];
+    const gp_str = std.mem.span(args[1]);
 
     var pack = goosepack.Pack{};
 
     disk.arena_frame = &arena_frame;
     disk.arena_persistent = &arena_persistent;
-    goosepack.arena_frame = &arena_frame;
     goosepack.arena_persistent = &arena_persistent;
-    const pack_in_memory: ?[]u8 = disk.read_file_to_persistent_memory(gp_str) catch null;
+    const pack_in_memory: ?[]u8 = disk.read_file_to_persistent_memory(io, gp_str) catch null;
     if (pack_in_memory != null) {
         try goosepack.load(&pack, pack_in_memory.?);
     }
@@ -42,7 +44,7 @@ pub fn main() !void {
             return;
         }
         const action_str = args[2];
-        const action = std.meta.stringToEnum(Action, action_str) orelse {
+        const action = std.meta.stringToEnum(Action, std.mem.span(action_str)) orelse {
             std.log.err("Invalid action \"{s}\"\n", .{action_str});
             printUsage();
             return;
@@ -62,7 +64,7 @@ pub fn main() !void {
                         }
                     },
                     4 => {
-                        const id = try std.fmt.parseInt(usize, args[3], 10);
+                        const id = try std.fmt.parseInt(usize, std.mem.span(args[3]), 10);
                         if (id >= pack.entries.len) {
                             printUsage();
                             return;
@@ -119,8 +121,7 @@ pub fn main() !void {
                     printUsage();
                     return;
                 }
-                const resource_str = args[3];
-
+                const resource_str = std.mem.span(args[3]);
                 const res_type = std.meta.stringToEnum(goosepack.ResourceType, resource_str) orelse {
                     std.log.err("Invalid action \"{s}\"\n", .{resource_str});
                     printUsage();
@@ -131,41 +132,41 @@ pub fn main() !void {
                     std.log.err("Expected texture path", .{});
                     return;
                 }
-                const path = args[4];
+                const path = std.mem.span(args[4]);
 
                 if (res_type == .directory) {
                     var map = std.StringHashMap(struct {
                         type: goosepack.ResourceType,
                         name: []const u8,
                         srcs: []goosepack.EntrySrc,
-                    }).init(gpa);
-                    var worklist = std.ArrayList([]const u8){};
-                    try worklist.append(gpa, path);
+                    }).init(allocator);
+                    var worklist = std.ArrayList([]const u8).empty;
+                    try worklist.append(allocator, path);
 
                     while (worklist.pop()) |workitem| {
-                        const dir = try std.fs.cwd().openDir(workitem, .{ .iterate = true });
+                        const dir = try std.Io.Dir.cwd().openDir(io, workitem, .{ .iterate = true });
                         var it = dir.iterate();
-                        while (try it.next()) |e| {
-                            const item_path = try std.fs.path.join(gpa, &[_][]const u8{ workitem, e.name });
+                        while (try it.next(io)) |e| {
+                            const item_path = try std.fs.path.join(allocator, &[_][]const u8{ workitem, e.name });
                             switch (e.kind) {
                                 .file => {
                                     const basename = std.fs.path.stem(e.name);
                                     const extension = std.fs.path.extension(e.name);
-                                    const name = try std.fs.path.join(gpa, &[_][]const u8{ workitem, basename });
+                                    const name = try std.fs.path.join(allocator, &[_][]const u8{ workitem, basename });
 
                                     if (std.mem.eql(u8, extension, ".vert") or
                                         std.mem.eql(u8, extension, ".frag"))
                                     {
                                         // Shaders
                                         if (!map.contains(name)) {
-                                            const srcs = try gpa.alloc(goosepack.EntrySrc, 2);
+                                            const srcs = try allocator.alloc(goosepack.EntrySrc, 2);
                                             const exts = [2][]const u8{
                                                 ".vert",
                                                 ".frag",
                                             };
                                             for (srcs, 0..) |*s, i| {
                                                 s.* = .{
-                                                    .path = try std.mem.concat(gpa, u8, &[_][]const u8{
+                                                    .path = try std.mem.concat(allocator, u8, &[_][]const u8{
                                                         name,
                                                         exts[i],
                                                     }),
@@ -188,7 +189,7 @@ pub fn main() !void {
                                         {
                                             // Cubemap
                                             if (!map.contains(workitem)) {
-                                                const srcs = try gpa.alloc(goosepack.EntrySrc, 6);
+                                                const srcs = try allocator.alloc(goosepack.EntrySrc, 6);
                                                 const filenames = [6][]const u8{
                                                     "px.png",
                                                     "nx.png",
@@ -199,7 +200,7 @@ pub fn main() !void {
                                                 };
                                                 for (srcs, 0..) |*s, i| {
                                                     s.* = .{
-                                                        .path = try std.fs.path.join(gpa, &[_][]const u8{
+                                                        .path = try std.fs.path.join(allocator, &[_][]const u8{
                                                             workitem,
                                                             filenames[i],
                                                         }),
@@ -214,7 +215,7 @@ pub fn main() !void {
                                             }
                                         } else {
                                             // Texture
-                                            const srcs = try gpa.alloc(goosepack.EntrySrc, 1);
+                                            const srcs = try allocator.alloc(goosepack.EntrySrc, 1);
                                             srcs[0] = .{
                                                 .path = item_path,
                                             };
@@ -225,7 +226,7 @@ pub fn main() !void {
                                             });
                                         }
                                     } else if (std.mem.eql(u8, extension, ".ttf")) {
-                                        const srcs = try gpa.alloc(goosepack.EntrySrc, 1);
+                                        const srcs = try allocator.alloc(goosepack.EntrySrc, 1);
                                         srcs[0] = .{
                                             .path = item_path,
                                         };
@@ -236,7 +237,7 @@ pub fn main() !void {
                                         });
                                     } else if (std.mem.eql(u8, extension, ".ogg")) {
                                         // Audio
-                                        const srcs = try gpa.alloc(goosepack.EntrySrc, 1);
+                                        const srcs = try allocator.alloc(goosepack.EntrySrc, 1);
                                         srcs[0] = .{
                                             .path = item_path,
                                         };
@@ -247,7 +248,7 @@ pub fn main() !void {
                                         });
                                     } else if (std.mem.eql(u8, extension, ".glb")) {
                                         // Model
-                                        const srcs = try gpa.alloc(goosepack.EntrySrc, 1);
+                                        const srcs = try allocator.alloc(goosepack.EntrySrc, 1);
                                         srcs[0] = .{
                                             .path = item_path,
                                         };
@@ -259,7 +260,7 @@ pub fn main() !void {
                                     }
                                 },
                                 .directory => {
-                                    try worklist.append(gpa, item_path);
+                                    try worklist.append(allocator, item_path);
                                 },
                                 else => unreachable,
                             }
@@ -269,7 +270,7 @@ pub fn main() !void {
                     var it = map.iterator();
                     while (it.next()) |e| {
                         try stdout.print("adding {s:32}: {s:16}\n", .{ e.key_ptr.*, @tagName(e.value_ptr.type) });
-                        _ = try disk.load_resource(&pack, e.value_ptr.srcs, e.value_ptr.name, e.value_ptr.type);
+                        _ = try disk.load_resource(io, &pack, e.value_ptr.srcs, e.value_ptr.name, e.value_ptr.type);
                     }
                 } else {
                     const ext = std.fs.path.extension(path);
@@ -278,23 +279,23 @@ pub fn main() !void {
                     if (goosepack.entry_lookup(&pack, name)) |ei| {
                         const entry = pack.entries[ei.index];
                         std.log.info("always found \n{s}\n", .{entry.name});
-                        if (goosepack.has_entry_been_modified(entry)) {
+                        if (goosepack.has_entry_been_modified(io, entry)) {
                             std.log.info("modified", .{});
                             goosepack.entry_delete(&pack, entry);
-                            const srcs = try gpa.alloc(goosepack.EntrySrc, 1);
+                            const srcs = try allocator.alloc(goosepack.EntrySrc, 1);
                             srcs[0] = .{
                                 .path = path,
                             };
-                            _ = try disk.load_resource(&pack, srcs, name, res_type);
+                            _ = try disk.load_resource(io, &pack, srcs, name, res_type);
                         } else {
                             std.log.info("not modified", .{});
                         }
                     } else {
-                        const srcs = try gpa.alloc(goosepack.EntrySrc, 1);
+                        const srcs = try allocator.alloc(goosepack.EntrySrc, 1);
                         srcs[0] = .{
                             .path = path,
                         };
-                        _ = try disk.load_resource(&pack, srcs, name, res_type);
+                        _ = try disk.load_resource(io, &pack, srcs, name, res_type);
                     }
                 }
             },
@@ -303,7 +304,7 @@ pub fn main() !void {
                     printUsage();
                     return;
                 }
-                const id = try std.fmt.parseInt(usize, args[3], 10);
+                const id = try std.fmt.parseInt(usize, std.mem.span(args[3]), 10);
                 if (id >= pack.entries.len) {
                     std.log.err("{} not a valid entry id", .{id});
                     try stdout.print("{s:4} {s:32} {s:16} {s:16} {s:16}\n", .{ "id", "name", "type", "offset", "size" });
@@ -314,7 +315,7 @@ pub fn main() !void {
                     return;
                 }
 
-                try goosepack.entry_delete_child_tree(&pack, id);
+                try goosepack.entry_delete_child_tree(&pack, &arena_frame, id);
             },
             .update => {
                 if (pack_in_memory == null) {
@@ -322,14 +323,14 @@ pub fn main() !void {
                     return;
                 }
 
-                _ = try disk.collect_and_update_entries(&pack);
+                _ = try disk.collect_and_update_entries(io, &pack, &arena_frame);
             },
         }
     }
 
-    try disk.generate_pack_ids(&pack);
+    try disk.generate_pack_ids(io, &pack);
 
-    try goosepack.save_to_file(&pack, gp_str);
+    try goosepack.save_to_file(io, &pack, &arena_frame, gp_str);
 
     try stdout.flush();
 }
