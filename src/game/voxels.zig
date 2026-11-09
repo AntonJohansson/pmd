@@ -84,7 +84,7 @@ pub fn chunk_build_faces(ts: *ThreadState, chunk: *Chunk) void {
     var chunk_faces: *VoxelFaceArray = undefined;
     if (ts.id == 0) {
         chunk_faces = &ts.arena_frame.alloc(VoxelFaceArray, 1)[0];
-        chunk_faces.* = VoxelFaceArray.init(&ts.arena_frame, ts.num_threads);
+        chunk_faces.* = VoxelFaceArray.init(&ts.arena_frame, common.system.num_threads);
     }
     ts.share(&chunk_faces, 0);
 
@@ -102,7 +102,7 @@ pub fn chunk_build_faces(ts: *ThreadState, chunk: *Chunk) void {
         if (chunk.flags.built_faces == 1) {
             ts.arena_persistent.free(chunk.faces);
         }
-        chunk.faces = chunk_faces.collect(&ts.arena_persistent, ts);
+        chunk.faces = chunk_faces.collect(&ts.arena_persistent);
         chunk.flags.built_faces = 1;
     }
 }
@@ -248,7 +248,7 @@ pub fn draw(memory: *Memory, cmd: *draw_api.CommandBuffer, player: *common.Playe
                 .origin_z = chunk.origin[2],
                 .voxels = chunk.faces,
                 .dirty = chunk.flags.dirty,
-            }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+            }, hsv_to_rgb(.{80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)}));
             chunk.flags.dirty = 0;
         }
     }
@@ -268,7 +268,7 @@ pub fn draw(memory: *Memory, cmd: *draw_api.CommandBuffer, player: *common.Playe
                         .{ .x = 0, .y = 0, .z = 0 },
                     ),
                     .thickness = 5,
-                }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+                }, hsv_to_rgb(.{80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)}));
             }
         }
 
@@ -285,7 +285,7 @@ pub fn draw(memory: *Memory, cmd: *draw_api.CommandBuffer, player: *common.Playe
                     .{ .x = 0, .y = 0, .z = 0 },
                 ),
                 .thickness = 0.5,
-            }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+            }, hsv_to_rgb(.{80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)}));
         }
 
         // Draw selected region
@@ -311,7 +311,7 @@ pub fn draw(memory: *Memory, cmd: *draw_api.CommandBuffer, player: *common.Playe
                     .{ .x = 0, .y = 0, .z = 0 },
                 ),
                 .thickness = 1,
-            }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+            }, hsv_to_rgb(.{80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)}));
         }
 
         // draw block in hand
@@ -335,7 +335,7 @@ pub fn draw(memory: *Memory, cmd: *draw_api.CommandBuffer, player: *common.Playe
                         .{ .x = 0.05 * voxel_dim, .y = 0.05 * voxel_dim, .z = 0.05 * voxel_dim },
                         forward,
                     ),
-                }, hsv_to_rgb(80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)));
+                }, hsv_to_rgb(.{80.0 + 10.0 * (2.0 * 0.5 - 1.0), 0.8 + 0.2 * (2.0 * 0.5 - 1.0), 0.5 + 0.2 * (2.0 * 0.5 - 1.0)}));
             } else {
                 const colors = [5]primitive.Color{
                     .{},
@@ -694,7 +694,6 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
     return struct {
         const Self = @This();
         const Block = struct {
-            arena: *common.Arena,
             next: ?*Block = null,
             head: **Block = undefined,
             used: usize = 0,
@@ -709,11 +708,10 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
         fn push(self: **Block, t: T) void {
             if (self.*.used == self.*.memory.len) {
                 std.debug.assert(self.*.next == null);
-                const block = self.*.arena.alloc(Block, 1);
+                const block = common.thread.arena_frame.alloc(Block, 1);
                 self.*.next = @ptrCast(block.ptr);
                 self.*.head.* = self.*.next.?;
                 self.*.next.?.* = Block{
-                    .arena = self.*.arena,
                     .head = self.*.head,
                 };
                 self.* = self.*.next.?;
@@ -747,7 +745,6 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
                 const block = self.arena.alloc(Block, 1);
                 self.roots[i] = @ptrCast(block.ptr);
                 self.roots[i].* = Block{
-                    .arena = self.arena,
                     .head = &self.heads[i],
                 };
                 self.heads[i] = self.roots[i];
@@ -758,10 +755,7 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
             return self.heads[ts.id];
         }
 
-        fn collect(self: *Self, arena: *common.ArenaFreelist, ts: *ThreadState) []T {
-            var log = ts.log_memory.group_log(.game);
-            log.info("AAAAAAAA", .{});
-
+        fn collect(self: *Self, arena: *common.ArenaFreelist) []T {
             var len: usize = 0;
             for (self.roots) |r| {
                 var b: ?*Block = r;
@@ -773,8 +767,6 @@ fn MultiThreadedArray(comptime T: type, comptime blocksize: usize) type {
                     }
                 }
             }
-
-            log.info("BBBBBBBB", .{});
 
             const memory = arena.alloc(T, len);
             var index: usize = 0;

@@ -16,6 +16,12 @@ fn read_int(comptime T: type, bytes: []u8, offset: *usize) T {
     return @truncate(value);
 }
 
+pub fn read_type(comptime T: type, bytes: []u8, offset: *usize) T {
+    var value: T = undefined;
+    common.serialize.memory_read_type(&common.thread.arena_frame, T, bytes, offset, &value);
+    return value;
+}
+
 pub fn memory_read_type(arena: *common.Arena, comptime T: type, bytes: []u8, offset: *usize, value: anytype) void {
     const ti = @typeInfo(T);
     switch (ti) {
@@ -95,7 +101,7 @@ pub fn memory_write_type(builder: *StringBuilder, value: anytype) void {
         },
         .pointer => |ptr| {
             std.debug.assert(ptr.size == .slice);
-            try builder.write_int(u64, @as(u64, @intCast(value.len)));
+            builder.write_int(u64, @as(u64, @intCast(value.len)));
 
             if (@typeInfo(ptr.child) == .int or @typeInfo(ptr.child) == .float) {
                 const num_bytes = @sizeOf(ptr.child) * value.len;

@@ -14,39 +14,37 @@ const Profile = common.Profile;
 
 const draw_api = common.draw_api;
 
-var pause_index: usize = 0;
+var pause_index = std.atomic.Value(usize).init(0);
 
 pub fn draw(ts: *ThreadState, memory: *Memory, cmd: *CommandBuffer, input: *const Input) void {
     var profile = &ts.profile;
 
     const current_frame_index = ts.debug_frame_data.peek_index(1);
 
-    var pi = pause_index;
-
     if (ts.is_main()) {
         if (input.isset(.DebugFramePauseDataCollection)) {
             memory.debug_data_collection_paused = !memory.debug_data_collection_paused;
-            pi = current_frame_index;
+            pause_index.store(current_frame_index, .release);
         }
 
         if (memory.debug_data_collection_paused) {
             const data_len = ts.debug_frame_data.data.len;
             if (input.isset(.DebugFrameForward)) {
-                pi = (pi + 1) % data_len;
+                const pi = pause_index.load(.acquire);
+                pause_index.store((pi + 1) % data_len, .release);
             }
 
             if (input.isset(.DebugFrameBack)) {
-                pi = (pi + data_len - 1) % data_len;
+                const pi = pause_index.load(.acquire);
+                pause_index.store((pi + data_len - 1) % data_len, .release);
             }
         }
     }
 
-    if (pi != current_frame_index) {
-        profile = ts.debug_frame_data.data[pi].profile;
-    }
 
-    if (ts.is_main()) {
-        pause_index = pi;
+    const pi = pause_index.load(.acquire);
+    if (pi != current_frame_index and ts.debug_frame_data.data[pi].used) {
+        profile = ts.debug_frame_data.data[pi].profile;
     }
 
     //const frame_tsc = profile.block_last_frame.elapsed_tsc;
@@ -66,7 +64,6 @@ pub fn draw_fn_times(ts: *ThreadState, memory: *Memory, cmd: *CommandBuffer) voi
         //const frame = ts.profile.block_last_frame.elapsed_tsc;
         const sec = total.tsc_elapsed / ts.profile.timer_freq;
         ui.push_text_fmt(ts, "total time: {} s", .{sec});
-
 
         ui.begin_table(ts, ts.profile.map.anchor_values().len+1, 7);
         ui.push_text(ts, "block");
@@ -100,6 +97,7 @@ pub fn draw_frame_bar(ts: *ThreadState, memory: *Memory, cmd: *CommandBuffer, ta
     const size = 0.009;
     const border = 0.08 * size;
 
+    const pi = pause_index.load(.acquire);
     const black = Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
     const white = Color{ .r = 255, .g = 255, .b = 255, .a = 255 };
     const current_index = ts.debug_frame_data.peek_index(1);
@@ -116,10 +114,10 @@ pub fn draw_frame_bar(ts: *ThreadState, memory: *Memory, cmd: *CommandBuffer, ta
         const dist: f32 = @floatFromInt(ts.debug_frame_data.dist(current_index, i));
         const sat = if (d.used) 0.8 * (dist / @as(f32, @floatFromInt(ts.debug_frame_data.data.len))) else 0;
         const border_color = if (i == current_index) white else black;
-        const body_color = if (i == current_index) white else hsv_to_rgb(hue, 0.8, 0.1 + sat);
-        const height_scale: f32 = if (memory.debug_data_collection_paused and i == pause_index) 1.5 else 1.0;
+        const body_color = if (i == current_index) white else hsv_to_rgb(.{hue, 0.8, 0.1 + sat});
+        const height_scale: f32 = if (memory.debug_data_collection_paused and i == pi) 1.5 else 1.0;
         Draw.rectangle_outline(cmd, .{
-            .x = size + size * @as(f32, @floatFromInt(i)),
+            .x = (size + size * @as(f32, @floatFromInt(i))),
             .y = 0.8,
         }, .{
             .x = size,
@@ -143,7 +141,7 @@ fn draw_profile_data(cmd: *CommandBuffer, id: u8, profile: *Profile, max_frame_t
             .x = 0.0,
             .y = @as(f32, @floatFromInt(id)) * (height + 2 * border_bg) - border_bg,
         }, .{
-            .x = 1.0,
+            .x = ui.width(),
             .y = height + 2 * border_bg,
         }, border_bg, .{ .r = 20, .g = 20, .b = 20, .a = 200 }, .{ .r = 60, .g = 60, .b = 60, .a = 200 });
 
@@ -173,15 +171,15 @@ fn draw_profile_data(cmd: *CommandBuffer, id: u8, profile: *Profile, max_frame_t
             //const sat: f32 = @as(f32, @floatFromInt(tree_height + 1)) / 8.0;
             //const val: f32 = 0.8*start_x + 0.1;
 
-            const color = hsv_to_rgb(
+            const color = hsv_to_rgb(.{
                 hue,
                 0.9,
                 0.9,
                 //@min(sat, 0.9),
                 //@min(val, 0.9),
-            );
+            });
 
-            const width = @as(f32, @floatFromInt(v.tsc_last_elapsed_inclusive)) / @as(f32, @floatFromInt(max_frame_tsc));
+            const width = ui.width()*@as(f32, @floatFromInt(v.tsc_last_elapsed_inclusive)) / @as(f32, @floatFromInt(max_frame_tsc));
             Draw.rectangle_outline(cmd, .{
                 .x = start_x,
                 .y = @as(f32, @floatFromInt(id)) * (height + 2 * border_bg),

@@ -535,7 +535,7 @@ fn load_model(io: std.Io, pack: *goosepack.Pack, model: *res.Model, srcs: []goos
                         stack.append(.{
                             .node = child,
                             .parent_transform = transform,
-                            .parent_index = @intCast(nodes.len - 1),
+                            .parent_index = @intCast(index - 1),
                         });
                     }
                 }

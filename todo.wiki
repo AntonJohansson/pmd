@@ -1,3 +1,19 @@
+- Latest
+    - [ ] Fix networking
+    - [ ] Model AK
+    - [ ] Add AK
+    - [ ] Remodel pistol
+    - [ ] Emit shell casings
+    - [ ] Gun state
+    - [ ] Smokes
+    - [ ] HEs
+    - [ ] Shadows
+    - [ ] Remappable keys
+    - [ ] Send map data on join
+    - [ ] better body model
+    - [ ] MT game code
+    - [ ] Vary audio pitch
+
 - Get game playable (halo style ffa)
     - [ ] Test in different network conditions
     - [ ] Modify map multiplayer

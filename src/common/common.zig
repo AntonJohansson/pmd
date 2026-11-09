@@ -98,8 +98,15 @@ pub const InputName = enum(u8) {
     DebugShowData,
 };
 
+pub const ActiveState = enum(u2) {
+    low = 0b00,
+    rising = 0b01,
+    falling = 0b10,
+    high = 0b11,
+};
+
 pub const Input = struct {
-    active: [@typeInfo(InputName).@"enum".fields.len]bool = undefined,
+    active: [@typeInfo(InputName).@"enum".fields.len]ActiveState = undefined,
     cursor_delta: v2 = .{},
     scroll: f32 = 0,
 
@@ -110,7 +117,7 @@ pub const Input = struct {
         self.scroll = 0;
     }
 
-    pub fn setto(self: *@This(), t: InputName, state: bool) void {
+    pub fn setto(self: *@This(), t: InputName, state: ActiveState) void {
         self.active[@intFromEnum(t)] = state;
     }
 
@@ -119,10 +126,14 @@ pub const Input = struct {
     }
 
     pub fn unset(self: *@This(), t: InputName) void {
-        self.active[@intFromEnum(t)] = false;
+        self.active[@intFromEnum(t)] = .low;
     }
 
     pub fn isset(self: *const @This(), t: InputName) bool {
+        return self.active[@intFromEnum(t)] != .low;
+    }
+
+    pub fn get(self: *const @This(), t: InputName) ActiveState {
         return self.active[@intFromEnum(t)];
     }
 };
@@ -255,6 +266,7 @@ pub const Player = struct {
     dir: v3 = .{ .x = 1, .y = 0, .z = 0 },
     yaw: f32 = 0,
     pitch: f32 = 0,
+    pitch_vel: f32 = 0,
 
     health: f32 = 100.0,
 
@@ -373,6 +385,7 @@ pub const SoundType = enum(u8) {
 pub const Sound = struct {
     type: SoundType,
     pos: v3,
+    scale: f32 = 1.0,
     id_from: EntityId,
 };
 
@@ -406,12 +419,13 @@ pub const WindowItem = union(enum) {
 };
 
 pub const WindowPersistentState = struct {
-    x: f32 = 0,
-    y: f32 = 0,
-    w: f32 = 0,
-    h: f32 = 0,
+    pos: v2 = .{},
+    size: v2 = .{},
     moving: bool = false,
+    hover_top_bar: bool = false,
+    hover_body: bool = false,
     initialized: bool = false,
+    button_state: [64]u1 = .{0}**64,
 };
 
 pub const WindowState = struct {
@@ -419,9 +433,9 @@ pub const WindowState = struct {
     title: []const u8,
     cursor_x: f32 = 0,
     cursor_y: f32 = 0,
-    color: v3 = .{ .x = 60, .y = 0.5, .z = 0.5 },
-    hover: bool = false,
+    color: color.HSV = .{ 60, 0.5, 0.5 },
     in_cols: bool = false,
+    button_index: u8 = 0
 };
 
 pub const State = enum {
@@ -451,6 +465,8 @@ pub const ConfigSystem = struct {
     target_framerate: u16 = 165,
     memory: struct {
         asset_pack_bytes: usize = 1*GiB,
+        asset_temporary_net_bytes: usize = 16*MiB,
+        asset_persistent_net_bytes: usize = 16*MiB,
         thread_temporary_bytes: usize = 256*MiB,
         thread_persistent_bytes: usize = 256*MiB,
         thread_log_bytes: usize = 1*KiB,
@@ -479,6 +495,7 @@ pub const SystemState = struct {
     dt: f32 = undefined,
     frame_start_time: std.Io.Timestamp = undefined,
     dirs: Dirs = undefined,
+    aspect_ratio: f32 = 1.0,
 };
 
 pub const Dirs = struct {
@@ -567,6 +584,8 @@ pub const ThreadState = struct {
 pub const Memory = struct {
     tick: u64 = 0,
 
+    aspect_ratio: f32 = 0,
+
     active_state: State = .gameplay,
 
     textlen: *const fn (str: []const u8) usize = undefined,
@@ -574,7 +593,7 @@ pub const Memory = struct {
     // System, things not relevant to gamestate
 
     // @CLIENT-ONLY
-    animation_states: ArrayCircular(AnimationState) = undefined,
+    animation_states: ArrayCircular(AnimationList) = undefined,
 
     // TODO(anjo): Move?
     pack: goosepack.Pack = undefined,
@@ -655,7 +674,7 @@ pub const Memory = struct {
 };
 
 pub const DebugFrameData = struct {
-    profile: *Profile,
+    profile: *Profile = undefined,
     used: bool = false,
 };
 
@@ -670,6 +689,12 @@ pub const AnimationBlend = struct {
     num_animations: u2,
     additive: u1,
     tree: *TransformTree,
+};
+
+pub const AnimationList = struct {
+    tree: *TransformTree,
+    node_index: u8,
+    animations: BoundedArray(AnimationState, 4) = .{},
 };
 
 pub const AnimationState = struct {

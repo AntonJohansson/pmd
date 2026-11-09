@@ -3,7 +3,7 @@ const res = @import("res.zig");
 const gs = @import("common.zig");
 const goosepack = gs.goosepack;
 
-const cache_len = 64;
+const cache_len = 128;
 pub const ResourceCache = struct {
     indices: [cache_len]?usize = .{null} ** cache_len,
     resources: [cache_len]goosepack.Resource = undefined,

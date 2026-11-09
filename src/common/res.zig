@@ -19,10 +19,6 @@ const c = @cImport({
 // Generic
 //
 
-// Directories
-pub const dir_res = "./res/";
-pub const dir_audio = dir_res ++ "audio/";
-
 // Memory
 pub var arena: *common.Arena = undefined;
 
@@ -230,6 +226,7 @@ pub const TriggerType = enum {
     rising_or_falling_edge,
     state,
     toggle,
+    tristate,
 };
 
 pub const MouseScrollDir = enum {
@@ -393,40 +390,21 @@ const SoundType = common.SoundType;
 
 const SoundInfo = struct {
     path: []const u8,
-    samples: []f32 = undefined,
     volume: f32 = 1.0,
 };
 
-const sound_info_map = blk: {
-    var map: [@typeInfo(SoundType).Enum.fields.len]SoundInfo = undefined;
-    map[@intFromEnum(.death)] = .{ .path = dir_audio ++ "kill.ogg", .volume = 0.7 };
-    map[@intFromEnum(.slide)] = .{ .path = dir_audio ++ "slide.ogg", .volume = 0.7 };
-    map[@intFromEnum(.sniper)] = .{ .path = dir_audio ++ "sniper.ogg", .volume = 0.7 };
-    map[@intFromEnum(.weapon_switch)] = .{ .path = dir_audio ++ "switch.ogg", .volume = 0.2 };
-    map[@intFromEnum(.step)] = .{ .path = dir_audio ++ "step.ogg", .volume = 0.7 };
-    map[@intFromEnum(.pip)] = .{ .path = dir_audio ++ "pip.ogg", .volume = 0.7 };
-    map[@intFromEnum(.explosion)] = .{ .path = dir_audio ++ "explosion.ogg", .volume = 0.7 };
-    map[@intFromEnum(.doink)] = .{ .path = dir_audio ++ "doink.ogg", .volume = 0.7 };
+pub const sound_info_map = blk: {
+    var map: [@typeInfo(SoundType).@"enum".fields.len]SoundInfo = undefined;
+    map[@intFromEnum(SoundType.death)] = .{ .path = "res/audio/death", .volume = 0.7 };
+    map[@intFromEnum(SoundType.slide)] = .{ .path = "res/audio/slide", .volume = 0.7 };
+    map[@intFromEnum(SoundType.sniper)] = .{ .path = "res/audio/sniper", .volume = 0.7 };
+    map[@intFromEnum(SoundType.weapon_switch)] = .{ .path = "res/audio/switch", .volume = 0.2 };
+    map[@intFromEnum(SoundType.step)] = .{ .path = "res/audio/step", .volume = 10.0 };
+    map[@intFromEnum(SoundType.pip)] = .{ .path = "res/audio/pip", .volume = 0.7 };
+    map[@intFromEnum(SoundType.explosion)] = .{ .path = "res/audio/explosion", .volume = 0.7 };
+    map[@intFromEnum(SoundType.doink)] = .{ .path = "res/audio/doink", .volume = 0.7 };
     break :blk map;
 };
-
-pub fn load_audio(st: SoundType) !void {
-    const info = sound_info_map[@intFromEnum(st)];
-    const buf = try read_file_to_memory(info.path);
-
-    var err: c_int = undefined;
-    const vorbis = c.stb_vorbis_open_memory(buf.ptr, @intCast(buf.len), &err, null) orelse {
-        log.err("Failed to decode file: {s}", .{info.path});
-        return;
-    };
-    std.debug.assert(err == 0);
-
-    const vorbis_info = c.stb_vorbis_get_info(vorbis);
-    const num_samples: usize = @as(c_uint, @intCast(vorbis_info.channels)) * c.stb_vorbis_stream_length_in_samples(vorbis);
-    info.samples = arena.alloc(f32, num_samples);
-    const samples_per_channel = c.stb_vorbis_get_samples_float_interleaved(vorbis, vorbis_info.channels, &info.samples[0], @intCast(num_samples));
-    std.debug.assert(samples_per_channel * 2 == num_samples);
-}
 
 //
 // Model

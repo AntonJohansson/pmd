@@ -192,30 +192,32 @@ pub fn build(b: *std.Build) !void {
     // server
     //
 
-    //const server = b.addExecutable(.{
-    //    .name = "server",
-    //    .root_module = b.createModule(.{
-    //        .root_source_file = b.path("src/server/server.zig"),
-    //        .target = target,
-    //        .optimize = optimize,
-    //    }),
-    //    // TODO(anjo): temp
-    //    .use_lld = false,
-    //});
-    //server.root_module.addImport("common", common);
-    //server.root_module.addImport("net", net);
-    //server.root_module.addImport("pack-disk", pack_disk);
-    //server.root_module.addImport("build_options", build_options);
-    //server.linkLibC();
-    //b.installArtifact(server);
+    const server = b.addExecutable(.{
+        .name = "server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/server-main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        // TODO(anjo): temp
+        .use_lld = false,
+        .use_llvm = true,
+    });
+    server.root_module.addImport("common", common);
+    server.root_module.addImport("net", net);
+    server.root_module.addImport("pack-disk", pack_disk);
+    const server_install = b.addInstallArtifact(server, .{
+        .dest_dir = .{ .override = .{ .custom = "." } },
+    });  server.root_module.addImport("build_options", build_options);
+    b.getInstallStep().dependOn(&server_install.step);
 
-    //const run_server_cmd = b.addRunArtifact(server);
-    //run_server_cmd.step.dependOn(b.getInstallStep());
-    //if (b.args) |args| {
-    //    run_server_cmd.addArgs(args);
-    //}
-    //const run_server_step = b.step("run-server", "Run the server");
-    //run_server_step.dependOn(&run_server_cmd.step);
+    const run_server_cmd = b.addRunArtifact(server);
+    run_server_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_server_cmd.addArgs(args);
+    }
+    const run_server_step = b.step("run-server", "Run the server");
+    run_server_step.dependOn(&run_server_cmd.step);
 
     //
     // Run step

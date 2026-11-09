@@ -6,6 +6,9 @@ const ThreadState = common.ThreadState;
 const draw_api = common.draw_api;
 const primitive = common.primitive;
 const hsv_to_rgb = common.color.hsv_to_rgb;
+const color = common.color;
+
+const draw = @import("draw.zig");
 
 const math = common.math;
 const v2 = math.v2;
@@ -17,6 +20,11 @@ pub const h_margin = window_fontsize;
 pub const v_margin = window_fontsize;
 pub const table_pad = 1.0 / 120.0;
 pub const linespace = 1.0 / 240.0;
+
+const button_padding = v2{
+    .x = 0.015,
+    .y = 0.005,
+};
 
 const Cmd = struct {
     color: primitive.Color,
@@ -36,13 +44,23 @@ const Cmd = struct {
                 press,
                 release,
             } = .reset,
+            index: u8,
         },
     },
 };
 
+var input: *const common.Input = undefined;
 var cmdlist = common.IntrusiveList(Cmd){};
 var current_window: *common.WindowState = undefined;
 const CmdIt = common.IntrusiveList(Cmd).Item;
+
+pub fn width() f32 {
+    return common.memory.aspect_ratio;
+}
+
+pub fn set_input(i: *const common.Input) void {
+    input = i;
+}
 
 pub fn begin_window(ts: *ThreadState, memory: *Memory, window_type: common.WindowType, title: []const u8, x: f32, y: f32) bool {
     cmdlist = .{
@@ -51,18 +69,18 @@ pub fn begin_window(ts: *ThreadState, memory: *Memory, window_type: common.Windo
     const persistent = &memory.windows_persistent[@intFromEnum(window_type)];
     if (!persistent.initialized) {
         @branchHint(.unlikely);
-        persistent.x = x;
-        persistent.y = y;
-        persistent.w = 0.5;
-        persistent.h = 0.5;
+        persistent.pos.x = x;
+        persistent.pos.y = y;
+        persistent.size.x = 0.01;
+        persistent.size.y = 0.01;
         persistent.initialized = true;
     }
 
     memory.windows.append(.{
         .persistent = persistent,
         .title = title,
-        .cursor_x = 0 + h_margin / persistent.w,
-        .cursor_y = 1 - v_margin / persistent.h,
+        .cursor_x = 0 + h_margin / persistent.size.x,
+        .cursor_y = 1 - v_margin / persistent.size.y,
     });
     current_window = &memory.windows.tail.?.value;
 
@@ -79,19 +97,24 @@ pub fn end_window(memory: *Memory, cmd: *draw_api.CommandBuffer) void {
 }
 
 pub fn button(ts: *ThreadState, text: []const u8) bool {
-    const cstr = ts.arena_frame.alloc(u8, text.len + 1);
-    @memcpy(cstr[0..text.len], text);
-    cstr[text.len] = 0;
+    _ = ts;
+    const index = current_window.button_index;
+    current_window.button_index += 1;
+
+    const ctext = cstr(text);
     cmdlist.append(.{
-        .color = hsv_to_rgb(100, 0.5, 0.5),
+        .color = hsv_to_rgb(.{0,0,0}),
         .data = .{
             .button = .{
-                .text = @ptrCast(cstr[0..text.len]),
+                .text = ctext,
                 .state = .reset,
+                .index = index,
             },
         },
     });
-    return false;
+    const state = current_window.persistent.button_state[index];
+    current_window.persistent.button_state[index] = 0;
+    return state == 1;
 }
 
 pub fn begin_table(ts: *ThreadState, rows: usize, cols: usize) void {
@@ -113,23 +136,22 @@ pub fn begin_table(ts: *ThreadState, rows: usize, cols: usize) void {
 }
 
 pub fn push_text(ts: *ThreadState, text: []const u8) void {
-    const cstr = ts.arena_frame.alloc(u8, text.len + 1);
-    @memcpy(cstr[0..text.len], text);
-    cstr[text.len] = 0;
+    _ = ts;
+    const ctext = cstr(text);
     cmdlist.append(.{
-        .color = hsv_to_rgb(100, 0.5, 0.5),
+        .color = hsv_to_rgb(.{0,0,0}),
         .data = .{
-            .text = @ptrCast(cstr[0..text.len]),
+            .text = ctext,
         },
     });
 }
 
 pub fn push_text_fmt(ts: *ThreadState, comptime fmt: []const u8, args: anytype) void {
-    const cstr = common.cstr_fmt(&ts.arena_frame, fmt, args);
+    const ctext = common.cstr_fmt(&ts.arena_frame, fmt, args);
     cmdlist.append(.{
-        .color = hsv_to_rgb(100, 0.5, 0.5),
+        .color = hsv_to_rgb(.{0,0,0}),
         .data = .{
-            .text = cstr,
+            .text = ctext,
         },
     });
 }
@@ -178,8 +200,8 @@ fn cmd_size(memory: *Memory, max: *v2, it: *?*CmdIt, inhibit_newline: bool) v2 {
         },
         .button => |b| {
             const ret = v2{
-                .x = textwidth(memory, window_fontsize, b.text),
-                .y = window_fontsize + linespace,
+                .x = textwidth(memory, window_fontsize, b.text) + 2*button_padding.x,
+                .y = window_fontsize + 2*button_padding.y +  linespace,
             };
             max.* = .{
                 .x = @max(max.x, ret.x),
@@ -196,66 +218,102 @@ fn cmd_draw(memory: *Memory, cmdbuf: *draw_api.CommandBuffer, it: *?*CmdIt, wind
     }
     switch (it.*.?.value.data) {
         .text => |t| {
+            const col_fg = color.scale_v(window.color, 2.0);
             cmdbuf.push(primitive.Text{
                 .pos = .{
-                    .x = window.persistent.x + window.persistent.w * window.cursor_x + h_margin,
-                    .y = window.persistent.y + window.persistent.h * window.cursor_y - top_bar_height - window_fontsize - v_margin,
+                    .x = window.persistent.pos.x + window.persistent.size.x * window.cursor_x + h_margin,
+                    .y = window.persistent.pos.y + window.persistent.size.y * window.cursor_y - top_bar_height - window_fontsize - v_margin,
                 },
                 .str = t,
                 .size = window_fontsize,
-                .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
-                .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
+                .bg = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
+                .fg = hsv_to_rgb(col_fg),
             }, it.*.?.value.color);
 
             if (!inhibit_newline) {
-                window.cursor_y -= (window_fontsize + linespace) / window.persistent.h;
+                window.cursor_y -= (window_fontsize + linespace) / window.persistent.size.y;
             }
         },
         .table => |t| {
             for (0..t.rows) |r| {
                 for (0..t.cols) |c| {
                     it.* = it.*.?.next;
-                    window.cursor_x += (table_pad) / window.persistent.w;
+                    window.cursor_x += (table_pad) / window.persistent.size.x;
                     cmd_draw(memory, cmdbuf, it, window, true);
-                    window.cursor_x += (t.computed_col_widths[c] + table_pad) / window.persistent.w;
+                    window.cursor_x += (t.computed_col_widths[c] + table_pad) / window.persistent.size.x;
                 }
                 window.cursor_x = 0;
-                window.cursor_y -= (t.computed_row_heights[r] + linespace) / window.persistent.h;
+                window.cursor_y -= (t.computed_row_heights[r] + linespace) / window.persistent.size.y;
             }
         },
-        .button => |b| {
+        .button => |*b| {
             const s = v2{
-                .x = textwidth(memory, window_fontsize, b.text),
-                .y = (window_fontsize + linespace),
+                .x = textwidth(memory, window_fontsize, b.text) + 2*button_padding.x,
+                .y = window_fontsize + 2*button_padding.y,
             };
             const p = v2{
-                .x = window.persistent.x + window.persistent.w * window.cursor_x + h_margin,
-                .y = window.persistent.y + window.persistent.h * window.cursor_y - top_bar_height - window_fontsize - v_margin,
+                .x = window.persistent.pos.x + window.persistent.size.x * window.cursor_x + h_margin,
+                .y = window.persistent.pos.y + window.persistent.size.y * window.cursor_y - top_bar_height - window_fontsize - v_margin,
             };
-            var col = v4{ .x = 0, .y = 1, .z = 0, .w = 1 };
-            if (memory.cursor_pos.x >= p.x and
-                memory.cursor_pos.y >= p.y and
-                memory.cursor_pos.x <= p.x + s.x and
-                memory.cursor_pos.y <= p.y + s.y)
-            {
-                col = v4{ .x = 1, .y = 1, .z = 0, .w = 1 };
+            const p_button = v2.add(p, .{.x = 0, .y = -2*button_padding.y - linespace});
+            var col_fg: color.HSV = undefined;
+            var col_button_bg: color.HSV = undefined;
+            var col_button_fg: color.HSV = undefined;
+            // update button state
+            if (pos_in_rect(memory.cursor_pos, p_button, s)) {
+                if (input.get(.Interact) == .high) {
+                    b.state = .press;
+                } else if (input.get(.Interact) == .falling) {
+                    window.persistent.button_state[b.index] = 1;
+                    b.state = .release;
+                } else {
+                    b.state = .hover;
+                }
+            } else {
+                b.state = .reset;
             }
+            switch (b.state) {
+                .reset => {
+                    col_fg = color.scale_v(window.color, 2.0);
+                    col_button_bg = color.scale_v(window.color, 0.75);
+                    col_button_fg = color.scale_v(window.color, 1.25);
+                },
+                .hover => {
+                    col_fg = color.scale_v(window.color, 0.5);
+                    col_button_bg = color.scale_v(window.color, 1.25);
+                    col_button_fg = color.scale_v(window.color, 0.75);
+                },
+                .press => {
+                    col_fg = color.scale_v(window.color, 2.0);
+                    col_button_bg = color.scale_v(window.color, 0.50);
+                    col_button_fg = color.scale_v(window.color, 1.25);
+                },
+                .release => {
+                    col_fg = color.scale_v(window.color, 2.0);
+                    col_button_bg = color.scale_v(window.color, 0.50);
+                    col_button_fg = color.scale_v(window.color, 1.25);
+                },
+            }
+            draw.rectangle_outline(cmdbuf, p_button, s, 0.0008,
+                hsv_to_rgb(col_button_bg),
+                hsv_to_rgb(col_button_fg));
+
             cmdbuf.push(primitive.Text{
-                .pos = p,
+                .pos = v2.add(p, .{.x = button_padding.x, .y = -button_padding.y}),
                 .str = b.text,
                 .size = window_fontsize,
-                .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
-                .fg = col,
-            }, it.*.?.value.color);
+                .bg = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
+                .fg = hsv_to_rgb(col_fg),
+            }, .{.r = 0, .g = 0, .b = 0, .a = 0});
 
             if (!inhibit_newline) {
-                window.cursor_y -= (window_fontsize + linespace) / window.persistent.h;
+                window.cursor_y -= (s.y + linespace) / window.persistent.size.y;
             }
         },
     }
 }
 
-const top_bar_height = 0.01;
+const top_bar_height = 0.025;
 fn draw_window(memory: *Memory, cmd: *draw_api.CommandBuffer, window: *common.WindowState) void {
     var max: v2 = .{ .x = 0, .y = 0 };
     var it = cmdlist.head;
@@ -278,33 +336,54 @@ fn draw_window(memory: *Memory, cmd: *draw_api.CommandBuffer, window: *common.Wi
     //var x = if (parent) |p| p.x + p.cursor_x else 0;
     //var y = if (parent) |p| p.y + p.cursor_y else 0;
 
+    //const y_diff = @max(window.persistent.size.y, max.y) - window.persistent.size.y;
+    window.persistent.size.x = @max(window.persistent.size.x, max.x);
+    window.persistent.size.y = @max(window.persistent.size.y, max.y);
+
+    if (window.persistent.pos.x == 0 and window.persistent.pos.y == 0) {
+        window.persistent.pos.x = width()/2.0 - window.persistent.size.x/2.0;
+        window.persistent.pos.y = 1.0/2.0 - window.persistent.size.y/2.0;
+    }
+
     // background
     cmd.push(primitive.Rectangle{ .pos = .{
-        .x = window.persistent.x,
-        .y = window.persistent.y - (@max(window.persistent.h, max.y) - window.persistent.h),
+        .x = window.persistent.pos.x,
+        .y = window.persistent.pos.y,
     }, .size = .{
-        .x = @max(window.persistent.w, max.x),
-        .y = @max(window.persistent.h, max.y) - top_bar_height,
-    } }, hsv_to_rgb(
-        window.color.x,
-        window.color.y,
-        window.color.z,
-    ));
+        .x = window.persistent.size.x,
+        .y = window.persistent.size.y - top_bar_height,
+    } }, hsv_to_rgb(window.color));
 
-    const top_bar_color_factor: f32 = if (window.persistent.moving or window.hover) 0.8 else 1.5;
+    var top_bar_color_factor: f32 = 1.5;
+    var top_bar_title_factor: f32 = 0.5;
+    if (window.persistent.moving) {
+        top_bar_color_factor = 0.5;
+        top_bar_title_factor = 2.0;
+    } else if (window.persistent.hover_top_bar) {
+        top_bar_color_factor = 0.8;
+        top_bar_title_factor = 1.5;
+    }
 
     // top bar
+    const ctitle = cstr(window.title);
+    const pad = @max(0, 0.3*window_fontsize);
     cmd.push(primitive.Rectangle{ .pos = .{
-        .x = window.persistent.x,
-        .y = window.persistent.y + window.persistent.h - top_bar_height,
+        .x = window.persistent.pos.x,
+        .y = window.persistent.pos.y + window.persistent.size.y - top_bar_height,
     }, .size = .{
-        .x = @max(window.persistent.w, max.x),
+        .x = @max(window.persistent.size.x, max.x),
         .y = top_bar_height,
-    } }, hsv_to_rgb(
-        window.color.x,
-        window.color.y,
-        window.color.z * top_bar_color_factor,
-    ));
+    } }, hsv_to_rgb(color.scale_v(window.color, top_bar_color_factor)));
+    cmd.push(primitive.Text{
+        .pos = .{
+            .x = window.persistent.pos.x + 0.01,
+            .y = window.persistent.pos.y + window.persistent.size.y - top_bar_height + pad,
+        },
+        .str = ctitle,
+        .size = window_fontsize,
+        .bg = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
+        .fg = hsv_to_rgb(color.scale_v(window.color, top_bar_title_factor)),
+    }, .{.r = 0, .g = 0, .b = 0, .a = 0});
     window.cursor_x = 0;
     window.cursor_y = 1;
     //for (window.children.items) |item| {
@@ -333,32 +412,33 @@ fn draw_window(memory: *Memory, cmd: *draw_api.CommandBuffer, window: *common.Wi
     //}
 }
 
-pub fn window_mouse_collision(memory: *Memory, input: *const common.Input) void {
+pub fn window_mouse_collision(memory: *Memory) void {
     var maybew = memory.windows.head;
     while (maybew) |item| {
         var w = &item.value;
-        if (memory.cursor_pos.x >= w.persistent.x and
-            memory.cursor_pos.y >= w.persistent.y + w.persistent.h - top_bar_height and
-            memory.cursor_pos.x <= w.persistent.x + w.persistent.w and
-            memory.cursor_pos.y <= w.persistent.y + w.persistent.h)
-        {
-            w.hover = true;
-        } else {
-            w.hover = false;
-        }
-
-        if (input.isset(.Interact)) {
-            if (w.persistent.moving) {
-                w.persistent.moving = false;
-            } else if (w.hover) {
-                memory.window_moving_offset = v2.sub(.{ .x = w.persistent.x, .y = w.persistent.y }, memory.cursor_pos);
-                w.persistent.moving = true;
+        if (pos_in_rect(memory.cursor_pos, w.persistent.pos, w.persistent.size)) {
+            if (memory.cursor_pos.y > w.persistent.pos.y + w.persistent.size.y - top_bar_height) {
+                // hover over top bar
+                w.persistent.hover_top_bar = true;
+                if (input.get(.Interact) == .rising) {
+                    memory.window_moving_offset = v2.sub(.{ .x = w.persistent.pos.x, .y = w.persistent.pos.y }, memory.cursor_pos);
+                    w.persistent.moving = true;
+                }
+            } else {
+                // hover over window body
+                w.persistent.hover_top_bar = false;
+                w.persistent.hover_body = true;
             }
+        } else {
+            w.persistent.hover_top_bar = false;
+            w.persistent.hover_body = false;
         }
 
         if (w.persistent.moving) {
-            w.persistent.x = memory.cursor_pos.x + memory.window_moving_offset.x;
-            w.persistent.y = memory.cursor_pos.y + memory.window_moving_offset.y;
+            w.persistent.pos = v2.add(memory.cursor_pos, memory.window_moving_offset);
+            if (input.get(.Interact) == .falling) {
+                w.persistent.moving = false;
+            }
         }
 
         maybew = item.next;
@@ -373,4 +453,18 @@ fn textwidth(memory: *Memory, size: f32, str: [:0]const u8) f32 {
         w += scale * memory.font.chars[off].xadvance;
     }
     return w;
+}
+
+fn pos_in_rect(p: v2, r: v2, s: v2) bool {
+    return p.x >= r.x and
+           p.y >= r.y and
+           p.x <= r.x + s.x and
+           p.y <= r.y + s.y;
+}
+
+fn cstr(str: []const u8) [:0]const u8 {
+    const cs = common.thread.arena_frame.alloc(u8, str.len + 1);
+    @memcpy(cs[0..str.len], str);
+    cs[str.len] = 0;
+    return @ptrCast(cs[0..str.len]);
 }

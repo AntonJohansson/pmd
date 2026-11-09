@@ -43,8 +43,8 @@ pub const Text = struct {
     str: [:0]const u8,
     size: f32,
     cursor_index: ?usize = null,
-    bg: math.v4,
-    fg: math.v4,
+    bg: Color,
+    fg: Color,
 };
 
 pub const Line = struct {

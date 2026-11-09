@@ -73,7 +73,8 @@ pub fn BoundedArray(T: type, N: usize) type {
             std.debug.assert(index < self.used and self.used > 0);
             const tmp = self.data[index];
             const len = self.used-1 - index;
-            @memmove(self.data[index..index+len], self.data[index+1..index+len]);
+            @memmove(self.data[index..index+len], self.data[(index+1)%self.used..(index+1)%self.used+len]);
+            self.used -= 1;
             return tmp;
         }
 

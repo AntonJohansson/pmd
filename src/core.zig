@@ -21,6 +21,7 @@ pub var module: Module = undefined;
 
 var arena_pack_frame: gs.Arena = undefined;
 var arena_pack_state: gs.Arena = undefined;
+var arena_frame_net: gs.Arena = undefined;
 
 //
 // Module
@@ -42,7 +43,7 @@ pub const Module = gs.code_module.CodeModule(struct {
 // Exposed functions
 //
 
-pub fn init(args: std.process.Args.Vector, io: std.Io, f: *const ThreadLoopFn) void {
+pub fn init(args: std.process.Args.Vector, io: std.Io, f: *const ThreadLoopFn, conffile: []const u8) void {
     // save thread function so we can spawn more later
     thread_loop_fn = f;
 
@@ -53,7 +54,7 @@ pub fn init(args: std.process.Args.Vector, io: std.Io, f: *const ThreadLoopFn) v
     // Create log/config directories, the others should be created by the build system
     create_dir(io, system.dirs.log);
     create_dir(io, system.dirs.config);
-    const conf = config_load_or_create(io, &arena, "conf.zon") catch |err| {
+    const conf = config_load_or_create(io, &arena, conffile) catch |err| {
         std.log.err("Failed loading or creating config: {}", .{err});
         std.process.exit(1);
     };
@@ -63,7 +64,7 @@ pub fn init(args: std.process.Args.Vector, io: std.Io, f: *const ThreadLoopFn) v
     stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
 
     // Subsystems
-    var arena_res = gs.Arena{ .memory = page_alloc(1 * GiB) };
+    var arena_res = gs.Arena{ .memory = page_alloc(conf.memory.asset_pack_bytes) };
     gs.res.arena = &arena_res;
     defer page_free(arena_res.memory);
 
@@ -78,9 +79,9 @@ pub fn init(args: std.process.Args.Vector, io: std.Io, f: *const ThreadLoopFn) v
         disk.arena_persistent = &arena_freelist_pack_state;
     }
 
-    var arena_frame_net = gs.Arena{.memory = page_alloc(1*MiB)};
+    arena_frame_net = gs.Arena{.memory = page_alloc(conf.memory.asset_temporary_net_bytes)};
     defer page_free(arena_frame_net.memory);
-    var arena_persistent_state_net = gs.Arena{.memory = page_alloc(1*MiB)};
+    var arena_persistent_state_net = gs.Arena{.memory = page_alloc(conf.memory.asset_persistent_net_bytes)};
     defer page_free(arena_persistent_state_net.memory);
     var arena_persistent_net = gs.ArenaFreelist{.arena = &arena_persistent_state_net};
     net.arena_frame = &arena_frame_net;
@@ -88,7 +89,8 @@ pub fn init(args: std.process.Args.Vector, io: std.Io, f: *const ThreadLoopFn) v
     net.io = io;
 
     // Load asset pack
-    const pack_in_memory = gs.res.read_file_to_memory(io, "res.gp") catch null;
+    const res_path = gs.path_concat(&arena_pack_frame, &[_][]const u8{ "zig-out", "data", "res.gp" });
+    const pack_in_memory = gs.res.read_file_to_memory(io, res_path) catch null;
     global_memory.pack = gs.goosepack.Pack{};
     if (pack_in_memory) |bytes| {
         gs.goosepack.load(&global_memory.pack, bytes) catch {
@@ -115,8 +117,8 @@ pub fn init(args: std.process.Args.Vector, io: std.Io, f: *const ThreadLoopFn) v
     defer module.close();
 
     // Spawn threads
-    system.num_threads = 8;
-    system.target_fps = 165;
+    system.num_threads = conf.num_threads;
+    system.target_fps = conf.target_framerate;
     system.desired_frame_time = std.time.ns_per_s / system.target_fps;
     system.dt = 1.0 / @as(f32, @floatFromInt(system.target_fps));
 
@@ -125,7 +127,7 @@ pub fn init(args: std.process.Args.Vector, io: std.Io, f: *const ThreadLoopFn) v
     thread_join_range(0, system.num_threads - 1);
 }
 
-pub fn frame_begin(thread: *gs.ThreadState, memory: *gs.Memory, io: std.Io) void {
+pub fn frame_begin(thread: *gs.ThreadState, io: std.Io) void {
     if (system.stopped_threads > 0 and thread.is_main()) {
         // If threads were stopped last tick, join them now as they have
         // exited the main loop, and update thread count.
@@ -137,16 +139,16 @@ pub fn frame_begin(thread: *gs.ThreadState, memory: *gs.Memory, io: std.Io) void
         system.stopped_threads = 0;
     }
 
-    if (memory.tick == 10) {
-        if (thread.is_main()) {
-            thread_rescale(io, 4);
-        }
-    }
-    if (memory.tick == 20) {
-        if (thread.is_main()) {
-            thread_rescale(io, 12);
-        }
-    }
+    //if (memory.tick == 10) {
+    //    if (thread.is_main()) {
+    //        thread_rescale(io, 4);
+    //    }
+    //}
+    //if (memory.tick == 20) {
+    //    if (thread.is_main()) {
+    //        thread_rescale(io, 12);
+    //    }
+    //}
 
     gs.barrier.wait();
 
@@ -237,6 +239,7 @@ pub fn frame_end(thread: *gs.ThreadState, memory: *gs.Memory, io: std.Io) void {
     if (thread.is_main()) {
         gs.cache.free_evictions(&memory.cache);
         arena_pack_frame.top = 0;
+        arena_frame_net.top = 0;
     }
 
     // clear allocator

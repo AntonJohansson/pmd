@@ -319,16 +319,20 @@ fn player_height(p: *const Player) f32 {
 }
 
 fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input, dt: f32) void {
-    if (input.cursor_delta.x != 0 or input.cursor_delta.y != 0) {
-        player.yaw -= input.cursor_delta.x;
-        player.pitch += input.cursor_delta.y;
-        player.pitch = std.math.clamp(player.pitch, -std.math.pi / 2.0 + 0.1, std.math.pi / 2.0 - 0.1);
-        player.dir = v3{
-            .x = cos(player.yaw) * cos(player.pitch),
-            .y = sin(player.yaw) * cos(player.pitch),
-            .z = -sin(player.pitch),
-        };
-    }
+    // Unconditionally update player direction
+    player.yaw -= input.cursor_delta.x;
+    player.pitch += input.cursor_delta.y;
+    player.pitch = std.math.clamp(player.pitch, -std.math.pi / 2.0 + 0.1, std.math.pi / 2.0 - 0.1);
+    player.pitch += player.pitch_vel*dt;
+    player.dir = v3{
+        .x = cos(player.yaw) * cos(player.pitch),
+        .y = sin(player.yaw) * cos(player.pitch),
+        .z = -sin(player.pitch),
+    };
+
+    const sign = player.pitch_vel/@abs(player.pitch_vel);
+    const pitch_decel = 100;
+    player.pitch_vel = if (pitch_decel*dt < @abs(player.pitch_vel)) player.pitch_vel - pitch_decel*dt*sign else 0;
 
     const noclip = player.in_editor;
 
@@ -493,7 +497,7 @@ fn move(vars: *const Vars, memory: *Memory, player: *Player, input: *const Input
         player.camera.pos = v3.add(player.pos, offset);
         player.camera.dir = player.dir;
         player.camera.view = m4.view(player.camera.pos, player.camera.dir);
-        player.camera.proj = m4.projection(0.01, 100000.0, vars.aspect, fov);
+        player.camera.proj = m4.projection(0.01, 100000.0, memory.aspect_ratio, fov);
     }
 }
 
@@ -568,126 +572,79 @@ export fn update(ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *
     {
         const tree = &player.weapons[0].?.tree;
         if (input.isset(.bolt_back)) {
-            memory.animation_states.push().* = .{
-                .begin_time = time_seconds(memory),
-                .playback_speed = 1.5,
-                .animation = &sniper_bolt_back_animation,
-                .tree = tree,
-                .index = common.sniper.id_bolt,
-            };
+            animation_push(&sniper_bolt_back_animation, common.sniper.id_bolt, tree);
         }
         if (input.isset(.bolt_forward)) {
-            memory.animation_states.push().* = .{
-                .begin_time = time_seconds(memory),
-                .playback_speed = 1.5,
-                .animation = &sniper_bolt_forward_animation,
-                .tree = tree,
-                .index = common.sniper.id_bolt,
-            };
+            animation_push(&sniper_bolt_forward_animation, common.sniper.id_bolt, tree);
         }
 
         // TODO(anjo): @parallelize
         for (0..memory.animation_states.len) |i| {
-            const state = memory.animation_states.at(i);
-            transform_animation(state, time_seconds(memory));
-        }
+            const list = memory.animation_states.at(i);
 
-        // TODO(anjo): @SYNC
+            // update animation states
+            for (0..list.animations.used) |j| {
+                const state = &list.animations.slice()[j];
+                transform_animation(state, time_seconds(memory));
 
-        {
-            var i: usize = 0;
-            while (i < memory.animation_states.len) {
-                if (memory.animation_states.at(i).finished) {
-                    _ = memory.animation_states.swap_remove(i);
+                const node = &list.tree.nodes[list.node_index];
+                const tf = math.Transform{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
+                node.transform = m4.from_transform(tf);
+            }
+
+            // removed expired animations.
+            var j: usize = 0;
+            while (j < list.animations.used) {
+                const state = &list.animations.data[j];
+                if (state.finished) {
+                    _ = list.animations.ordered_remove(j);
                 } else {
-                    i += 1;
+                    j += 1;
                 }
             }
+
+            if (list.animations.used > 1) {
+                const len = list.animations.used;
+                const weights = common.thread.arena_frame.alloc(f32, len);
+                const tfs = common.thread.arena_frame.alloc(math.Transform, len);
+
+                var max_index: usize = 0;
+                var max_time: f32 = 0;
+                for (list.animations.slice(), 0..) |state, k| {
+                    if (state.end_time > max_time) {
+                        max_time = state.end_time;
+                        max_index = k;
+                    }
+                }
+
+                const t = time_seconds(memory);
+                for (list.animations.slice(), 0..) |state, k| {
+                    const half_len = 0.5 * (state.end_time - state.begin_time) / state.playback_speed;
+                    const middle = state.begin_time + half_len;
+                    tfs[k] = .{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
+                    if (k == 0) {
+                        weights[k] = 1.0 - (1.0 / (2.0 * half_len)) * (t - state.begin_time);
+                    } else if (k == max_index) {
+                        weights[k] = (1.0 / (2.0 * half_len)) * (t - state.begin_time);
+                    } else {
+                        weights[k] = 1.0 - (1.0 / half_len) * @abs(t - middle);
+                    }
+                }
+
+                const node = &list.tree.nodes[list.node_index];
+                const tf = math.transform_blend(tfs, weights);
+                node.transform = m4.from_transform(tf);
+            } else {
+                const state = list.animations.data[0];
+                const node = &list.tree.nodes[list.node_index];
+                const tf = math.Transform{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
+                node.transform = m4.from_transform(tf);
+            }
+
+            if (list.tree.flags.dirty == 1) {
+                update_dirty_nodes(list.tree);
+            }
         }
-
-        // TODO(anjo): FIX
-        //{
-        //    var anim_map = std.AutoHashMap(struct { res_id: common.res.Id, id: u8 }, std.ArrayList(*common.AnimationState)).init(memory.mem.frame);
-        //    for (memory.animation_states.items) |*state| {
-        //        if (anim_map.getPtr(.{ .res_id = state.tree.id, .id = state.index })) |arr| {
-        //            var inserted = false;
-        //            for (arr.items, 0..) |x, j| {
-        //                if (state.begin_time < x.begin_time) {
-        //                    arr.insert(memory.mem.frame, j, state) catch unreachable;
-        //                    inserted = true;
-        //                    break;
-        //                }
-        //            }
-        //            if (!inserted) {
-        //                arr.append(memory.mem.frame, state) catch unreachable;
-        //            }
-        //        } else {
-        //            var arr = std.ArrayList(*common.AnimationState){};
-        //            arr.append(memory.mem.frame, state) catch unreachable;
-        //            anim_map.put(.{ .res_id = state.tree.id, .id = state.index }, arr) catch unreachable;
-        //        }
-        //    }
-
-        //    const t = time_seconds(memory);
-
-        //    for (memory.animation_states.data, 0..) |*state, i| {
-        //        var tfs = BoundedSlice(math.Transform) {
-        //            .data = memory.arena_frame.alloc(math.Transform, memory.animation_states.len),
-        //        };
-
-        //        for ((i+1)..memory.animation_states.len) |j| {
-        //            const other_state = &memory.animation_states.data[j];
-
-        //        }
-        //    }
-
-        //    var it = anim_map.iterator();
-        //    while (it.next()) |pair| {
-        //        std.log.info("blending: {}", .{pair.value_ptr.items.len});
-
-        //        if (pair.value_ptr.items.len > 1) {
-        //            const weights = memory.mem.frame.alloc(f32, pair.value_ptr.items.len) catch unreachable;
-        //            const tfs = memory.mem.frame.alloc(math.Transform, pair.value_ptr.items.len) catch unreachable;
-
-        //            var max_index: usize = 0;
-        //            var max_time: f32 = 0;
-        //            for (pair.value_ptr.items, 0..) |state, j| {
-        //                if (state.end_time > max_time) {
-        //                    max_time = state.end_time;
-        //                    max_index = j;
-        //                }
-        //            }
-
-        //            for (pair.value_ptr.items, 0..) |state, j| {
-        //                const half_len = 0.5 * (state.end_time - state.begin_time) / state.playback_speed;
-        //                const middle = state.begin_time + half_len;
-        //                tfs[j] = .{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
-        //                if (j == 0) {
-        //                    weights[j] = 1.0 - (1.0 / (2.0 * half_len)) * (t - state.begin_time);
-        //                } else if (j == max_index) {
-        //                    weights[j] = (1.0 / (2.0 * half_len)) * (t - state.begin_time);
-        //                } else {
-        //                    weights[j] = 1.0 - (1.0 / half_len) * @abs(t - middle);
-        //                }
-        //            }
-        //            const node = &pair.value_ptr.items[0].tree.nodes[pair.key_ptr.id];
-        //            const tf = math.transform_blend(tfs, weights);
-        //            node.transform = m4.from_transform(tf);
-        //        } else {
-        //            const state = pair.value_ptr.items[0];
-        //            const node = &state.tree.nodes[pair.key_ptr.id];
-        //            const tf = math.Transform{ .position = state.translation, .rotation = state.rotation, .scale = state.scale };
-        //            node.transform = m4.from_transform(tf);
-        //        }
-        //    }
-
-        //    for (memory.animation_states.items) |*state| {
-        //        transform_animation(state, time_seconds(memory));
-        //        if (state.tree.flags.dirty == 1) {
-        //            update_dirty_nodes(state.tree);
-        //        }
-        //    }
-        //}
     }
 
     if (input.isset(.to_editor)) {
@@ -695,7 +652,7 @@ export fn update(ts: *ThreadState, vars: *const Vars, memory: *Memory, player: *
     }
 
     // Player movement
-    if (player.state == .alive) {
+    if (player.state == .alive and memory.active_state == .gameplay) {
         player.crouch = input.isset(.Crouch);
         player.sprint = input.isset(.Sprint);
         move(vars, memory, player, input, dt);
@@ -905,13 +862,11 @@ fn weaponUpdate(vars: *const Vars, memory: *Memory, player: *Player, input: *con
             .pistol => {
                 const start_offset = v3.add(v3.add(v3.scale(vars.pistol_len / 2 + vars.pistol_off_y, forward), v3.scale(vars.pistol_off_x, right)), v3.scale(vars.pistol_off_z, up));
 
-                const rrot = m4.modelWithRotations(.{}, .{ .x = 1, .y = 1, .z = 1 }, .{ .x = -std.math.pi / 4.0, .y = 0, .z = 0 });
-
                 var offset: v3 = .{};
                 if (weapon.state == .zoom) {
                     const t = weapon.cooldown / weapon.total_zoom_cooldown;
 
-                    const tmp_model = m4.mul(m4.modelFromXDir(.{}, .{ .x = 1, .y = 1, .z = 1 }, player.camera.dir), rrot);
+                    const tmp_model = m4.modelFromXDir(.{}, .{ .x = 1, .y = 1, .z = 1 }, player.camera.dir);
                     const aim_model = m4.mul(tmp_model, weapon.tree.nodes[weapon.id_aim].root_transform);
                     const zoom_end_offset = m4.modelTranslation(aim_model);
 
@@ -924,7 +879,7 @@ fn weaponUpdate(vars: *const Vars, memory: *Memory, player: *Player, input: *con
 
                 {
                     const aim_dir = player.camera.dir;
-                    weapon_model = m4.mul(m4.modelFromXDir(v3.add(player.camera.pos, offset), .{ .x = 1, .y = 1, .z = 1 }, aim_dir), rrot);
+                    weapon_model = m4.modelFromXDir(v3.add(player.camera.pos, offset), .{ .x = 1, .y = 1, .z = 1 }, aim_dir);
                 }
             },
             .nade => {},
@@ -944,14 +899,16 @@ fn weaponUpdate(vars: *const Vars, memory: *Memory, player: *Player, input: *con
                             .id_from = player.id,
                         });
                         fireSniperHitscan(memory, player);
+                        player.pitch_vel = -3;
                     },
                     .pistol => {
                         memory.new_sounds.append(.{
-                            .type = .sniper,
+                            .type = .step,
                             .pos = .{ .x = 0, .y = 0, .z = 0 },
                             .id_from = player.id,
                         });
                         firePistolHitscan(memory, player);
+                        player.pitch_vel = -1;
                     },
                     .nade => {
                         memory.new_sounds.append(.{
@@ -998,14 +955,16 @@ fn weaponUpdate(vars: *const Vars, memory: *Memory, player: *Player, input: *con
                                 .id_from = player.id,
                             });
                             fireSniperHitscan(memory, player);
+                            player.pitch_vel = -3;
                         },
                         .pistol => {
                             memory.new_sounds.append(.{
-                                .type = .sniper,
+                                .type = .step,
                                 .pos = .{ .x = 0, .y = 0, .z = 0 },
                                 .id_from = player.id,
                             });
                             firePistolHitscan(memory, player);
+                            player.pitch_vel = -1;
                         },
                         else => unreachable,
                     }
@@ -1018,7 +977,6 @@ fn weaponUpdate(vars: *const Vars, memory: *Memory, player: *Player, input: *con
                 }
             }
         },
-
         .reload => {
             weapon.cooldown -= dt;
             if (weapon.cooldown <= 0) {
@@ -1340,7 +1298,7 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
                 .{ .x = 20, .y = 20, .z = 20 },
                 .{ .x = 0, .y = 0, .z = 0 },
             ),
-        }, hsv_to_rgb(60.0, 0.5, 0.8));
+        }, hsv_to_rgb(.{60.0, 0.5, 0.8}));
         var prng = std.Random.DefaultPrng.init(0);
         const rand = prng.random();
 
@@ -1376,9 +1334,9 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
         for (memory.entities.slice()) |e| {
             var plane = e.plane;
             plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x, .y = global_plane_size.y, .z = 1 });
-            cmd.push(plane, hsv_to_rgb(10, 0.6, 0.7));
+            cmd.push(plane, hsv_to_rgb(.{10, 0.6, 0.7}));
             plane.model = m4.modelSetScale(e.plane.model, .{ .x = global_plane_size.x - 10, .y = global_plane_size.y - 10, .z = 2 });
-            cmd.push(plane, hsv_to_rgb(10, 0.6, 0.5));
+            cmd.push(plane, hsv_to_rgb(.{10, 0.6, 0.5}));
         }
 
         if (player.in_editor and memory.selected_entity != null) {
@@ -1493,23 +1451,18 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
         //            15, 0.75, 0.5);
         //    }
 
+        ui.set_input(input);
         if (memory.active_state == .pause) {
-            if (ui.begin_window(ts, memory, .pause, "wow", 0.25, 0.25)) {
-                ui.push_text(ts, "haha");
-                ui.push_text(ts, "abcarstratrastarst");
-                ui.push_text(ts, "haha");
-                ui.push_text(ts, "haha");
-                ui.push_text(ts, "haha");
-                _ = ui.button(ts, "button");
-                ui.push_text(ts, "haha");
-                ui.push_text(ts, "haha");
-                ui.push_text(ts, "haha");
-                //const index = memory.current_window.?;
-                //memory.windows.?.items[index].children.append(.{
-                //    .text = .{
-                //        .str = memory.console_input.slice(),
-                //    },
-                //}) catch unreachable;
+            if (ui.begin_window(ts, memory, .pause, "Paused", 0.25, 0.25)) {
+                if (ui.button(ts, "Return")) {
+                    log.info("- return", .{});
+                }
+                if (ui.button(ts, "Settings")) {
+                    log.info("- settings", .{});
+                }
+                if (ui.button(ts, "Quit")) {
+                    log.info("- quit", .{});
+                }
                 ui.end_window(memory, cmd);
             }
         }
@@ -1518,11 +1471,11 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
             // update cursor position
             memory.cursor_pos.x += input.cursor_delta.x;
             memory.cursor_pos.y -= input.cursor_delta.y;
-            memory.cursor_pos.x = std.math.clamp(memory.cursor_pos.x, 0, 1);
+            memory.cursor_pos.x = std.math.clamp(memory.cursor_pos.x, 0, memory.aspect_ratio);
             memory.cursor_pos.y = std.math.clamp(memory.cursor_pos.y, 0, 1);
 
             // check window collisions
-            ui.window_mouse_collision(memory, input);
+            ui.window_mouse_collision(memory);
 
             //for (memory.windows.?.items) |*win| {
             //    if (win.moving) {}
@@ -1541,14 +1494,14 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
             }, .size = .{
                 .x = 1,
                 .y = console_height,
-            } }, hsv_to_rgb(200, 0.5, 0.25));
+            } }, hsv_to_rgb(.{200, 0.5, 0.25}));
             cmd.push(primitive.Rectangle{ .pos = .{
                 .x = 0,
                 .y = 1 - console_height,
             }, .size = .{
                 .x = 1,
                 .y = ui.fontsize,
-            } }, hsv_to_rgb(200, 0.5, 0.1));
+            } }, hsv_to_rgb(.{200, 0.5, 0.1}));
 
             // TODO(anjo): Move console rendering to ui code
             //{
@@ -1579,8 +1532,8 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
                 },
                 .str = undefined,
                 .size = ui.fontsize,
-                .bg = .{ .x = 0, .y = 0, .z = 0, .w = 0 },
-                .fg = .{ .x = 0, .y = 1, .z = 0, .w = 1 },
+                .bg = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
+                .fg = .{ .r = 0, .g = 255, .b = 0, .a = 255 },
             };
 
             {
@@ -1589,22 +1542,22 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
                 const last_frametime = freq / elapsed;
                 text.str = common.cstr_fmt(&ts.arena_frame, "fps: {d:5.0}", .{last_frametime});
                 text.pos.x = 0.0;
-                cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
+                cmd.push(text, hsv_to_rgb(.{200, 0.75, 0.75}));
             }
 
             {
                 text.str = common.cstr_fmt(&ts.arena_frame, "speed: {d:5.0}", .{v3.len(memory.players.data[0].vel)});
-                text.pos.x = 1.0 - 0.3;
-                cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
+                text.pos.x = ui.width() - 0.3;
+                cmd.push(text, hsv_to_rgb(.{200, 0.75, 0.75}));
             }
 
             // ammo
             if (player.weapons[player.weapon_current]) |weapon| {
                 const size = 0.05;
                 text.str = common.cstr_fmt(&ts.arena_frame, "{}", .{weapon.ammo});
-                text.pos.x = 1.0 - 3 * size + size + size / 4.0;
+                text.pos.x = ui.width() - 3 * size + size + size / 4.0;
                 text.pos.y = 0.05;
-                cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
+                cmd.push(text, hsv_to_rgb(.{200, 0.75, 0.75}));
             }
 
             // killfeed
@@ -1635,7 +1588,7 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
                         text.str = ">";
                         text.pos.x = 1.0 - 3 * size + size + size / 4.0;
                         text.pos.y = 1.0 - (size - size / 4.0 + 1.5 * size * @as(f32, @floatFromInt(i)));
-                        cmd.push(text, hsv_to_rgb(200, 0.75, 0.75));
+                        cmd.push(text, hsv_to_rgb(.{200, 0.75, 0.75}));
                     }
                 }
             }
@@ -1653,7 +1606,7 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
                     .x = cursor_size,
                     .y = cursor_size,
                 },
-            }, hsv_to_rgb(350, 0.75, 0.75));
+            }, hsv_to_rgb(.{350, 0.75, 0.75}));
         } else {
             //const weapon = player.weapons[player.weapon_current];
             const zoom_fire = false; //weapon.type == .sniper and weapon.state == .zoom and weapon.cooldown / weapon.total_zoom_cooldown == 1.0;
@@ -1661,11 +1614,11 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
             // Crosshair
             if (memory.active_state == .pause) {
                 const cursor_thickness = 0.004;
-                const color = hsv_to_rgb(
+                const color = hsv_to_rgb(.{
                     (360.0 / 8.0) * @as(f32, @floatFromInt(player_id % 8)),
                     0.3,
                     0.9,
-                );
+                });
                 cmd.push(primitive.Rectangle{
                     .pos = .{
                         .x = 0.5 - cursor_thickness / 2.0,
@@ -1812,15 +1765,15 @@ export fn draw(ts: *ThreadState, vars: *const Vars, memory: *Memory, cmd: *draw_
 }
 
 fn playerColor(id: common.EntityId) Color {
-    return hsv_to_rgb(
+    return hsv_to_rgb(.{
         (360.0 / 8.0) * @as(f32, @floatFromInt(id % 8)),
         0.8,
         0.5,
-    );
+    });
 }
 
 fn playerRandomColor(id: common.EntityId, rand: std.Random) Color {
-    return hsv_to_rgb((360.0 / 8.0) * @as(f32, @floatFromInt(id % 8)) + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0));
+    return hsv_to_rgb(.{(360.0 / 8.0) * @as(f32, @floatFromInt(id % 8)) + 10.0 * (2.0 * rand.float(f32) - 1.0), 0.8 + 0.2 * (2.0 * rand.float(f32) - 1.0), 0.5 + 0.2 * (2.0 * rand.float(f32) - 1.0)});
 }
 
 fn drawCenteredLine(cmd: *draw_api.Buffer, start: v2, end: v2, thickness: f32, color: Color) void {
@@ -1838,7 +1791,7 @@ fn drawCenteredLine(cmd: *draw_api.Buffer, start: v2, end: v2, thickness: f32, c
 }
 
 fn drawGraph(cmd: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h: f32, s: f32, v: f32) void {
-    var bg = hsv_to_rgb(50.0, 0.75, 0.05);
+    var bg = hsv_to_rgb(.{50.0, 0.75, 0.05});
     bg.a = @intFromFloat(0.75 * 255.0);
     cmd.push(cmd, primitive.Rectangle{
         .pos = pos,
@@ -1866,7 +1819,7 @@ fn drawGraph(cmd: *draw_api.Buffer, g: *Graph, pos: v2, size: v2, margin: v2, h:
         const last_index = (g.top + g.data.len - 1) % g.data.len;
         const dist = (g.data.len + last_index - i) % g.data.len;
 
-        const color = hsv_to_rgb(h, s, v - 0.4 * @as(f32, @floatFromInt(dist)) / @as(f32, @floatFromInt(g.data.len)));
+        const color = hsv_to_rgb(.{h, s, v - 0.4 * @as(f32, @floatFromInt(dist)) / @as(f32, @floatFromInt(g.data.len))});
         if (i > 0) {
             drawCenteredLine(cmd, v2{ .x = last_x, .y = last_y }, v2{ .x = x, .y = y }, 2.0, color);
         }
@@ -1972,7 +1925,7 @@ fn from_model(memory: *Memory, name: []const u8, save_nodes: ?[]const TransformT
 
 }
 
-fn update_dirty_nodes(tree: *const TransformTree) void {
+fn update_dirty_nodes(tree: *TransformTree) void {
     std.debug.assert(tree.flags.dirty == 1);
     var found_dirty = false;
     for (tree.nodes[1..]) |*n| {
@@ -1980,9 +1933,12 @@ fn update_dirty_nodes(tree: *const TransformTree) void {
             found_dirty = true;
         }
         if (found_dirty) {
+            log.info("{} {}", .{n.parent, tree.nodes.len});
             n.root_transform = m4.mul(tree.nodes[n.parent].root_transform, n.transform);
         }
+        //n.flags.dirty = 0;
     }
+    //tree.flags.dirty = 0;
 }
 
 fn transform_tree(tree: *const TransformTree, transform: m4) void {
@@ -2175,4 +2131,31 @@ fn draw_model(cmd: *draw_api.CommandBuffer, tree: *const TransformTree, model_tr
     //        }, .{ .r = 255, .g = 255, .b = 255, .a = 255 });
     //    }
     //}
+}
+
+fn animation_push(animation: *common.res.Animation, index: u8, tree: *common.TransformTree) void {
+    var found_list: ?*common.AnimationList = null;
+    for (0..common.memory.animation_states.len) |i| {
+        const state = common.memory.animation_states.at(i);
+        if (state.node_index == index and state.tree.id == tree.id) {
+            found_list = state;
+            break;
+        }
+    }
+
+    if (found_list == null) {
+        found_list = common.memory.animation_states.push();
+        found_list.?.* = .{
+            .tree = tree,
+            .node_index = index,
+        };
+    }
+
+    found_list.?.animations.append(.{
+        .begin_time = time_seconds(common.memory),
+        .playback_speed = 1.5,
+        .animation = animation,
+        .tree = tree,
+        .index = index,
+    });
 }

@@ -194,6 +194,15 @@ pub const v4 = extern struct {
             .w = a.w + b.w,
         };
     }
+
+    pub fn mul(a: v4, b: v4) v4 {
+        return .{
+            .x = a.x * b.x,
+            .y = a.y * b.y,
+            .z = a.z * b.z,
+            .w = a.w * b.w,
+        };
+    }
 };
 
 //

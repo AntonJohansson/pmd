@@ -159,12 +159,12 @@ pub fn CircularArray(comptime T: type, comptime size: usize) type {
 
 pub fn CircularBuffer(comptime T: type, comptime max_len: usize) type {
     return struct {
-        data: [max_len]T = undefined,
+        data: [max_len]T = .{T{}}**max_len,
         top: usize = 0,
 
         pub fn push(self: *@This(), element: T) void {
-            self.top = (self.top + 1) % self.data.len;
             self.data[self.top] = element;
+            self.top = (self.top + 1) % self.data.len;
         }
 
         pub fn peek(self: *@This()) T {

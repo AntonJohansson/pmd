@@ -14,6 +14,7 @@ const stat = common.stat;
 const ArenaIntrusiveList = common.ArenaIntrusiveList;
 const ArenaFreelist = common.ArenaFreelist;
 const StringBuilder = common.serialize.StringBuilder;
+const read_type = common.serialize.read_type;
 
 pub var arena_frame: *common.Arena = undefined;
 pub var arena_persistent: *ArenaFreelist = undefined;
@@ -68,12 +69,12 @@ pub const Host = struct {
 
 pub fn bind(port: u16) !Host {
     const addr = try std.Io.net.IpAddress.parse("0.0.0.0", port);
-    const stream = try addr.connect(io, .{
+    const socket = try addr.bind(io, .{
         .mode = .dgram,
         .protocol = .udp,
     });
 
-    const fd = stream.socket.handle;
+    const fd = socket.handle;
     std.debug.assert(linux.fcntl(fd, linux.F.SETFL, linux.SOCK.NONBLOCK) >= 0);
 
     return Host{
@@ -132,6 +133,7 @@ pub fn pushMessage(index: PeerIndex, message: anytype) void {
         .reliable = false,
     });
     common.serialize.memory_write_type(&peer.frame_bytes.?, message);
+    peer.num_frame_packets += 1;
 }
 
 pub fn pushReliableMessage(index: PeerIndex, message: anytype) void {
@@ -221,6 +223,7 @@ const Peer = struct {
     packets_in_flight: bb.SequenceBuffer(PacketData, u16, message_receive_buffer_len) = .{},
     messages_in_flight: bb.SequenceBuffer(ReliableMessageInfo, u16, message_receive_buffer_len) = .{},
     frame_bytes: ?StringBuilder = null,
+    num_frame_packets: usize = 0,
 
     current_packet_id: u16 = 0,
     current_message_id: u16 = 0,
@@ -232,7 +235,7 @@ const Peer = struct {
     ack_bits: u32 = 0,
 };
 
-fn findPeerIndex(address: std.net.Address) ?PeerIndex {
+fn findPeerIndex(address: *const std.Io.net.IpAddress) ?PeerIndex {
     for (peers, 0..) |entry, i| {
         if (entry.state != .Disconnected and entry.address != null and entry.address.?.eql(address)) {
             return @intCast(i);
@@ -269,9 +272,8 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
 
     var received_data: BoundedArray(ReceivedData, 128) = .{};
     var offset: usize = 0;
-    while (input_buffer.hasData()) {
-        var packet_header: headers.BatchHeader = undefined;
-        common.serialize.memory_read_type(arena_frame, headers.BatchHeader, input_buffer.data, &offset, &packet_header);
+    while (offset < input_buffer.size()) {
+        const packet_header = read_type(headers.BatchHeader, input_buffer.data, &offset);
 
         if (input_buffer.size() < packet_header.size) {
             log.info("Received partial packet {}/{} bytes", .{ input_buffer.size(), packet_header.size });
@@ -318,9 +320,7 @@ pub fn receiveMessagesClient(host: *const Host, peer_index: PeerIndex) []Event {
         var i: u16 = 0;
         var message_offset: usize = 0;
         while (message_offset < data.data.len and i < data.packet_header.num_packets) : (i += 1) {
-            var header: headers.Header = undefined;
-            common.serialize.memory_read_type(arena_frame, headers.Header, data.data, &message_offset, &header);
-
+            const header = read_type(headers.Header, data.data, &message_offset);
             const size = packet_meta.getMessageSize(header.kind);
             const message = packet_meta.decode_kind(arena_frame, data.data, &message_offset, header.kind);
 
@@ -460,12 +460,12 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
         }
     }
 
+    input_buffer.clear();
     while (true) {
-        input_buffer.clear();
-
         const buf = input_buffer.remainingData();
         const nbytes = linux.recvfrom(fd, buf.ptr, buf.len, 0, @ptrCast(&their_sa), &sl);
-        if (nbytes <= 0) {
+        const address = std.Io.Threaded.addressFromPosix(@ptrCast(&their_sa));
+        if (nbytes == 0 or nbytes > buf.len) {
             break;
         }
         if (nbytes < @sizeOf(headers.BatchHeader)) {
@@ -474,10 +474,19 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
         }
         input_buffer.top += @intCast(nbytes);
 
-        const address = std.net.Address.initPosix(@ptrCast(&their_sa));
+        // @TEMP
+        for (0..@divTrunc(input_buffer.size(),8)) |i| {
+            var dw: u64 = 0;
+            for (0..8) |j| {
+                const v: u64 = @intCast(input_buffer.data[8*i+j]);
+                const s: u6 = @intCast(8*j);
+                dw |=  v << s;
+            }
+            log.info("  {x}", .{dw});
+        }
 
         // We reject as soon as possible
-        const peer_index = findPeerIndex(address) orelse blk: {
+        const peer_index = findPeerIndex(&address) orelse blk: {
             if (peers_used == peers.len) {
                 // Skip all the data from this peer
                 log.info("Ignoring connection attempt from {f} (no free connection slots)", .{address});
@@ -485,11 +494,11 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
             }
 
             log.info("No entry found for {f}, adding..", .{address});
-            const index = findAvailablePeerIndex();
-            log.info("  .. new index {}", .{index}) orelse {
+            const index = findAvailablePeerIndex() orelse {
                 log.err("  .. out of peer indices, skipping", .{});
                 continue;
             };
+            log.info("  .. new index {}", .{index});
             peers_used += 1;
             var peer = &peers[index];
             std.debug.assert(peer.state == .Disconnected);
@@ -506,9 +515,8 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
 
         log.info("received {} bytes from ({}) {f}", .{ nbytes, peer_index, address });
         var offset: usize = 0;
-        while (input_buffer.hasData()) {
-            var packet_header: headers.BatchHeader = undefined;
-            common.serialize.memory_read_type(arena_frame, headers.BatchHeader, input_buffer.data, &offset, &packet_header);
+        while (offset < input_buffer.size()) {
+            const packet_header = read_type(headers.BatchHeader, input_buffer.data, &offset);
 
             if (input_buffer.size() < packet_header.size) {
                 log.info("Received partial packet {}/{} bytes", .{ input_buffer.size(), packet_header.size });
@@ -519,7 +527,9 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
                 break;
             }
 
-            const data = input_buffer.data[offset..packet_header.size];
+            log.info("Reading from offset {}, {}, {}, {}", .{offset, input_buffer.size(), input_buffer.data.len, packet_header.size});
+            log.info("{}", .{packet_header});
+            const data = input_buffer.data[offset..offset+packet_header.size];
             offset += packet_header.size;
 
             received_data.append(ReceivedData{
@@ -546,27 +556,42 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
 
         // TODO(anjo): Verify packet here
 
-        var byte_view = bb.ByteView{
-            .data = data.data,
-        };
+        //var byte_view = bb.ByteView{
+        //    .data = data.data,
+        //};
 
         // iterate over all message headers
-        var i: u16 = 0;
-        while (byte_view.hasData() and i < data.packet_header.num_packets) : (i += 1) {
-            const header = byte_view.pop(headers.Header);
-            const size = packet_meta.getMessageSize(header.kind);
-
-            std.debug.assert(byte_view.hasSpaceFor(@intCast(size)));
-
+        var offset: usize = 0;
+        while (offset < data.data.len) {
+            const header = read_type(headers.Header, data.data, &offset);
+            log.info("   - header: {}", .{header});
+            const message = packet_meta.decode_kind(arena_frame, data.data, &offset, header.kind);
             if (!header.reliable or peer.received_messages.get(header.id) == null) {
                 peer.received_messages.set(header.id, ReceivedMessageInfo{
                     .kind = header.kind,
-                    .data = byte_view.data[byte_view.bottom .. byte_view.bottom + size],
+                    .data = message,
                 });
                 peers_with_data.append(data.peer_index);
             }
-            byte_view.advance(@intCast(size));
         }
+
+        //var i: u16 = 0;
+        //while (byte_view.hasData() and i < data.packet_header.num_packets) : (i += 1) {
+        //    const header = byte_view.pop(headers.Header);
+        //    const size = packet_meta.getMessageSize(header.kind);
+
+        //    log.info("   - size: {}, {}", .{header, size});
+        //    std.debug.assert(byte_view.hasSpaceFor(@intCast(size)));
+
+        //    if (!header.reliable or peer.received_messages.get(header.id) == null) {
+        //        peer.received_messages.set(header.id, ReceivedMessageInfo{
+        //            .kind = header.kind,
+        //            .data = byte_view.data[byte_view.bottom .. byte_view.bottom + size],
+        //        });
+        //        peers_with_data.append(data.peer_index);
+        //    }
+        //    byte_view.advance(@intCast(size));
+        //}
     }
 
     for (peers_with_data.slice()) |index| {
@@ -581,11 +606,13 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
             while (i < peer.received_messages.data.len) : (i += 1) {
                 if (peer.received_messages.isset(i)) {
                     const rmi = peer.received_messages.data[i];
-
                     switch (rmi.kind) {
                         .ConnectionRequest => {
                             const message: *align(1) packet.ConnectionRequest = @ptrCast(rmi.data.ptr);
-                            const server_salt = std.crypto.random.int(u64);
+                            // TODO(anjo): crypto
+                            var prng = std.Random.DefaultPrng.init(0);
+                            const rand = prng.random();
+                            const server_salt = rand.int(u64);
                             peer.salt = message.client_salt ^ server_salt;
 
                             pushMessage(index, packet.ConnectionChallenge{
@@ -650,11 +677,11 @@ pub fn receiveMessagesServer(fd: std.posix.socket_t) []Event {
     return events[0..num_events];
 }
 
-pub fn processServer(host: *const Host) void {
+pub fn processServer(host: *const Host, time: u64) void {
     for (peers, 0..) |peer, i| {
         if (peer.state == .Disconnected)
             continue;
-        process(host, @intCast(i));
+        process(host, @intCast(i), time);
     }
 }
 
@@ -720,10 +747,11 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex, time: u64) void {
             const s = item.value;
             std.log.info("writing frame w. {}/{} bytes", .{ s.used, s.data.len });
             packet_bytes.write_bytes(s.data[0..s.used]);
-            header.num_packets += s.num_writes;
             it = item.next;
         }
+        header.num_packets += @intCast(peer.num_frame_packets);
         peer.frame_bytes = null;
+        peer.num_frame_packets = 0;
     }
 
     //var i: u8 = 0;
@@ -734,13 +762,6 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex, time: u64) void {
     if (header.num_packets > 0) {
         const size_pre_header = packet_bytes.get_size();
 
-        var hb = packet_bytes.subbuilder();
-        common.serialize.memory_write_type(&hb, header);
-        hb.segments.join_right(&packet_bytes.segments);
-
-        const output_buffer = arena_frame.alloc(u8, hb.get_size());
-        hb.dump_to_buffer(output_buffer);
-
         header.salt = peer.salt;
         header.size = @intCast(size_pre_header);
         header.id = peer.current_packet_id;
@@ -748,6 +769,14 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex, time: u64) void {
         header.ack_bits = peer.ack_bits;
         header.last_packet_id = peer.last_incoming_acked_packet_id;
         log.info("  pushing packet {}", .{header.id});
+        log.info("  {}", .{header});
+
+        var hb = packet_bytes.subbuilder();
+        common.serialize.memory_write_type(&hb, header);
+        hb.segments.join_right(&packet_bytes.segments);
+
+        const output_buffer = arena_frame.alloc(u8, hb.get_size());
+        hb.dump_to_buffer(output_buffer);
 
         peer.current_packet_id +%= 1;
         peer.packets_in_flight.set(header.id, packet_data);
@@ -781,6 +810,16 @@ pub fn process(host: *const Host, peer_index: ?PeerIndex, time: u64) void {
                 log.info("Tried to send {}, actually sent {}", .{ data.len, bytes_sent });
             } else {
                 log.info("Sent {} bytes", .{bytes_sent});
+                // @TEMP
+                for (0..@divTrunc(bytes_sent,8)) |i| {
+                    var dw: u64 = 0;
+                    for (0..8) |j| {
+                        const v: u64 = @intCast(data[8*i+j]);
+                        const s: u6 = @intCast(8*j);
+                        dw |=  v << s;
+                    }
+                    log.info("  {x}", .{dw});
+                }
             }
             std.debug.assert(bytes_sent == data.len);
 

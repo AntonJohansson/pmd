@@ -22,7 +22,7 @@ const c = @cImport({
 pub fn main(init: std.process.Init) !void {
     const args = init.minimal.args.vector;
     const io = init.io;
-    core.init(args, io, thread_loop);
+    core.init(args, io, thread_loop, "conf-client.zon");
 }
 
 // Draw state
@@ -42,8 +42,8 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
     var window: ?*c.GLFWwindow = null;
 
     if (gs.thread.is_main()) {
-        gs.memory.animation_states = gs.ArrayCircular(gs.AnimationState){
-            .data = gs.thread.arena_persistent.alloc(gs.AnimationState, 64),
+        gs.memory.animation_states = gs.ArrayCircular(gs.AnimationList){
+            .data = gs.thread.arena_persistent.alloc(gs.AnimationList, 64),
         };
         gs.memory.windows.arena = &gs.thread.arena_frame;
 
@@ -52,7 +52,7 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
         //
 
         log.info("  running connect command", .{});
-        //cl.run("connect 127.0.0.1 9053");
+        cl.run("connect 127.0.0.1 9053");
 
         //
         // GLFW init
@@ -149,7 +149,7 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
     var old_mouse_pos: v2 = .{ .x = 0.0, .y = 0.0 };
 
     while (gs.thread.should_run.load(.acquire)) {
-        core.frame_begin(gs.thread, gs.memory, io);
+        core.frame_begin(gs.thread, io);
 
         if (gs.thread.is_main()) {
             gs.memory.windows.head = null;
@@ -171,7 +171,7 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
             }
 
             c.glfwGetWindowSize(window, &width, &height);
-            gs.config.vars.aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+            gs.memory.aspect_ratio = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
         }
 
         if (gs.thread.is_main()) {
@@ -442,7 +442,7 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
                                             if (server_index) |index| {
                                                 net.pushMessage(index, net.packet.PlayerJoinRequest{});
                                             }
-                                            log.info("Sending join request", .{});
+                                            log.info("Sending player join request", .{});
 
                                             if (!connected) {
                                                 const player = gs.Player{
@@ -568,7 +568,7 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
 
                             // Collect inputs if we're not in the console
                             {
-                                update_game_state(lp, &lp.input);
+                                update_game_state(window, lp, &lp.input);
                                 gs.memory.active_state = active_state(lp);
                                 const input_map = lp.input_maps.?.get(active_state(lp));
 
@@ -617,24 +617,34 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
                                     const last_action = lp.last_input_actions[i];
                                     switch (state.trigger) {
                                         .state => {
-                                            const active = action == .press;
+                                            const active: gs.ActiveState = if (action == .press) .high else .low;
                                             lp.input.setto(input_name, active);
                                         },
                                         .rising_edge => {
-                                            const active = last_action == .release and action == .press;
+                                            const active: gs.ActiveState = if (last_action == .release and action == .press) .rising else .low;
                                             lp.input.setto(input_name, active);
                                         },
                                         .falling_edge => {
-                                            const active = last_action == .press and action == .release;
+                                            const active: gs.ActiveState = if (last_action == .press and action == .release) .falling else .low;
                                             lp.input.setto(input_name, active);
                                         },
                                         .rising_or_falling_edge => {
-                                            const active = last_action != action;
+                                            const active: gs.ActiveState = if (last_action != action) .high else .low;
                                             lp.input.setto(input_name, active);
                                         },
                                         .toggle => {
-                                            const active = last_action == .release and action == .press;
-                                            lp.input.setto(input_name, active != lp.input.isset(input_name));
+                                            var active: gs.ActiveState = lp.input.get(input_name);
+                                            if (last_action == .release and action == .press) {
+                                                // .high == ~.low
+                                                active = @enumFromInt(~@intFromEnum(lp.input.get(input_name)));
+                                            }
+                                            lp.input.setto(input_name, active);
+                                        },
+                                        .tristate => {
+                                            const lobit: u2 = @intFromBool(action == .press);
+                                            const hibit: u2 = @intFromBool(last_action == .press);
+                                            const bits = (hibit << 1) | lobit;
+                                            lp.input.setto(input_name, @enumFromInt(bits));
                                         },
                                     }
                                     lp.last_input_actions[i] = action;
@@ -656,6 +666,14 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
                                     delta.y = @as(f32, @floatCast(ypos)) - old_mouse_pos.y;
                                     old_mouse_pos.x = @floatCast(xpos);
                                     old_mouse_pos.y = @floatCast(ypos);
+
+                                    if (gs.memory.active_state == .pause) {
+                                        // update cursor position
+                                        const fw: f32 = @floatFromInt(width);
+                                        const fh: f32 = @floatFromInt(height);
+                                        gs.memory.cursor_pos.x = gs.memory.aspect_ratio*old_mouse_pos.x/fw;
+                                        gs.memory.cursor_pos.y = 1.0 - old_mouse_pos.y/fh;
+                                    }
                                 }
 
                                 lp.input.cursor_delta = .{ .x = gs.config.vars.sensitivity * delta.x, .y = gs.config.vars.sensitivity * delta.y };
@@ -689,7 +707,7 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
 
                             const player = gs.findPlayerById(&gs.memory.players.data, lp.id.?);
 
-                            if (connected) {
+                            if (connected and active_state(lp) == .gameplay) {
                                 net.pushMessage(server_index.?, net.packet.PlayerUpdate{
                                     .tick = gs.memory.tick,
                                     .id = lp.id.?,
@@ -767,11 +785,15 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
 
                     // Move new_* to actual persistent buffers
                     for (gs.memory.new_sounds.slice()) |s| {
-                        _ = s;
-                        //playing_sounds.appendAssumeCapacity(.{
-                        //    .samples = sound_file_map[@intFromEnum(s.type)].samples,
-                        //    .volume = sound_file_map[@intFromEnum(s.type)].volume,
-                        //});
+                        const sound_info = gs.res.sound_info_map[@intFromEnum(s.type)];
+                        const entry = gs.goosepack.entry_lookup(&gs.memory.pack, sound_info.path) orelse {
+                            continue;
+                        };
+                        const audio = gs.cache.load(&gs.memory.cache, entry.index).audio;
+                        playing_sounds.append(.{
+                            .samples = audio.samples,
+                            .volume = gs.res.sound_info_map[@intFromEnum(s.type)].volume,
+                        });
                     }
                     gs.memory.new_sounds.clear();
 
@@ -891,8 +913,9 @@ fn thread_loop(module: *const core.Module, io: std.Io) void {
                     }
                 }
 
-                if (num_samples > 0)
+                if (num_samples > 0) {
                     _ = sa.push(&samples[0], @intCast(num_samples));
+                }
             }
         }
 
@@ -916,17 +939,17 @@ var host: net.Host = .{};
 var server_index: ?net.PeerIndex = null;
 pub fn connect(ip: []const u8, port: u16) void {
     // TODO(anjo):
+    var log = gs.thread.log_memory.group_log(.general);
     var prng = std.Random.DefaultPrng.init(0);
     const rand = prng.random();
+    log.info("Connecting to server {s}:{}", .{ ip, port });
     server_index = net.connect(&host, ip, port) catch |err| blk: {
-        var log = gs.thread.log_memory.group_log(.general);
-        log.err("Failed to connect to server {s}:{} {}", .{ ip, port, err });
+        log.err("Failed to connect to server {}", .{ err });
         break :blk null;
     };
     if (server_index) |server| {
-        _ = server;
-        _ = rand;
-        //net.pushMessage(server, packet.ConnectionRequest{ .client_salt = rand.int(u64) });
+        log.info("Sending connect request", .{});
+        net.pushMessage(server, net.packet.ConnectionRequest{ .client_salt = rand.int(u64) });
     }
 }
 
@@ -934,12 +957,13 @@ pub fn connect(ip: []const u8, port: u16) void {
 // State
 //
 
-pub fn update_game_state(lp: *LocalPlayer, input: *const gs.Input) void {
+pub fn update_game_state(window: ?*c.GLFWwindow, lp: *LocalPlayer, input: *const gs.Input) void {
     switch (active_state(lp)) {
         .gameplay => {
             if (input.isset(.to_editor)) {
                 push_state(lp, .editor);
             } else if (input.isset(.to_pause)) {
+                c.glfwSetInputMode(window, c.GLFW_CURSOR, c.GLFW_CURSOR_HIDDEN);
                 push_state(lp, .pause);
             } else if (input.isset(.to_console)) {
                 push_state(lp, .console);
@@ -956,6 +980,7 @@ pub fn update_game_state(lp: *LocalPlayer, input: *const gs.Input) void {
         },
         .pause => {
             if (input.isset(.to_pause)) {
+                c.glfwSetInputMode(window, c.GLFW_CURSOR, c.GLFW_CURSOR_DISABLED);
                 _ = pop_state(lp);
             } else if (input.isset(.to_console)) {
                 push_state(lp, .console);
@@ -1078,7 +1103,7 @@ fn setup_mouse_keyboard_input(im: *gs.res.InputMaps) void {
     pause.map_key(.ResetCamera, .rising_edge, .r);
     pause.map_key(.Save, .rising_edge, .o);
     pause.map_key(.Load, .rising_edge, .p);
-    pause.map_mouse_button(.Interact, .rising_edge, .b1);
+    pause.map_mouse_button(.Interact, .tristate, .b1);
     pause.map_mouse_button(.AltInteract, .rising_edge, .b2);
     pause.map_key(.to_console, .rising_edge, .grave_accent);
     pause.map_key(.to_pause, .rising_edge, .escape);

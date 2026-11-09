@@ -6,6 +6,7 @@ const draw_api = common.draw_api;
 const primitive = common.primitive;
 const Color = primitive.Color;
 const config = common.config;
+const color = common.color;
 
 const math = common.math;
 const v2 = math.v2;
@@ -1228,12 +1229,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                         .mvp = m4.transpose(m4.mul(vp, model)),
                     }));
                     sg.applyUniforms(1, sg.asRange(&UniformsFragment2d{
-                        .color = v4{
-                            .x = @as(f32, @floatFromInt(255)) / 255.0,
-                            .y = @as(f32, @floatFromInt(255)) / 255.0,
-                            .z = @as(f32, @floatFromInt(255)) / 255.0,
-                            .w = @as(f32, @floatFromInt(255)) / 255.0,
-                        },
+                        .color = v4{.x = 1.0, .y = 1.0, .z = 1.0, .w = 1.0},
                     }));
                     sg.draw(0, cube_indices.len, 1);
                     sg.endPass();
@@ -1272,7 +1268,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
             .Text => {
                 const text = b.pop(primitive.Text);
 
-                const x: f32 = 2.0 * text.pos.x - 1.0;
+                const x: f32 = 2.0 * text.pos.x/aspect - 1.0;
                 const y: f32 = 2.0 * text.pos.y - 1.0;
 
                 binding_textured_rectangle.views[0] = view_fontatlas;
@@ -1297,25 +1293,27 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     const scale: f32 = 2.0 * text.size / (@as(f32, @floatFromInt(font.size)) / atlas_h);
 
                     sg.applyUniforms(0, sg.asRange(&UniformsVertexAtlas{
-                        .vs_off = .{ .x = x + xoff + scale * char.xoff / (atlas_w*aspect), .y = y - scale * char.yoff / atlas_h - scale * vsy },
+                        .vs_off = .{ .x = x + (xoff + scale * char.xoff / (atlas_w))/aspect, .y = y - scale * char.yoff / atlas_h - scale * vsy },
                         .vs_scale = .{ .x = scale * vsx / aspect, .y = scale * vsy },
                     }));
                     sg.applyUniforms(1, sg.asRange(&UniformsFragmentAtlas{
                         .off = .{ .x = @as(f32, @floatFromInt(char.x0)) / atlas_w, .y = @as(f32, @floatFromInt(char.y0)) / atlas_h },
                         .scale = .{ .x = sx, .y = sy },
-                        .fg = text.fg,
-                        .bg = text.bg,
+                        .fg = color.rgb_to_v4(text.fg),
+                        .bg = color.rgb_to_v4(text.bg),
                     }));
 
                     sg.draw(0, textured_rectangle_indices.len, 1);
-                    xoff += scale * char.xadvance / (atlas_w*aspect);
+                    xoff += scale * char.xadvance / atlas_w;
                 }
             },
             .Rectangle => {
                 var r = b.pop(primitive.Rectangle);
                 r.size.x /= aspect;
                 const offset = v2{ .x = r.size.x / 2, .y = r.size.y / 2 };
-                const model = m4.model2d(v2.add(r.pos, offset), r.size);
+                r.pos.x /= aspect;
+                const pos = v2.add(r.pos, offset);
+                const model = m4.model2d(pos, r.size);
 
                 sg.applyPipeline(pipeline_2d);
                 sg.applyBindings(rectangle_bind);
@@ -1323,12 +1321,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                     .mvp = m4.transpose(m4.mul(vp, model)),
                 }));
                 sg.applyUniforms(1, sg.asRange(&UniformsFragment2d{
-                    .color = v4{
-                        .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                        .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                        .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                        .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                    },
+                    .color = color.rgb_to_v4(header.color),
                 }));
                 sg.draw(0, rectangle_indices.len, 1);
             },
@@ -1358,12 +1351,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                         .model = m4.transpose(cmd.transform),
                     }));
                     sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
-                        .color = v4{
-                            .x = material.base_color.x * @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                            .y = material.base_color.y * @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                            .z = material.base_color.z * @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                            .w = material.base_color.w * @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                        },
+                        .color = math.v4.mul(material.base_color, color.rgb_to_v4(header.color)),
                         .light_pos = light_pos,
                         .light_color = light_color,
                         .camera_pos = camera_pos,
@@ -1469,12 +1457,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                         .model = m4.transpose(cube.model),
                     }));
                     sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
-                        .color = v4{
-                            .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                            .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                            .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                            .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                        },
+                        .color = color.rgb_to_v4(header.color),
                         .light_pos = light_pos,
                         .light_color = light_color,
                         .camera_pos = camera_pos,
@@ -1527,12 +1510,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                             .model = m4.transpose(cube.model),
                         }));
                         sg.applyUniforms(1, sg.asRange(&UniformsFragment3d{
-                            .color = v4{
-                                .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                                .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                                .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                                .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                            },
+                            .color = color.rgb_to_v4(header.color),
                             .light_pos = light_pos,
                             .light_color = light_color,
                             .camera_pos = camera_pos,
@@ -1607,12 +1585,7 @@ pub fn process(b: *draw_api.CommandBuffer, width: u32, height: u32, num_views: u
                 };
                 sg.applyUniforms(0, sg.asRange(&uniforms_voxel));
                 sg.applyUniforms(1, sg.asRange(&UniformsFragmentVoxelChunk{
-                    .color = v4{
-                        .x = @as(f32, @floatFromInt(header.color.r)) / 255.0,
-                        .y = @as(f32, @floatFromInt(header.color.g)) / 255.0,
-                        .z = @as(f32, @floatFromInt(header.color.b)) / 255.0,
-                        .w = @as(f32, @floatFromInt(header.color.a)) / 255.0,
-                    },
+                    .color = color.rgb_to_v4(header.color),
                     .light_pos = light_pos,
                     .light_color = light_color,
                     .camera_pos = camera_pos,
